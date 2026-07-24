@@ -9,7 +9,7 @@ export default function ClearInputButton({ onCleared }) {
   return (
     <button
       onClick={handleClick}
-      className="px-2 py-1 text-[10px] rounded border border-neutral-600 text-neutral-400 hover:text-red-400 hover:border-red-500"
+      className="px-2 py-0.5 text-[10px] rounded border border-neutral-700 text-neutral-500 hover:text-red-400 hover:border-red-500"
     >
       Clear All
     </button>

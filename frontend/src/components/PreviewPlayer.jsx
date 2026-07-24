@@ -7,7 +7,7 @@ export default function PreviewPlayer() {
     <video
       ref={videoRef}
       controls
-      className="w-full max-h-56 bg-black rounded-md"
+      className="max-w-full max-h-full rounded"
       onTimeUpdate={e => setCurrentTime(e.target.currentTime)}
     />
   )

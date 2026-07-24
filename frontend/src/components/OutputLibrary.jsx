@@ -16,19 +16,21 @@ export default function OutputLibrary({ files, selectedOutput, onSelect }) {
   }
 
   return (
-    <div>
-      <h2 className="text-sm font-semibold text-neutral-300 mb-2">Results</h2>
-      <ul className="max-h-40 overflow-y-auto rounded-md border border-neutral-700 bg-neutral-800/50">
+    <div className="rounded-md bg-neutral-900 border border-neutral-800">
+      <div className="px-2.5 py-1.5 border-b border-neutral-800 text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
+        Exports
+      </div>
+      <ul className="max-h-36 overflow-y-auto divide-y divide-neutral-800">
         {files.map(f => (
           <li
             key={f.name}
             onClick={() => handleClick(f.name)}
-            className={`px-3 py-1.5 text-xs border-b border-neutral-700/50 last:border-0 cursor-pointer truncate ${f.name === selectedOutput ? 'bg-indigo-900/50' : 'hover:bg-neutral-700/50'}`}
+            className={`px-2.5 py-1.5 text-xs cursor-pointer truncate ${f.name === selectedOutput ? 'bg-indigo-900/40 text-indigo-300' : 'text-neutral-300 hover:bg-neutral-800/70'}`}
           >
             {f.name}
           </li>
         ))}
-        {files.length === 0 && <li className="px-3 py-2 text-xs text-neutral-500">No outputs yet</li>}
+        {files.length === 0 && <li className="px-2.5 py-3 text-xs text-neutral-600 text-center">No exports yet</li>}
       </ul>
     </div>
   )

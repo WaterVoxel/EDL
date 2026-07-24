@@ -1,10 +1,12 @@
 import { useState, useMemo } from 'react'
 import TimelineClip from './TimelineClip'
 import Playhead from './Playhead'
+import Ruler from './Ruler'
+import EdlTable from './EdlTable'
 import { useMedia } from '../../context/MediaContext'
-import { trim, splice, promoteOutputToInput } from '../../api'
+import { trim, splice, promoteOutputToInput, probe } from '../../api'
 
-const PPS = 40
+const PPS = 60
 
 export default function Timeline({ clips, setClips, onRenderComplete }) {
   const { currentTime, seekTo, videoRef, setActivePreview } = useMedia()
@@ -14,6 +16,7 @@ export default function Timeline({ clips, setClips, onRenderComplete }) {
 
   const selectedClip = clips.find(c => c.id === selectedId)
   const hasDirty = clips.some(c => c.dirty || (!c.renderedInputName && !(c.inSec === 0 && c.outSec === c.sourceDurationSec)))
+  const totalDuration = clips.reduce((sum, c) => sum + (c.outSec - c.inSec), 0)
 
   function handleSelect(clip) {
     setSelectedId(clip.id)
@@ -22,7 +25,11 @@ export default function Timeline({ clips, setClips, onRenderComplete }) {
       videoRef.current.src = url
       videoRef.current.currentTime = clip.inSec
     }
-    setActivePreview({ name: clip.sourceName, dir: 'input' })
+    // Fetch metadata so the info panel always reflects the selected clip,
+    // not just whatever was last clicked in the media/output bins.
+    probe(clip.sourceName, 'input').then(info => {
+      setActivePreview({ name: clip.sourceName, dir: 'input', info })
+    })
   }
 
   function handleTrim(id, inSec, outSec) {
@@ -78,7 +85,7 @@ export default function Timeline({ clips, setClips, onRenderComplete }) {
     let offset = 0
     for (const c of clips) {
       if (c.id === selectedClip.id) break
-      offset += (c.outSec - c.inSec) * PPS + 4
+      offset += (c.outSec - c.inSec) * PPS + 2
     }
     const clampedTime = Math.max(selectedClip.inSec, Math.min(currentTime, selectedClip.outSec))
     return offset + (clampedTime - selectedClip.inSec) * PPS
@@ -96,53 +103,65 @@ export default function Timeline({ clips, setClips, onRenderComplete }) {
         seekTo(seekTime)
         break
       }
-      offset += w + 4
+      offset += w + 2
     }
   }
 
   return (
-    <div className="mt-4">
-      <div className="flex items-center justify-between mb-2">
-        <h2 className="text-sm font-semibold text-neutral-300">Timeline</h2>
+    <div className="rounded-md bg-neutral-900 border border-neutral-800 flex flex-col">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-neutral-800">
+        <div className="flex items-center gap-3">
+          <h2 className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">Timeline</h2>
+          <span className="text-[10px] text-neutral-600">{clips.length} clip(s) · {totalDuration.toFixed(2)}s total</span>
+        </div>
         <button
           onClick={handleRenderSequence}
           disabled={rendering || clips.length === 0}
-          className="px-3 py-1 text-xs rounded bg-green-700 text-white hover:bg-green-600 disabled:bg-neutral-600 disabled:text-neutral-400"
+          className="px-3 py-1 text-xs font-medium rounded bg-emerald-600 text-white hover:bg-emerald-500 disabled:bg-neutral-700 disabled:text-neutral-500"
         >
-          {rendering ? 'Rendering...' : 'Render Sequence'}
+          {rendering ? 'Rendering…' : '▶ Render Sequence'}
         </button>
       </div>
 
       {clips.length === 0 ? (
-        <div className="flex items-center justify-center h-24 rounded-lg bg-neutral-900 border border-neutral-700 text-xs text-neutral-500">
-          Add clips from the input library to start editing
+        <div className="flex items-center justify-center h-28 text-xs text-neutral-600">
+          Add clips from the Media Bin to start editing
         </div>
       ) : (
-        <div
-          className="flex items-end gap-1 overflow-x-auto bg-neutral-900 rounded-lg p-2 h-24 relative"
-          onClick={handleTrackClick}
-        >
-          <Playhead leftPx={playheadPx} />
-          {clips.map((clip, i) => (
-            <TimelineClip
-              key={clip.id}
-              clip={clip}
-              pps={PPS}
-              index={i}
-              selected={clip.id === selectedId}
-              onSelect={handleSelect}
-              onTrim={handleTrim}
-              onDragStart={handleDragStart}
-              onDragOver={handleDragOver}
-              onDrop={handleDrop}
-            />
-          ))}
+        <div className="overflow-x-auto">
+          <div className="inline-block min-w-full">
+            <Ruler clips={clips} pps={PPS} />
+            <div
+              className="flex items-stretch gap-0.5 bg-neutral-950 px-2 py-2 h-20 relative"
+              onClick={handleTrackClick}
+            >
+              <Playhead leftPx={playheadPx} />
+              {clips.map((clip, i) => (
+                <TimelineClip
+                  key={clip.id}
+                  clip={clip}
+                  pps={PPS}
+                  index={i}
+                  selected={clip.id === selectedId}
+                  onSelect={handleSelect}
+                  onTrim={handleTrim}
+                  onDragStart={handleDragStart}
+                  onDragOver={handleDragOver}
+                  onDrop={handleDrop}
+                />
+              ))}
+            </div>
+          </div>
         </div>
       )}
 
       {hasDirty && (
-        <p className="mt-1 text-[10px] text-amber-400">Some clips have pending edits — click Render Sequence to apply.</p>
+        <p className="px-3 py-1.5 text-[10px] text-amber-400 border-t border-neutral-800">
+          ● Unrendered edits — click Render Sequence to apply
+        </p>
       )}
+
+      <EdlTable clips={clips} selectedId={selectedId} onSelect={handleSelect} />
     </div>
   )
 }

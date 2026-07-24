@@ -39,14 +39,14 @@ export default function TimelineClip({ clip, pps, selected, onSelect, onTrim, in
   const borderClass = clip.dirty
     ? 'border-dashed border-amber-500'
     : selected
-      ? 'border-indigo-500 ring-2 ring-indigo-500'
-      : 'border-neutral-600 hover:border-neutral-400'
+      ? 'border-indigo-400 ring-1 ring-indigo-400'
+      : 'border-neutral-700 hover:border-neutral-500'
 
   return (
     <div
       ref={startRef}
-      className={`relative flex-shrink-0 h-16 rounded-md bg-neutral-700 border cursor-pointer select-none overflow-hidden ${borderClass}`}
-      style={{ width: widthPx }}
+      className={`relative flex-shrink-0 h-full rounded border cursor-pointer select-none overflow-hidden bg-gradient-to-b from-neutral-700 to-neutral-800 ${borderClass}`}
+      style={{ width: Math.max(widthPx, 24) }}
       onClick={() => onSelect(clip)}
       draggable
       onDragStart={e => { e.dataTransfer.effectAllowed = 'move'; onDragStart(index) }}
@@ -55,18 +55,18 @@ export default function TimelineClip({ clip, pps, selected, onSelect, onTrim, in
     >
       {/* Left trim handle */}
       <div
-        className="absolute top-0 bottom-0 left-0 w-2 cursor-ew-resize hover:bg-indigo-400/40 z-10"
+        className="absolute top-0 bottom-0 left-0 w-1.5 cursor-ew-resize hover:bg-indigo-400/50 z-10"
         onPointerDown={e => handleEdgeDrag('left', e)}
       />
       {/* Right trim handle */}
       <div
-        className="absolute top-0 bottom-0 right-0 w-2 cursor-ew-resize hover:bg-indigo-400/40 z-10"
+        className="absolute top-0 bottom-0 right-0 w-1.5 cursor-ew-resize hover:bg-indigo-400/50 z-10"
         onPointerDown={e => handleEdgeDrag('right', e)}
       />
       {/* Label */}
-      <div className="absolute inset-0 flex flex-col items-center justify-center px-3 pointer-events-none">
-        <span className="text-[10px] text-neutral-300 truncate max-w-full">{clip.sourceName}</span>
-        <span className="text-[9px] text-neutral-500">{durationLabel}</span>
+      <div className="absolute inset-0 flex flex-col items-start justify-between px-2 py-1 pointer-events-none">
+        <span className="text-[9px] text-neutral-200 truncate max-w-full font-medium">{clip.sourceName}</span>
+        <span className="text-[9px] text-neutral-400 font-mono">{durationLabel}</span>
       </div>
     </div>
   )

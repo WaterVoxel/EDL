@@ -7,9 +7,7 @@ function formatBytes(bytes) {
 }
 
 export default function TechInfoPanel({ info }) {
-  if (!info) return null
-
-  const rows = [
+  const rows = info ? [
     ['File', info._name || '—'],
     ['Format', info.format_name || '—'],
     ['Duration', info.duration ? info.duration.toFixed(3) + 's' : '—'],
@@ -21,18 +19,27 @@ export default function TechInfoPanel({ info }) {
     ['Audio channels', info.audio_channels != null ? info.audio_channels : '—'],
     ['Bit rate', info.bit_rate ? Math.round(info.bit_rate / 1000) + ' kb/s' : '—'],
     ['File size', formatBytes(info.size_bytes)],
-  ]
+  ] : []
 
   return (
-    <div className="mt-2 p-2 rounded-md bg-neutral-800 border border-neutral-700 font-mono text-[11px]">
-      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
-        {rows.map(([k, v]) => (
-          <div key={k} className="contents">
-            <dt className="text-neutral-500">{k}</dt>
-            <dd className="text-neutral-300">{v}</dd>
-          </div>
-        ))}
-      </dl>
+    <div className="rounded-md bg-neutral-900 border border-neutral-800">
+      <div className="px-2.5 py-1.5 border-b border-neutral-800 text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
+        Media Info
+      </div>
+      <div className="p-2.5 font-mono text-[11px]">
+        {info ? (
+          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
+            {rows.map(([k, v]) => (
+              <div key={k} className="contents">
+                <dt className="text-neutral-500">{k}</dt>
+                <dd className="text-neutral-300 truncate">{v}</dd>
+              </div>
+            ))}
+          </dl>
+        ) : (
+          <p className="text-neutral-600">Select a clip to see its metadata.</p>
+        )}
+      </div>
     </div>
   )
 }
