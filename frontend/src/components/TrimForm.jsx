@@ -36,39 +36,37 @@ export default function TrimForm({ selectedClip, setClips }) {
   const disabled = !selectedClip
 
   return (
-    <div className="rounded-md border border-neutral-800 bg-neutral-900 p-3">
-      <h3 className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500 mb-2">Trim</h3>
-      {!selectedClip && <p className="text-[10px] text-neutral-600 mb-2">Select a clip on the timeline first.</p>}
-      <div className="flex items-center gap-2">
-        <input
-          type="number" step="0.01" min="0" placeholder="in" value={inVal}
-          onChange={e => setInVal(e.target.value)}
-          disabled={disabled}
-          className="w-16 px-2 py-1 text-xs rounded bg-neutral-950 border border-neutral-700 text-neutral-300 disabled:opacity-50"
-        />
-        <span className="text-[10px] text-neutral-500">to</span>
-        <input
-          type="number" step="0.01" min="0" placeholder="out" value={outVal}
-          onChange={e => setOutVal(e.target.value)}
-          disabled={disabled}
-          className="w-16 px-2 py-1 text-xs rounded bg-neutral-950 border border-neutral-700 text-neutral-300 disabled:opacity-50"
-        />
-        <button
-          onClick={apply}
-          disabled={disabled}
-          className="flex-1 px-2 py-1 text-xs rounded bg-indigo-600 text-white hover:bg-indigo-500 disabled:bg-neutral-700 disabled:text-neutral-500"
-        >
-          Apply
-        </button>
-        <button
-          onClick={reset}
-          disabled={disabled}
-          className="px-2 py-1 text-xs rounded border border-neutral-700 text-neutral-500 hover:text-neutral-300 disabled:opacity-50"
-        >
-          Reset
-        </button>
-      </div>
-      <p className="mt-2 text-[10px] text-neutral-600">Or drag the clip's edges directly on the timeline.</p>
+    <div className="flex items-center gap-2">
+      <span className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500 whitespace-nowrap">Trim</span>
+      <input
+        type="number" step="0.01" min="0" placeholder="in" value={inVal}
+        onChange={e => setInVal(e.target.value)}
+        disabled={disabled}
+        title="Or drag the clip's edges directly on the timeline"
+        className="w-14 px-2 py-1 text-xs rounded bg-neutral-950 border border-neutral-700 text-neutral-300 disabled:opacity-50"
+      />
+      <span className="text-[10px] text-neutral-500">–</span>
+      <input
+        type="number" step="0.01" min="0" placeholder="out" value={outVal}
+        onChange={e => setOutVal(e.target.value)}
+        disabled={disabled}
+        title="Or drag the clip's edges directly on the timeline"
+        className="w-14 px-2 py-1 text-xs rounded bg-neutral-950 border border-neutral-700 text-neutral-300 disabled:opacity-50"
+      />
+      <button
+        onClick={apply}
+        disabled={disabled}
+        className="px-2 py-1 text-xs rounded bg-indigo-600 text-white hover:bg-indigo-500 disabled:bg-neutral-700 disabled:text-neutral-500"
+      >
+        Apply
+      </button>
+      <button
+        onClick={reset}
+        disabled={disabled}
+        className="px-2 py-1 text-xs rounded border border-neutral-700 text-neutral-500 hover:text-neutral-300 disabled:opacity-50"
+      >
+        Reset
+      </button>
     </div>
   )
 }

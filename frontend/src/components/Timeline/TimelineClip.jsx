@@ -1,4 +1,4 @@
-import { clipHeadPx, clipMainPx, clipTailPx, clipRoundPx, clipTotalPx } from '../../clipMath'
+import { clipHeadPx, clipMainPx, clipTailPx, clipRoundPx, clipTotalPx, clipColor } from '../../clipMath'
 
 const MIN_CLIP_SEC = 0.1
 
@@ -8,6 +8,7 @@ export default function TimelineClip({ clip, pps, selected, onSelect, onTrim, in
   const tailPx = clipTailPx(clip, pps)
   const roundPx = clipRoundPx(clip, pps)
   const totalPx = clipTotalPx(clip, pps)
+  const color = clipColor(clip.id)
 
   const mainDurationLabel = (clip.outSec - clip.inSec).toFixed(2) + 's'
 
@@ -42,8 +43,8 @@ export default function TimelineClip({ clip, pps, selected, onSelect, onTrim, in
   const borderClass = clip.dirty
     ? 'border-dashed border-amber-500'
     : selected
-      ? 'border-indigo-400 ring-1 ring-indigo-400'
-      : 'border-neutral-700 hover:border-neutral-500'
+      ? `${color.border} ring-1 ${color.ring}`
+      : color.border
 
   return (
     <div
@@ -53,8 +54,9 @@ export default function TimelineClip({ clip, pps, selected, onSelect, onTrim, in
       onDragStart={e => { e.dataTransfer.effectAllowed = 'move'; onDragStart(index) }}
       onDragOver={e => { e.preventDefault(); onDragOver(index) }}
       onDrop={e => { e.preventDefault(); onDrop(index) }}
+      title="Drag to reorder"
     >
-      {/* Head hold segment — distinct color, represents a pending/rendered freeze-frame extension */}
+      {/* Head hold segment — only ever present on the sequence's first clip */}
       {headPx > 0 && (
         <div
           className="absolute top-0 bottom-0 left-0 rounded-l border border-fuchsia-500 bg-gradient-to-b from-fuchsia-700 to-fuchsia-900 flex flex-col items-center justify-center overflow-hidden cursor-pointer"
@@ -66,30 +68,30 @@ export default function TimelineClip({ clip, pps, selected, onSelect, onTrim, in
         </div>
       )}
 
-      {/* Main body — the trimmed source clip */}
+      {/* Main body — the trimmed source clip, color-coded per clip id */}
       <div
-        className={`absolute top-0 bottom-0 rounded overflow-hidden cursor-pointer bg-gradient-to-b from-neutral-700 to-neutral-800 border ${borderClass}`}
+        className={`absolute top-0 bottom-0 rounded overflow-hidden cursor-pointer bg-gradient-to-b ${color.grad} border ${borderClass}`}
         style={{ left: headPx, width: Math.max(mainPx, 24) }}
         onClick={() => onSelect(clip)}
       >
         <div
-          className="absolute top-0 bottom-0 left-0 w-1.5 cursor-ew-resize hover:bg-indigo-400/50 z-10"
+          className="absolute top-0 bottom-0 left-0 w-1.5 cursor-ew-resize hover:bg-white/30 z-10"
           onPointerDown={e => handleEdgeDrag('left', e)}
         />
         <div
-          className="absolute top-0 bottom-0 right-0 w-1.5 cursor-ew-resize hover:bg-indigo-400/50 z-10"
+          className="absolute top-0 bottom-0 right-0 w-1.5 cursor-ew-resize hover:bg-white/30 z-10"
           onPointerDown={e => handleEdgeDrag('right', e)}
         />
         <div className="absolute inset-0 flex flex-col items-start justify-between px-2 py-1 pointer-events-none">
-          <span className="text-[9px] text-neutral-200 truncate max-w-full font-medium">{clip.sourceName}</span>
-          <span className="text-[9px] text-neutral-400 font-mono">{mainDurationLabel}</span>
+          <span className="text-[9px] text-neutral-100 truncate max-w-full font-medium">{clip.sourceName}</span>
+          <span className="text-[9px] text-neutral-200 font-mono">{mainDurationLabel}</span>
         </div>
       </div>
 
-      {/* Tail hold segment */}
+      {/* Tail hold segment — only ever present on the sequence's last clip */}
       {tailPx > 0 && (
         <div
-          className="absolute top-0 bottom-0 rounded-r border border-fuchsia-500 bg-gradient-to-b from-fuchsia-700 to-fuchsia-900 flex flex-col items-center justify-center overflow-hidden cursor-pointer"
+          className="absolute top-0 bottom-0 border border-fuchsia-500 bg-gradient-to-b from-fuchsia-700 to-fuchsia-900 flex flex-col items-center justify-center overflow-hidden cursor-pointer"
           style={{ left: headPx + mainPx, width: tailPx }}
           onClick={() => onSelect(clip)}
         >
@@ -98,7 +100,7 @@ export default function TimelineClip({ clip, pps, selected, onSelect, onTrim, in
         </div>
       )}
 
-      {/* Round segment — Raise's auto round-up extension, always trails the clip */}
+      {/* Round segment — Raise's auto round-up extension, always trails the sequence's last clip */}
       {roundPx > 0 && (
         <div
           className="absolute top-0 bottom-0 rounded-r border border-amber-400 bg-gradient-to-b from-amber-600 to-amber-800 flex flex-col items-center justify-center overflow-hidden cursor-pointer"

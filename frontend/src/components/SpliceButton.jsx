@@ -1,4 +1,5 @@
 import { useMedia } from '../context/MediaContext'
+import { sanitizeHoldPlacement } from '../clipMath'
 
 const MIN_PART_SEC = 0.1
 
@@ -14,8 +15,9 @@ export default function SpliceButton({ selectedClip, setClips, onSelectId }) {
 
   function apply() {
     if (!canSplit) return
-    // Head/tail/round hold segments are anchored to the original clip's
-    // outer edges, so only the half that still touches that edge keeps them.
+    // Head/tail/round hold segments are anchored to the sequence's outer
+    // edges, so only the half that still touches that edge keeps them;
+    // sanitizeHoldPlacement enforces this afterward as a safety net.
     const left = {
       ...selectedClip,
       id: crypto.randomUUID(),
@@ -38,26 +40,26 @@ export default function SpliceButton({ selectedClip, setClips, onSelectId }) {
       if (idx === -1) return prev
       const next = [...prev]
       next.splice(idx, 1, left, right)
-      return next
+      return sanitizeHoldPlacement(next)
     })
     onSelectId(left.id)
   }
 
   return (
-    <div className="rounded-md border border-neutral-800 bg-neutral-900 p-3 flex flex-col">
-      <h3 className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500 mb-2">Splice</h3>
-      {!selectedClip && <p className="text-[10px] text-neutral-600 mb-2">Select a clip on the timeline first.</p>}
-      {selectedClip && (
-        <p className="text-[10px] text-neutral-500 mb-2">
-          Split at playhead ({splitTime.toFixed(2)}s){!canSplit && ' — move playhead inside the clip'}
-        </p>
+    <div className="flex items-center gap-2">
+      <span className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500 whitespace-nowrap">Splice</span>
+      {selectedClip ? (
+        <span className="text-[10px] text-neutral-500">at {splitTime.toFixed(2)}s{!canSplit && ' (move playhead inside clip)'}</span>
+      ) : (
+        <span className="text-[10px] text-neutral-600">select a clip</span>
       )}
       <button
         onClick={apply}
         disabled={!canSplit}
-        className="mt-auto px-3 py-1 text-xs rounded bg-sky-600 text-white hover:bg-sky-500 disabled:bg-neutral-700 disabled:text-neutral-500"
+        title="Split the selected clip into two clips at the playhead"
+        className="px-2 py-1 text-xs rounded bg-sky-600 text-white hover:bg-sky-500 disabled:bg-neutral-700 disabled:text-neutral-500"
       >
-        Split at Playhead
+        Split
       </button>
     </div>
   )

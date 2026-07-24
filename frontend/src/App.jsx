@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { listFiles, listOutputs, probe, trim, splice, holdFrame, promoteOutputToInput } from './api'
 import { MediaProvider, useMedia } from './context/MediaContext'
 import Dropzone from './components/Dropzone'
@@ -15,12 +15,17 @@ import SpliceButton from './components/SpliceButton'
 import ChatPanel from './components/ChatPanel'
 import Timeline from './components/Timeline/Timeline'
 
+const MIN_RIGHT_PANEL = 260
+const MAX_RIGHT_PANEL = 720
+
 function AppInner() {
   const [inputFiles, setInputFiles] = useState([])
   const [outputFiles, setOutputFiles] = useState([])
   const [timelineClips, setTimelineClips] = useState([])
   const [selectedId, setSelectedId] = useState(null)
   const [rendering, setRendering] = useState(false)
+  const [rightPanelWidth, setRightPanelWidth] = useState(320)
+  const resizingRef = useRef(false)
   const { activePreview } = useMedia()
 
   const selectedClip = timelineClips.find(c => c.id === selectedId) || null
@@ -86,7 +91,8 @@ function AppInner() {
         let currentName = trimResult.output
 
         // 2. Apply head hold: freeze the first frame (time 0 of the now-trimmed
-        // clip) for headHoldSec, extending total length by that amount.
+        // clip) for headHoldSec, extending total length by that amount. Only
+        // ever present on the sequence's first clip.
         if (clip.headHoldSec > 0) {
           const promoted = await promoteOutputToInput(currentName)
           if (promoted.error) { alert('Promote failed: ' + promoted.error); return }
@@ -97,6 +103,7 @@ function AppInner() {
 
         // 3. Apply tail hold: freeze the last frame for tailHoldSec. Re-probe
         // first since the clip's duration changed if a head hold was applied.
+        // Only ever present on the sequence's last clip.
         if (clip.tailHoldSec > 0) {
           const promoted = await promoteOutputToInput(currentName)
           if (promoted.error) { alert('Promote failed: ' + promoted.error); return }
@@ -109,7 +116,8 @@ function AppInner() {
         }
 
         // 4. Apply Raise's round-up hold: same mechanism as tail hold, always
-        // trails the clip so the sequence lands on a whole second.
+        // trails the sequence's last clip so the whole program's total
+        // duration lands on a whole second.
         if (clip.roundHoldSec > 0) {
           const promoted = await promoteOutputToInput(currentName)
           if (promoted.error) { alert('Promote failed: ' + promoted.error); return }
@@ -135,6 +143,26 @@ function AppInner() {
     } finally {
       setRendering(false)
     }
+  }
+
+  function startResize(e) {
+    e.preventDefault()
+    resizingRef.current = true
+    document.body.style.cursor = 'col-resize'
+
+    function onMove(ev) {
+      if (!resizingRef.current) return
+      const fromRight = window.innerWidth - ev.clientX
+      setRightPanelWidth(Math.max(MIN_RIGHT_PANEL, Math.min(MAX_RIGHT_PANEL, fromRight)))
+    }
+    function onUp() {
+      resizingRef.current = false
+      document.body.style.cursor = ''
+      document.removeEventListener('pointermove', onMove)
+      document.removeEventListener('pointerup', onUp)
+    }
+    document.addEventListener('pointermove', onMove)
+    document.addEventListener('pointerup', onUp)
   }
 
   const displayInfo = activePreview?.info ? { ...activePreview.info, _name: activePreview.name } : null
@@ -172,20 +200,24 @@ function AppInner() {
           <TechInfoPanel info={displayInfo} />
         </div>
 
-        {/* Center: Preview + Timeline + Chat */}
+        {/* Center: Preview + toolbar + Timeline + Chat */}
         <div className="flex-1 flex flex-col min-w-0">
-          <div className="flex-1 flex items-center justify-center bg-black p-4 min-h-0">
+          <div className="flex-1 min-h-[50vh] flex items-center justify-center bg-black p-4">
             <PreviewPlayer />
           </div>
-          <div className="grid grid-cols-3 gap-3 px-3 pt-3">
-            <HoldFrameForm selectedClip={selectedClip} setClips={setTimelineClips} />
+
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-3 py-2 border-y border-neutral-800 bg-neutral-900">
+            <HoldFrameForm clips={timelineClips} setClips={setTimelineClips} />
+            <div className="w-px h-4 bg-neutral-700" />
             <TrimForm selectedClip={selectedClip} setClips={setTimelineClips} />
+            <div className="w-px h-4 bg-neutral-700" />
             <ReverseForm selectedClip={selectedClip} onResult={handleEditResult} />
-          </div>
-          <div className="grid grid-cols-2 gap-3 px-3 pt-3">
-            <RaiseButton selectedClip={selectedClip} setClips={setTimelineClips} />
+            <div className="w-px h-4 bg-neutral-700" />
+            <RaiseButton clips={timelineClips} setClips={setTimelineClips} />
+            <div className="w-px h-4 bg-neutral-700" />
             <SpliceButton selectedClip={selectedClip} setClips={setTimelineClips} onSelectId={setSelectedId} />
           </div>
+
           <div className="p-3 shrink-0">
             <Timeline
               clips={timelineClips}
@@ -200,8 +232,18 @@ function AppInner() {
           </div>
         </div>
 
+        {/* Drag handle to resize the right panel */}
+        <div
+          onPointerDown={startResize}
+          className="w-1.5 shrink-0 cursor-col-resize bg-neutral-800 hover:bg-indigo-500 active:bg-indigo-500 transition-colors"
+          title="Drag to resize"
+        />
+
         {/* Right: Rendered output + media info */}
-        <div className="w-80 flex flex-col gap-3 p-3 border-l border-neutral-800 overflow-y-auto shrink-0">
+        <div
+          style={{ width: rightPanelWidth }}
+          className="flex flex-col gap-3 p-3 overflow-y-auto shrink-0"
+        >
           <OutputPanel files={outputFiles} />
         </div>
       </div>

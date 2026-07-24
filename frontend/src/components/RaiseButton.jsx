@@ -1,32 +1,35 @@
-import { clipBaseSec, roundUpAmount } from '../clipMath'
+import { sequenceBaseSec, roundUpAmount } from '../clipMath'
 
-export default function RaiseButton({ selectedClip, setClips }) {
-  const base = selectedClip ? clipBaseSec(selectedClip) : 0
-  const amount = selectedClip ? roundUpAmount(base) : 0
+// Raise rounds up the *whole sequence's* total duration, always by holding
+// the last frame of the last clip — never an individual clip in isolation,
+// since what matters is the final program length landing on a whole second.
+export default function RaiseButton({ clips, setClips }) {
+  const base = sequenceBaseSec(clips)
+  const amount = clips.length > 0 ? roundUpAmount(base) : 0
+  const lastClip = clips[clips.length - 1] || null
 
   function apply() {
-    if (!selectedClip || amount <= 0) return
+    if (!lastClip || amount <= 0) return
     setClips(prev => prev.map(c =>
-      c.id === selectedClip.id ? { ...c, roundHoldSec: amount, dirty: true } : c
+      c.id === lastClip.id ? { ...c, roundHoldSec: amount, dirty: true } : c
     ))
   }
 
   return (
-    <div className="rounded-md border border-neutral-800 bg-neutral-900 p-3 flex flex-col">
-      <h3 className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500 mb-2">Raise</h3>
-      {!selectedClip && <p className="text-[10px] text-neutral-600 mb-2">Select a clip on the timeline first.</p>}
-      {selectedClip && amount <= 0 && (
-        <p className="text-[10px] text-neutral-600 mb-2">Duration already whole ({base.toFixed(1)}s).</p>
-      )}
-      {selectedClip && amount > 0 && (
-        <p className="text-[10px] text-amber-400 mb-2">
-          Hold last frame {amount.toFixed(2)}s → {(base + amount).toFixed(0)}s total.
-        </p>
+    <div className="flex items-center gap-2">
+      <span className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500 whitespace-nowrap">Raise</span>
+      {clips.length === 0 ? (
+        <span className="text-[10px] text-neutral-600">no clips</span>
+      ) : amount <= 0 ? (
+        <span className="text-[10px] text-neutral-600">whole ({base.toFixed(1)}s)</span>
+      ) : (
+        <span className="text-[10px] text-amber-400">+{amount.toFixed(2)}s → {(base + amount).toFixed(0)}s</span>
       )}
       <button
         onClick={apply}
-        disabled={!selectedClip || amount <= 0}
-        className="mt-auto px-3 py-1 text-xs rounded bg-amber-600 text-white hover:bg-amber-500 disabled:bg-neutral-700 disabled:text-neutral-500"
+        disabled={amount <= 0}
+        title="Hold the last frame of the sequence to round its total duration up to the next whole second"
+        className="px-2 py-1 text-xs rounded bg-amber-600 text-white hover:bg-amber-500 disabled:bg-neutral-700 disabled:text-neutral-500"
       >
         Round Up
       </button>

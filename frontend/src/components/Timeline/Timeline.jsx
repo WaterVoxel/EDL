@@ -5,7 +5,7 @@ import Ruler from './Ruler'
 import EdlTable from './EdlTable'
 import { useMedia } from '../../context/MediaContext'
 import { probe } from '../../api'
-import { clipTotalSec, clipTotalPx, clipBaseSec, roundUpAmount, GAP_PX } from '../../clipMath'
+import { clipTotalSec, clipTotalPx, clipBaseSec, roundUpAmount, sanitizeHoldPlacement, GAP_PX } from '../../clipMath'
 
 const PPS = 60
 
@@ -41,7 +41,9 @@ export default function Timeline({ clips, setClips, selectedId, onSelectId, hasD
       const next = [...prev]
       const [moved] = next.splice(dragFromRef.current, 1)
       next.splice(targetIdx, 0, moved)
-      return next
+      // Reordering can move a clip that held a head/tail/round segment
+      // away from the sequence's outer edge, so re-anchor those segments.
+      return sanitizeHoldPlacement(next)
     })
     dragFromRef.current = null
   }

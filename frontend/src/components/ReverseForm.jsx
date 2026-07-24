@@ -21,21 +21,21 @@ export default function ReverseForm({ selectedClip, onResult }) {
   }
 
   return (
-    <div className="rounded-md border border-neutral-800 bg-neutral-900 p-3">
-      <h3 className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500 mb-2">Reverse</h3>
-      {!selectedClip && <p className="text-[10px] text-neutral-600 mb-2">Select a clip on the timeline first.</p>}
+    <div className="flex items-center gap-2">
+      <span className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500 whitespace-nowrap">Reverse</span>
+      {!selectedClip && <span className="text-[10px] text-neutral-600">select a clip</span>}
       {warning && (
-        <div className="mb-2 p-2 text-[10px] rounded bg-amber-900/30 border border-amber-600 text-amber-300">
-          {warning}
-          <button type="button" onClick={() => run(true)} className="ml-2 underline">Confirm anyway</button>
+        <div className="flex items-center gap-1 text-[10px] text-amber-300">
+          <span>{warning}</span>
+          <button type="button" onClick={() => run(true)} className="underline shrink-0">Confirm</button>
         </div>
       )}
       <button
         onClick={() => run(false)}
         disabled={!selectedClip || loading}
-        className="w-full px-3 py-1 text-xs rounded bg-indigo-600 text-white hover:bg-indigo-500 disabled:bg-neutral-700 disabled:text-neutral-500"
+        className="px-2 py-1 text-xs rounded bg-indigo-600 text-white hover:bg-indigo-500 disabled:bg-neutral-700 disabled:text-neutral-500"
       >
-        {loading ? 'Processing...' : 'Reverse'}
+        {loading ? '…' : 'Reverse'}
       </button>
     </div>
   )
