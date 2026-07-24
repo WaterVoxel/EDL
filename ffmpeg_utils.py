@@ -59,6 +59,7 @@ def get_video_info(path):
     audio_codec = None
     audio_sample_rate = None
     audio_channels = None
+    audio_bit_rate = None
     nb_frames = None
     for stream in data.get("streams", []):
         if stream.get("codec_type") == "video" and width is None:
@@ -77,6 +78,7 @@ def get_video_info(path):
             audio_codec = stream.get("codec_name")
             audio_sample_rate = stream.get("sample_rate")
             audio_channels = stream.get("channels")
+            audio_bit_rate = stream.get("bit_rate")
     browser_playable = (
         video_codec in BROWSER_SAFE_VIDEO_CODECS
         and audio_codec in BROWSER_SAFE_AUDIO_CODECS
@@ -95,12 +97,42 @@ def get_video_info(path):
         "audio_codec": audio_codec,
         "audio_sample_rate": int(audio_sample_rate) if audio_sample_rate else None,
         "audio_channels": audio_channels,
+        "audio_bit_rate": int(audio_bit_rate) if audio_bit_rate else None,
         "browser_playable": browser_playable,
         "format_name": fmt.get("format_long_name") or fmt.get("format_name"),
         "size_bytes": int(fmt.get("size")) if fmt.get("size") else os.path.getsize(path),
         "bit_rate": int(fmt.get("bit_rate")) if fmt.get("bit_rate") else None,
         "nb_frames": nb_frames,
     }
+
+
+MIN_AUDIO_BITRATE = 192000
+
+
+def lossless_encode_args(source_info):
+    """-c:v/-c:a args for rendered output: mathematically lossless video,
+    and AAC audio matched to (never worse than) the source's bitrate/
+    sample-rate/channels. AAC itself is lossy by nature, but this removes
+    the avoidable degradation ffmpeg's own encoder defaults would otherwise
+    introduce. `source_info` is a get_video_info() dict, or for multi-input
+    operations (splice) the per-field maximum across all inputs' dicts.
+
+    Uses "-qp 0" (constant quantizer), not "-crf 0". Verified by hand on
+    this ffmpeg build (libx264 via Homebrew) that -crf 0 does NOT round-trip
+    bit-exact for 10-bit (yuv420p10le) sources — only -qp 0 does. -crf 0 is
+    the commonly-cited "lossless" flag online, but that only holds for
+    8-bit; sources here are typically 10-bit HEVC, so -qp 0 is required.
+    """
+    args = ["-c:v", "libx264", "-qp", "0", "-preset", "medium"]
+    if source_info.get("has_audio"):
+        bit_rate = max(source_info.get("audio_bit_rate") or 0, MIN_AUDIO_BITRATE)
+        sample_rate = source_info.get("audio_sample_rate") or 44100
+        channels = source_info.get("audio_channels") or 2
+        args += ["-c:a", "aac", "-b:a", str(bit_rate),
+                 "-ar", str(sample_rate), "-ac", str(channels)]
+    else:
+        args += ["-an"]
+    return args
 
 
 def get_or_make_preview(path):

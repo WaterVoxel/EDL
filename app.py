@@ -153,11 +153,17 @@ def trim():
     if not end:
         return jsonify({"error": "end time is required"}), 400
 
+    try:
+        info = fu.get_video_info(in_path)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 500
+
     out_name = fu.unique_output_name(data.get("output") or _derive_name(data["input"], "trimmed"))
     out_path = os.path.join(fu.OUTPUT_DIR, out_name)
 
-    args = ["-i", in_path, "-ss", str(start), "-to", str(end),
-            "-c:v", "libx264", "-c:a", "aac", out_path]
+    args = ["-i", in_path, "-ss", str(start), "-to", str(end)]
+    args += fu.lossless_encode_args(info)
+    args.append(out_path)
     result = fu.run_ffmpeg(args)
     if result.returncode != 0:
         return jsonify({"error": "ffmpeg failed", "detail": result.stderr[-4000:]}), 500
@@ -193,6 +199,17 @@ def splice():
     target_fps = max(i["fps"] or 30 for i in infos)
     has_audio_flags = [i["has_audio"] for i in infos]
 
+    # build_concat_filter always maps an [outa] audio track (anullsrc fills
+    # in silence for inputs with no audio), so the output always has audio;
+    # its quality should never be worse than the best-quality input.
+    audio_infos = [i for i in infos if i["has_audio"]]
+    combined_info = {
+        "has_audio": True,
+        "audio_bit_rate": max((i["audio_bit_rate"] or 0 for i in audio_infos), default=0),
+        "audio_sample_rate": max((i["audio_sample_rate"] or 0 for i in audio_infos), default=0),
+        "audio_channels": max((i["audio_channels"] or 0 for i in audio_infos), default=0),
+    }
+
     out_name = fu.unique_output_name(data.get("output") or "spliced.mp4")
     out_path = os.path.join(fu.OUTPUT_DIR, out_name)
 
@@ -201,8 +218,9 @@ def splice():
     args = []
     for p in in_paths:
         args += ["-i", p]
-    args += ["-filter_complex", filt, "-map", "[outv]", "-map", "[outa]",
-             "-c:v", "libx264", "-c:a", "aac", out_path]
+    args += ["-filter_complex", filt, "-map", "[outv]", "-map", "[outa]"]
+    args += fu.lossless_encode_args(combined_info)
+    args.append(out_path)
 
     result = fu.run_ffmpeg(args)
     if result.returncode != 0:
@@ -242,9 +260,14 @@ def hold_frame():
     out_path = os.path.join(fu.OUTPUT_DIR, out_name)
 
     filt = fu.build_holdframe_filter(t, dur, fps)
+    # build_holdframe_filter always maps an [outa] track (original audio
+    # plus anullsrc silence during the hold), so audio is present regardless
+    # of the source's has_audio flag.
+    hold_info = {**info, "has_audio": True}
     args = ["-i", in_path, "-filter_complex", filt,
-            "-map", "[outv]", "-map", "[outa]",
-            "-c:v", "libx264", "-c:a", "aac", out_path]
+            "-map", "[outv]", "-map", "[outa]"]
+    args += fu.lossless_encode_args(hold_info)
+    args.append(out_path)
 
     result = fu.run_ffmpeg(args)
     if result.returncode != 0:
@@ -285,8 +308,9 @@ def reverse():
     out_name = fu.unique_output_name(data.get("output") or _derive_name(data["input"], "reversed"))
     out_path = os.path.join(fu.OUTPUT_DIR, out_name)
 
-    args = ["-i", in_path, "-vf", "reverse", "-af", "areverse",
-            "-c:v", "libx264", "-c:a", "aac", out_path]
+    args = ["-i", in_path, "-vf", "reverse", "-af", "areverse"]
+    args += fu.lossless_encode_args(info)
+    args.append(out_path)
     result = fu.run_ffmpeg(args)
     if result.returncode != 0:
         return jsonify({"error": "ffmpeg failed", "detail": result.stderr[-4000:]}), 500
@@ -320,7 +344,12 @@ def ask_claude(instruction, context, session_id=None):
             "project, e.g. input/<file> and output/<file>) plus a one-sentence "
             "explanation. Must start with 'ffmpeg' — never ffprobe or a shell "
             "loop. If still ambiguous or not an edit, set ffmpeg_command to "
-            "an empty string and ask/explain in the explanation field."
+            "an empty string and ask/explain in the explanation field. If the "
+            "command re-encodes video, always use '-c:v libx264 -qp 0' "
+            "(lossless) rather than default/lossy quality settings; if it "
+            "re-encodes audio, set '-b:a'/'-ar'/'-ac' to match or exceed the "
+            "source file's own audio bitrate/sample rate/channel count "
+            "rather than leaving '-c:a aac' at ffmpeg's low default bitrate."
         )
     else:
         prompt = (
@@ -335,7 +364,12 @@ def ask_claude(instruction, context, session_id=None):
             "a question, or is unrelated to editing a file in input/, or is "
             "ambiguous about which file to use), set ffmpeg_command to an "
             "empty string and ask a clarifying question or explain why in the "
-            "explanation field instead."
+            "explanation field instead. If the command re-encodes video, "
+            "always use '-c:v libx264 -qp 0' (lossless) rather than "
+            "default/lossy quality settings; if it re-encodes audio, set "
+            "'-b:a'/'-ar'/'-ac' to match or exceed the source file's own "
+            "audio bitrate/sample rate/channel count rather than leaving "
+            "'-c:a aac' at ffmpeg's low default bitrate."
         )
     cmd = [CLAUDE_BIN, "-p", "--tools", "", "--output-format", "json",
            "--json-schema", CHAT_SCHEMA]
