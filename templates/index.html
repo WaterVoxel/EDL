@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>ffmpeg editor</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div id="header-bar">
+  <h1>ffmpeg editor</h1>
+  <button id="refresh-all">&#8635; Refresh</button>
+</div>
+
+<div id="dropzone">
+  Drag &amp; drop video files here, or
+  <input type="file" id="filepicker" multiple accept=".mp4,.mov,.mkv,.avi,.m4v,.webm">
+</div>
+
+<div class="columns">
+  <div class="col">
+    <h2>Input files <button id="clear-input" title="Delete all files in input/">Clear</button></h2>
+    <ul id="file-gallery" class="file-list"></ul>
+    <video id="preview" controls></video>
+    <div id="preview-info" class="tech-info"></div>
+  </div>
+
+  <div class="col">
+    <h2>Edit</h2>
+
+    <section class="form-box">
+      <h3>Trim</h3>
+      <select id="trim-source"></select>
+      <label>Start <input id="trim-start" placeholder="00:00:01.500" value="00:00:00.000"></label>
+      <label>End <input id="trim-end" placeholder="00:00:05.000"></label>
+      <button id="trim-run">Trim</button>
+    </section>
+
+    <section class="form-box">
+      <h3>Splice</h3>
+      <ul id="splice-order" class="file-list"></ul>
+      <button id="splice-run">Splice selected (in order)</button>
+    </section>
+
+    <section class="form-box">
+      <h3>Hold Frame</h3>
+      <select id="hold-source"></select>
+      <label>Time (s) <input id="hold-time" type="number" step="0.1" placeholder="2.0"></label>
+      <label>Duration (s) <input id="hold-duration" type="number" step="0.1" placeholder="1.5"></label>
+      <button id="hold-run">Hold Frame</button>
+    </section>
+
+    <section class="form-box">
+      <h3>Reverse</h3>
+      <select id="reverse-source"></select>
+      <button id="reverse-run">Reverse</button>
+      <div id="reverse-warning" class="warning" style="display:none"></div>
+    </section>
+  </div>
+
+  <div class="col">
+    <h2>Chat <button id="chat-new" title="Start a new conversation (forgets prior context)">New</button></h2>
+    <div id="chat-log"></div>
+    <input id="chat-input" placeholder="e.g. cut the first 3 seconds and reverse it" size="40">
+    <button id="chat-send">Send</button>
+
+    <h2>Results</h2>
+    <ul id="output-list" class="file-list"></ul>
+    <video id="result-preview" controls></video>
+    <button id="download-result" style="display:none">&#11015; Download</button>
+    <div id="download-status" class="status-line"></div>
+    <div id="result-info" class="tech-info"></div>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
