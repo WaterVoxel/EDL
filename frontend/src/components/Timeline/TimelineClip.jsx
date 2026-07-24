@@ -2,7 +2,7 @@ import { clipHeadPx, clipMainPx, clipTailPx, clipRoundPx, clipTotalPx, clipColor
 
 const MIN_CLIP_SEC = 0.1
 
-export default function TimelineClip({ clip, pps, selected, onSelect, onTrim, index, onDragStart, onDragOver, onDrop }) {
+export default function TimelineClip({ clip, pps, selected, onSelect, onTrim, onDelete, index, onDragStart, onDragOver, onDrop }) {
   const headPx = clipHeadPx(clip, pps)
   const mainPx = clipMainPx(clip, pps)
   const tailPx = clipTailPx(clip, pps)
@@ -40,15 +40,11 @@ export default function TimelineClip({ clip, pps, selected, onSelect, onTrim, in
     document.addEventListener('pointerup', onUp)
   }
 
-  const borderClass = clip.dirty
-    ? 'border-dashed border-amber-500'
-    : selected
-      ? `${color.border} ring-1 ${color.ring}`
-      : color.border
+  const borderClass = clip.dirty ? 'border-dashed border-amber-500' : color.border
 
   return (
     <div
-      className="relative flex-shrink-0 h-full select-none"
+      className="relative flex-shrink-0 h-full select-none group"
       style={{ width: Math.max(totalPx, 24) }}
       draggable
       onDragStart={e => { e.dataTransfer.effectAllowed = 'move'; onDragStart(index) }}
@@ -63,14 +59,14 @@ export default function TimelineClip({ clip, pps, selected, onSelect, onTrim, in
           style={{ width: headPx }}
           onClick={() => onSelect(clip)}
         >
-          <span className="text-[8px] text-fuchsia-100 font-medium leading-none">HOLD</span>
-          <span className="text-[8px] text-fuchsia-200 font-mono leading-none mt-0.5">{clip.headHoldSec.toFixed(1)}s</span>
+          <span className="text-[7px] text-fuchsia-100 font-medium leading-none">HOLD</span>
+          <span className="text-[7px] text-fuchsia-200 font-mono leading-none mt-0.5">{clip.headHoldSec.toFixed(1)}s</span>
         </div>
       )}
 
       {/* Main body — the trimmed source clip, color-coded per clip id */}
       <div
-        className={`absolute top-0 bottom-0 rounded overflow-hidden cursor-pointer bg-gradient-to-b ${color.grad} border ${borderClass}`}
+        className={`absolute top-0 bottom-0 rounded overflow-hidden cursor-pointer bg-gradient-to-b ${color.grad} border-2 ${borderClass} ${selected ? 'ring-2 ring-white ring-offset-1 ring-offset-neutral-950 brightness-110' : ''}`}
         style={{ left: headPx, width: Math.max(mainPx, 24) }}
         onClick={() => onSelect(clip)}
       >
@@ -82,10 +78,17 @@ export default function TimelineClip({ clip, pps, selected, onSelect, onTrim, in
           className="absolute top-0 bottom-0 right-0 w-1.5 cursor-ew-resize hover:bg-white/30 z-10"
           onPointerDown={e => handleEdgeDrag('right', e)}
         />
-        <div className="absolute inset-0 flex flex-col items-start justify-between px-2 py-1 pointer-events-none">
-          <span className="text-[9px] text-neutral-100 truncate max-w-full font-medium">{clip.sourceName}</span>
-          <span className="text-[9px] text-neutral-200 font-mono">{mainDurationLabel}</span>
+        <div className="absolute inset-0 flex flex-col items-start justify-between px-1.5 py-0.5 pointer-events-none">
+          <span className="text-[8px] text-neutral-100 truncate max-w-full font-medium">{clip.displayName || clip.sourceName}</span>
+          <span className="text-[8px] text-neutral-200 font-mono">{mainDurationLabel}</span>
         </div>
+        <button
+          onClick={e => { e.stopPropagation(); onDelete(clip.id) }}
+          title="Delete clip"
+          className="absolute top-0 right-0 w-3.5 h-3.5 flex items-center justify-center bg-black/50 hover:bg-red-600 text-white text-[9px] leading-none opacity-0 group-hover:opacity-100 z-20"
+        >
+          ×
+        </button>
       </div>
 
       {/* Tail hold segment — only ever present on the sequence's last clip */}
@@ -95,8 +98,8 @@ export default function TimelineClip({ clip, pps, selected, onSelect, onTrim, in
           style={{ left: headPx + mainPx, width: tailPx }}
           onClick={() => onSelect(clip)}
         >
-          <span className="text-[8px] text-fuchsia-100 font-medium leading-none">HOLD</span>
-          <span className="text-[8px] text-fuchsia-200 font-mono leading-none mt-0.5">{clip.tailHoldSec.toFixed(1)}s</span>
+          <span className="text-[7px] text-fuchsia-100 font-medium leading-none">HOLD</span>
+          <span className="text-[7px] text-fuchsia-200 font-mono leading-none mt-0.5">{clip.tailHoldSec.toFixed(1)}s</span>
         </div>
       )}
 
@@ -107,8 +110,8 @@ export default function TimelineClip({ clip, pps, selected, onSelect, onTrim, in
           style={{ left: headPx + mainPx + tailPx, width: roundPx }}
           onClick={() => onSelect(clip)}
         >
-          <span className="text-[8px] text-amber-100 font-medium leading-none">ROUND</span>
-          <span className="text-[8px] text-amber-200 font-mono leading-none mt-0.5">{clip.roundHoldSec.toFixed(1)}s</span>
+          <span className="text-[7px] text-amber-100 font-medium leading-none">ROUND</span>
+          <span className="text-[7px] text-amber-200 font-mono leading-none mt-0.5">{clip.roundHoldSec.toFixed(1)}s</span>
         </div>
       )}
     </div>

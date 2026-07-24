@@ -41,11 +41,11 @@ export default function DownloadButton({ outputName, onInfoRefresh }) {
       <button
         onClick={handleDownload}
         disabled={loading}
-        className="px-3 py-1.5 text-xs rounded bg-indigo-600 text-white hover:bg-indigo-500 disabled:bg-neutral-600 disabled:cursor-default"
+        className="px-2.5 py-1 text-[11px] rounded bg-indigo-600 text-white hover:bg-indigo-500 disabled:bg-neutral-600 disabled:cursor-default"
       >
         ↓ Download
       </button>
-      {status && <p className="mt-1 text-[10px] text-neutral-400">{status}</p>}
+      {status && <p className="mt-1 text-[9px] text-neutral-400">{status}</p>}
     </div>
   )
 }

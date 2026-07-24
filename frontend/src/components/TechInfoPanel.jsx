@@ -23,12 +23,12 @@ export default function TechInfoPanel({ info }) {
 
   return (
     <div className="rounded-md bg-neutral-900 border border-neutral-800">
-      <div className="px-2.5 py-1.5 border-b border-neutral-800 text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
+      <div className="px-2 py-1 border-b border-neutral-800 text-[9px] font-semibold uppercase tracking-wide text-neutral-500">
         Media Info
       </div>
-      <div className="p-2.5 font-mono text-[11px]">
+      <div className="p-2 font-mono text-[10px]">
         {info ? (
-          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
+          <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5">
             {rows.map(([k, v]) => (
               <div key={k} className="contents">
                 <dt className="text-neutral-500">{k}</dt>

@@ -55,11 +55,11 @@ export default function ChatPanel({ onResult }) {
 
   return (
     <div className="rounded-md bg-neutral-900 border border-neutral-800 flex flex-col flex-1 min-h-0">
-      <div className="flex items-center justify-between px-2.5 py-1.5 border-b border-neutral-800">
-        <h2 className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">Chat</h2>
-        <button onClick={handleNew} className="px-2 py-0.5 text-[10px] rounded border border-neutral-700 text-neutral-500 hover:text-neutral-300">New</button>
+      <div className="flex items-center justify-between px-2 py-1 border-b border-neutral-800">
+        <h2 className="text-[9px] font-semibold uppercase tracking-wide text-neutral-500">Chat</h2>
+        <button onClick={handleNew} className="px-1.5 py-0.5 text-[9px] rounded border border-neutral-700 text-neutral-500 hover:text-neutral-300">New</button>
       </div>
-      <div ref={logRef} className="flex-1 min-h-[120px] max-h-60 overflow-y-auto p-2 text-xs space-y-2">
+      <div ref={logRef} className="flex-1 min-h-[100px] max-h-60 overflow-y-auto p-1.5 text-[11px] space-y-1.5">
         {messages.map((m, i) => (
           <div key={i}>
             {m.role === 'user' && <p className="text-neutral-400"><span className="text-neutral-200 font-medium">You:</span> {m.text}</p>}
@@ -86,15 +86,15 @@ export default function ChatPanel({ onResult }) {
         ))}
         {loading && <p className="text-neutral-500">Thinking...</p>}
       </div>
-      <div className="flex gap-2 p-2 border-t border-neutral-800">
+      <div className="flex gap-1.5 p-1.5 border-t border-neutral-800">
         <input
           value={input}
           onChange={e => setInput(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') handleSend() }}
           placeholder="e.g. cut the first 3 seconds and reverse it"
-          className="flex-1 px-2 py-1.5 text-xs rounded bg-neutral-950 border border-neutral-700 text-neutral-300 placeholder:text-neutral-600"
+          className="flex-1 px-2 py-1 text-[11px] rounded bg-neutral-950 border border-neutral-700 text-neutral-300 placeholder:text-neutral-600"
         />
-        <button onClick={handleSend} disabled={loading} className="px-3 py-1.5 text-xs rounded bg-indigo-600 text-white hover:bg-indigo-500 disabled:bg-neutral-700">Send</button>
+        <button onClick={handleSend} disabled={loading} className="px-2.5 py-1 text-[11px] rounded bg-indigo-600 text-white hover:bg-indigo-500 disabled:bg-neutral-700">Send</button>
       </div>
     </div>
   )

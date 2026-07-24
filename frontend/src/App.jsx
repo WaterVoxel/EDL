@@ -170,30 +170,30 @@ function AppInner() {
   return (
     <div className="flex flex-col h-screen bg-neutral-950 text-neutral-200">
       {/* Top toolbar */}
-      <div className="flex items-center justify-between px-4 py-2 border-b border-neutral-800 bg-neutral-900 shrink-0">
+      <div className="flex items-center justify-between px-3 py-1.5 border-b border-neutral-800 bg-neutral-900 shrink-0">
         <div className="flex items-center gap-2">
-          <span className="text-sm font-bold text-neutral-100 tracking-tight">Nara Lossless Editor</span>
-          <span className="text-[10px] text-neutral-600 border border-neutral-700 rounded px-1.5 py-0.5">EDL mode</span>
+          <span className="text-xs font-bold text-neutral-100 tracking-tight">Nara Lossless Editor</span>
+          <span className="text-[9px] text-neutral-600 border border-neutral-700 rounded px-1 py-0.5">EDL mode</span>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
           <button
             onClick={handleRender}
             disabled={rendering || timelineClips.length === 0}
-            className="px-3 py-1 text-xs font-medium rounded bg-emerald-600 text-white hover:bg-emerald-500 disabled:bg-neutral-700 disabled:text-neutral-500"
+            className="px-2.5 py-1 text-[11px] font-medium rounded bg-emerald-600 text-white hover:bg-emerald-500 disabled:bg-neutral-700 disabled:text-neutral-500"
           >
             {rendering ? 'Rendering…' : '▶ Render'}
           </button>
-          <button onClick={() => location.reload()} className="px-3 py-1 text-xs rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 hover:border-neutral-500">↻ Refresh</button>
+          <button onClick={() => location.reload()} className="px-2.5 py-1 text-[11px] rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 hover:border-neutral-500">↻ Refresh</button>
         </div>
       </div>
 
       {/* Main content */}
       <div className="flex flex-1 min-h-0">
         {/* Left: Media bin + always-visible metadata inspector */}
-        <div className="w-64 flex flex-col gap-3 p-3 border-r border-neutral-800 overflow-y-auto shrink-0">
+        <div className="w-56 flex flex-col gap-2 p-2 border-r border-neutral-800 overflow-y-auto shrink-0">
           <Dropzone onUpload={handleUpload} />
           <div className="flex items-center justify-between">
-            <span className="text-[10px] text-neutral-500">{inputFiles.length} file(s)</span>
+            <span className="text-[9px] text-neutral-500">{inputFiles.length} file(s)</span>
             <ClearInputButton onCleared={handleCleared} />
           </div>
           <MediaLibrary files={inputFiles} onAddToTimeline={handleAddToTimeline} />
@@ -202,23 +202,23 @@ function AppInner() {
 
         {/* Center: Preview + toolbar + Timeline + Chat */}
         <div className="flex-1 flex flex-col min-w-0">
-          <div className="flex-1 min-h-[50vh] flex items-center justify-center bg-black p-4">
+          <div className="flex-1 min-h-[50vh] flex items-center justify-center bg-black p-3">
             <PreviewPlayer />
           </div>
 
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-3 py-2 border-y border-neutral-800 bg-neutral-900">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-2.5 py-1.5 border-y border-neutral-800 bg-neutral-900">
             <HoldFrameForm clips={timelineClips} setClips={setTimelineClips} />
-            <div className="w-px h-4 bg-neutral-700" />
+            <div className="w-px h-3.5 bg-neutral-700" />
             <TrimForm selectedClip={selectedClip} setClips={setTimelineClips} />
-            <div className="w-px h-4 bg-neutral-700" />
+            <div className="w-px h-3.5 bg-neutral-700" />
             <ReverseForm selectedClip={selectedClip} onResult={handleEditResult} />
-            <div className="w-px h-4 bg-neutral-700" />
+            <div className="w-px h-3.5 bg-neutral-700" />
             <RaiseButton clips={timelineClips} setClips={setTimelineClips} />
-            <div className="w-px h-4 bg-neutral-700" />
-            <SpliceButton selectedClip={selectedClip} setClips={setTimelineClips} onSelectId={setSelectedId} />
+            <div className="w-px h-3.5 bg-neutral-700" />
+            <SpliceButton selectedClip={selectedClip} clips={timelineClips} setClips={setTimelineClips} onSelectId={setSelectedId} />
           </div>
 
-          <div className="p-3 shrink-0">
+          <div className="p-2 shrink-0">
             <Timeline
               clips={timelineClips}
               setClips={setTimelineClips}
@@ -227,7 +227,7 @@ function AppInner() {
               hasDirty={hasDirty}
             />
           </div>
-          <div className="p-3 pt-0 shrink-0 h-48">
+          <div className="p-2 pt-0 shrink-0 h-40">
             <ChatPanel onResult={handleEditResult} />
           </div>
         </div>
@@ -242,7 +242,7 @@ function AppInner() {
         {/* Right: Rendered output + media info */}
         <div
           style={{ width: rightPanelWidth }}
-          className="flex flex-col gap-3 p-3 overflow-y-auto shrink-0"
+          className="flex flex-col gap-2 p-2 overflow-y-auto shrink-0"
         >
           <OutputPanel files={outputFiles} />
         </div>

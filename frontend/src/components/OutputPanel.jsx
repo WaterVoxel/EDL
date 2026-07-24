@@ -41,20 +41,20 @@ export default function OutputPanel({ files }) {
       <TechInfoPanel info={info} />
       <DownloadButton outputName={selectedName} />
       <div className="rounded-md bg-neutral-900 border border-neutral-800">
-        <div className="px-2.5 py-1.5 border-b border-neutral-800 text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
+        <div className="px-2 py-1 border-b border-neutral-800 text-[9px] font-semibold uppercase tracking-wide text-neutral-500">
           Exports
         </div>
-        <ul className="max-h-32 overflow-y-auto divide-y divide-neutral-800">
+        <ul className="max-h-28 overflow-y-auto divide-y divide-neutral-800">
           {files.map(f => (
             <li
               key={f.name}
               onClick={() => loadOutput(f.name)}
-              className={`px-2.5 py-1.5 text-xs cursor-pointer truncate ${f.name === selectedName ? 'bg-indigo-900/40 text-indigo-300' : 'text-neutral-300 hover:bg-neutral-800/70'}`}
+              className={`px-2 py-1 text-[11px] cursor-pointer truncate ${f.name === selectedName ? 'bg-indigo-900/40 text-indigo-300' : 'text-neutral-300 hover:bg-neutral-800/70'}`}
             >
               {f.name}
             </li>
           ))}
-          {files.length === 0 && <li className="px-2.5 py-3 text-xs text-neutral-600 text-center">No exports yet</li>}
+          {files.length === 0 && <li className="px-2 py-2 text-[11px] text-neutral-600 text-center">No exports yet</li>}
         </ul>
       </div>
     </div>

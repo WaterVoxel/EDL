@@ -21,11 +21,11 @@ export default function ReverseForm({ selectedClip, onResult }) {
   }
 
   return (
-    <div className="flex items-center gap-2">
-      <span className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500 whitespace-nowrap">Reverse</span>
-      {!selectedClip && <span className="text-[10px] text-neutral-600">select a clip</span>}
+    <div className="flex items-center gap-1.5">
+      <span className="text-[9px] font-semibold uppercase tracking-wide text-neutral-500 whitespace-nowrap">Reverse</span>
+      {!selectedClip && <span className="text-[9px] text-neutral-600">select a clip</span>}
       {warning && (
-        <div className="flex items-center gap-1 text-[10px] text-amber-300">
+        <div className="flex items-center gap-1 text-[9px] text-amber-300">
           <span>{warning}</span>
           <button type="button" onClick={() => run(true)} className="underline shrink-0">Confirm</button>
         </div>
@@ -33,7 +33,7 @@ export default function ReverseForm({ selectedClip, onResult }) {
       <button
         onClick={() => run(false)}
         disabled={!selectedClip || loading}
-        className="px-2 py-1 text-xs rounded bg-indigo-600 text-white hover:bg-indigo-500 disabled:bg-neutral-700 disabled:text-neutral-500"
+        className="px-1.5 py-0.5 text-[11px] rounded bg-indigo-600 text-white hover:bg-indigo-500 disabled:bg-neutral-700 disabled:text-neutral-500"
       >
         {loading ? '…' : 'Reverse'}
       </button>

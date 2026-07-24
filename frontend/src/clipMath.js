@@ -84,6 +84,35 @@ export function sanitizeHoldPlacement(clips) {
   })
 }
 
+function stripExt(name) {
+  return name.replace(/\.[^/.]+$/, '')
+}
+
+// The "root" a split name belongs to: strips file extension and any
+// existing 2-digit split suffix, so splitting "Video01" again still groups
+// with "Video02" etc. under the same root "Video" instead of drifting.
+function splitRoot(name) {
+  const noExt = stripExt(name)
+  const m = noExt.match(/^(.*)(\d{2})$/)
+  return m ? m[1] : noExt
+}
+
+// Next available "<Root><NN>" display name (e.g. Video -> Video01, then
+// Video02, ...), scanning both the current clips and an `extra` list (used
+// when computing two new names in the same split before either is
+// committed to state yet) so the two halves never collide.
+export function nextSplitName(baseName, clips, extra = []) {
+  const root = splitRoot(baseName)
+  let maxN = 0
+  for (const c of [...clips, ...extra]) {
+    const name = c.displayName || c.sourceName
+    if (!name || splitRoot(name) !== root) continue
+    const m = stripExt(name).match(/(\d{2})$/)
+    if (m) maxN = Math.max(maxN, parseInt(m[1], 10))
+  }
+  return root + String(maxN + 1).padStart(2, '0')
+}
+
 // Deterministic color per clip id, so a clip keeps its color across
 // reorders and stays visually traceable after being split by Splice.
 export function clipColor(clipId) {

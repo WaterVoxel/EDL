@@ -1,4 +1,4 @@
-import { useRef, useMemo } from 'react'
+import { useRef, useMemo, useEffect } from 'react'
 import TimelineClip from './TimelineClip'
 import Playhead from './Playhead'
 import Ruler from './Ruler'
@@ -32,6 +32,25 @@ export default function Timeline({ clips, setClips, selectedId, onSelectId, hasD
   function handleTrim(id, inSec, outSec) {
     setClips(prev => prev.map(c => c.id === id ? { ...c, inSec, outSec, dirty: true } : c))
   }
+
+  function handleDelete(id) {
+    setClips(prev => sanitizeHoldPlacement(prev.filter(c => c.id !== id)))
+    if (id === selectedId) onSelectId(null)
+  }
+
+  // Delete/Backspace removes the selected clip, as long as focus isn't in a
+  // text input (so typing in Trim's in/out fields etc. isn't hijacked).
+  useEffect(() => {
+    function onKeyDown(e) {
+      if ((e.key !== 'Delete' && e.key !== 'Backspace') || !selectedId) return
+      const tag = document.activeElement?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return
+      e.preventDefault()
+      handleDelete(selectedId)
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [selectedId])
 
   function handleDragStart(idx) { dragFromRef.current = idx }
   function handleDragOver(idx) {}
@@ -100,13 +119,16 @@ export default function Timeline({ clips, setClips, selectedId, onSelectId, hasD
 
   return (
     <div className="rounded-md bg-neutral-900 border border-neutral-800 flex flex-col">
-      <div className="flex items-center justify-between px-3 py-2 border-b border-neutral-800">
-        <h2 className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">Timeline</h2>
-        <span className="text-[10px] text-neutral-600">{clips.length} clip(s) · {totalDuration.toFixed(2)}s total</span>
+      <div className="flex items-center justify-between px-2.5 py-1.5 border-b border-neutral-800">
+        <h2 className="text-[9px] font-semibold uppercase tracking-wide text-neutral-500">Timeline</h2>
+        <span className="text-[9px] text-neutral-600">
+          {clips.length} clip(s) · {totalDuration.toFixed(2)}s total
+          {selectedId && <span className="ml-2 text-neutral-700">Del/Backspace to remove selected clip</span>}
+        </span>
       </div>
 
       {clips.length === 0 ? (
-        <div className="flex items-center justify-center h-28 text-xs text-neutral-600">
+        <div className="flex items-center justify-center h-24 text-[11px] text-neutral-600">
           Add clips from the Media Bin to start editing
         </div>
       ) : (
@@ -115,7 +137,7 @@ export default function Timeline({ clips, setClips, selectedId, onSelectId, hasD
             <Ruler clips={clips} pps={PPS} />
             <div
               ref={trackRef}
-              className="flex items-stretch gap-0.5 bg-neutral-950 px-2 py-2 h-20 relative"
+              className="flex items-stretch gap-0.5 bg-neutral-950 px-2 py-1.5 h-16 relative"
               onClick={handleTrackClick}
             >
               <Playhead leftPx={playheadPx} onDrag={handlePlayheadDrag} />
@@ -128,6 +150,7 @@ export default function Timeline({ clips, setClips, selectedId, onSelectId, hasD
                   selected={clip.id === selectedId}
                   onSelect={handleSelect}
                   onTrim={handleTrim}
+                  onDelete={handleDelete}
                   onDragStart={handleDragStart}
                   onDragOver={handleDragOver}
                   onDrop={handleDrop}
@@ -140,7 +163,7 @@ export default function Timeline({ clips, setClips, selectedId, onSelectId, hasD
 
       <StatusRow clips={clips} hasDirty={hasDirty} />
 
-      <EdlTable clips={clips} selectedId={selectedId} onSelect={handleSelect} />
+      <EdlTable clips={clips} selectedId={selectedId} onSelect={handleSelect} onDelete={handleDelete} />
     </div>
   )
 }
@@ -156,12 +179,12 @@ function StatusRow({ clips, hasDirty }) {
   return (
     <div className="border-t border-neutral-800">
       {nonRound.map(({ clip, base, amount }) => (
-        <p key={clip.id} className="px-3 py-1.5 text-[10px] text-amber-400">
-          ⚠ "{clip.sourceName}" duration is not rounded up ({base.toFixed(1)}s) — use Raise to round to {(base + amount).toFixed(0)}s
+        <p key={clip.id} className="px-2.5 py-1 text-[9px] text-amber-400">
+          ⚠ "{clip.displayName || clip.sourceName}" duration is not rounded up ({base.toFixed(1)}s) — use Raise to round to {(base + amount).toFixed(0)}s
         </p>
       ))}
       {hasDirty && (
-        <p className="px-3 py-1.5 text-[10px] text-amber-400">
+        <p className="px-2.5 py-1 text-[9px] text-amber-400">
           ● Unrendered edits — click Render to apply
         </p>
       )}
