@@ -1,32 +1,28 @@
-import { useState, useMemo } from 'react'
+import { useRef, useMemo } from 'react'
 import TimelineClip from './TimelineClip'
 import Playhead from './Playhead'
 import Ruler from './Ruler'
 import EdlTable from './EdlTable'
 import { useMedia } from '../../context/MediaContext'
-import { trim, splice, promoteOutputToInput, probe } from '../../api'
+import { probe } from '../../api'
 
 const PPS = 60
 
-export default function Timeline({ clips, setClips, onRenderComplete }) {
+export default function Timeline({ clips, setClips, selectedId, onSelectId, hasDirty }) {
   const { currentTime, seekTo, videoRef, setActivePreview } = useMedia()
-  const [selectedId, setSelectedId] = useState(null)
-  const [rendering, setRendering] = useState(false)
-  const [dragFrom, setDragFrom] = useState(null)
+  const trackRef = useRef(null)
+  const dragFromRef = useRef(null)
 
   const selectedClip = clips.find(c => c.id === selectedId)
-  const hasDirty = clips.some(c => c.dirty || (!c.renderedInputName && !(c.inSec === 0 && c.outSec === c.sourceDurationSec)))
   const totalDuration = clips.reduce((sum, c) => sum + (c.outSec - c.inSec), 0)
 
   function handleSelect(clip) {
-    setSelectedId(clip.id)
+    onSelectId(clip.id)
     const url = `/input/${encodeURIComponent(clip.sourceName)}`
     if (videoRef.current) {
       videoRef.current.src = url
       videoRef.current.currentTime = clip.inSec
     }
-    // Fetch metadata so the info panel always reflects the selected clip,
-    // not just whatever was last clicked in the media/output bins.
     probe(clip.sourceName, 'input').then(info => {
       setActivePreview({ name: clip.sourceName, dir: 'input', info })
     })
@@ -36,48 +32,17 @@ export default function Timeline({ clips, setClips, onRenderComplete }) {
     setClips(prev => prev.map(c => c.id === id ? { ...c, inSec, outSec, dirty: true } : c))
   }
 
-  function handleDragStart(idx) { setDragFrom(idx) }
+  function handleDragStart(idx) { dragFromRef.current = idx }
   function handleDragOver(idx) {}
   function handleDrop(targetIdx) {
-    if (dragFrom == null || dragFrom === targetIdx) return
+    if (dragFromRef.current == null || dragFromRef.current === targetIdx) return
     setClips(prev => {
       const next = [...prev]
-      const [moved] = next.splice(dragFrom, 1)
+      const [moved] = next.splice(dragFromRef.current, 1)
       next.splice(targetIdx, 0, moved)
       return next
     })
-    setDragFrom(null)
-  }
-
-  async function handleRenderSequence() {
-    setRendering(true)
-    try {
-      const resolved = []
-      for (const clip of clips) {
-        const untrimmed = clip.inSec === 0 && clip.outSec === clip.sourceDurationSec
-        if (untrimmed && !clip.dirty) {
-          resolved.push({ ...clip, renderedInputName: clip.sourceName })
-        } else {
-          const trimResult = await trim(clip.sourceName, clip.inSec.toFixed(4), clip.outSec.toFixed(4))
-          if (trimResult.error) { alert('Trim failed: ' + trimResult.error); setRendering(false); return }
-          const promoted = await promoteOutputToInput(trimResult.output)
-          if (promoted.error) { alert('Promote failed: ' + promoted.error); setRendering(false); return }
-          resolved.push({ ...clip, renderedInputName: promoted.name, dirty: false })
-        }
-      }
-
-      if (resolved.length === 1) {
-        setClips(resolved)
-        onRenderComplete()
-      } else {
-        const spliceResult = await splice(resolved.map(c => c.renderedInputName))
-        if (spliceResult.error) { alert('Splice failed: ' + spliceResult.error); setRendering(false); return }
-        setClips(resolved)
-        onRenderComplete()
-      }
-    } finally {
-      setRendering(false)
-    }
+    dragFromRef.current = null
   }
 
   const playheadPx = useMemo(() => {
@@ -91,36 +56,36 @@ export default function Timeline({ clips, setClips, onRenderComplete }) {
     return offset + (clampedTime - selectedClip.inSec) * PPS
   }, [selectedClip, currentTime, clips])
 
-  function handleTrackClick(e) {
-    if (!selectedClip) return
-    const rect = e.currentTarget.getBoundingClientRect()
-    const clickX = e.clientX - rect.left
+  function clientXToSeekTime(clientX) {
+    if (!selectedClip || !trackRef.current) return null
+    const rect = trackRef.current.getBoundingClientRect()
+    const clickX = clientX - rect.left
     let offset = 0
     for (const c of clips) {
       const w = (c.outSec - c.inSec) * PPS
-      if (clickX >= offset && clickX <= offset + w && c.id === selectedClip.id) {
-        const seekTime = c.inSec + (clickX - offset) / PPS
-        seekTo(seekTime)
-        break
+      if (c.id === selectedClip.id) {
+        return c.inSec + Math.max(0, Math.min(clickX - offset, w)) / PPS
       }
       offset += w + 2
     }
+    return null
+  }
+
+  function handleTrackClick(e) {
+    const t = clientXToSeekTime(e.clientX)
+    if (t != null) seekTo(t)
+  }
+
+  function handlePlayheadDrag(clientX) {
+    const t = clientXToSeekTime(clientX)
+    if (t != null) seekTo(t)
   }
 
   return (
     <div className="rounded-md bg-neutral-900 border border-neutral-800 flex flex-col">
       <div className="flex items-center justify-between px-3 py-2 border-b border-neutral-800">
-        <div className="flex items-center gap-3">
-          <h2 className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">Timeline</h2>
-          <span className="text-[10px] text-neutral-600">{clips.length} clip(s) · {totalDuration.toFixed(2)}s total</span>
-        </div>
-        <button
-          onClick={handleRenderSequence}
-          disabled={rendering || clips.length === 0}
-          className="px-3 py-1 text-xs font-medium rounded bg-emerald-600 text-white hover:bg-emerald-500 disabled:bg-neutral-700 disabled:text-neutral-500"
-        >
-          {rendering ? 'Rendering…' : '▶ Render Sequence'}
-        </button>
+        <h2 className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">Timeline</h2>
+        <span className="text-[10px] text-neutral-600">{clips.length} clip(s) · {totalDuration.toFixed(2)}s total</span>
       </div>
 
       {clips.length === 0 ? (
@@ -132,10 +97,11 @@ export default function Timeline({ clips, setClips, onRenderComplete }) {
           <div className="inline-block min-w-full">
             <Ruler clips={clips} pps={PPS} />
             <div
+              ref={trackRef}
               className="flex items-stretch gap-0.5 bg-neutral-950 px-2 py-2 h-20 relative"
               onClick={handleTrackClick}
             >
-              <Playhead leftPx={playheadPx} />
+              <Playhead leftPx={playheadPx} onDrag={handlePlayheadDrag} />
               {clips.map((clip, i) => (
                 <TimelineClip
                   key={clip.id}
