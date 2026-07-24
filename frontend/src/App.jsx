@@ -8,7 +8,10 @@ import PreviewPlayer from './components/PreviewPlayer'
 import TechInfoPanel from './components/TechInfoPanel'
 import ClearInputButton from './components/ClearInputButton'
 import HoldFrameForm from './components/HoldFrameForm'
+import TrimForm from './components/TrimForm'
 import ReverseForm from './components/ReverseForm'
+import RaiseButton from './components/RaiseButton'
+import SpliceButton from './components/SpliceButton'
 import ChatPanel from './components/ChatPanel'
 import Timeline from './components/Timeline/Timeline'
 
@@ -25,7 +28,7 @@ function AppInner() {
     c.dirty ||
     (!c.renderedInputName && (
       c.inSec !== 0 || c.outSec !== c.sourceDurationSec ||
-      (c.headHoldSec || 0) > 0 || (c.tailHoldSec || 0) > 0
+      (c.headHoldSec || 0) > 0 || (c.tailHoldSec || 0) > 0 || (c.roundHoldSec || 0) > 0
     ))
   )
 
@@ -50,6 +53,7 @@ function AppInner() {
       outSec: info.duration,
       headHoldSec: 0,
       tailHoldSec: 0,
+      roundHoldSec: 0,
       dirty: false,
       renderedInputName: null,
     }])
@@ -69,7 +73,7 @@ function AppInner() {
     try {
       const resolved = []
       for (const clip of timelineClips) {
-        const needsHold = (clip.headHoldSec || 0) > 0 || (clip.tailHoldSec || 0) > 0
+        const needsHold = (clip.headHoldSec || 0) > 0 || (clip.tailHoldSec || 0) > 0 || (clip.roundHoldSec || 0) > 0
         const untrimmed = clip.inSec === 0 && clip.outSec === clip.sourceDurationSec
         if (untrimmed && !needsHold && !clip.dirty) {
           resolved.push({ ...clip, renderedInputName: clip.sourceName })
@@ -104,6 +108,19 @@ function AppInner() {
           currentName = held.output
         }
 
+        // 4. Apply Raise's round-up hold: same mechanism as tail hold, always
+        // trails the clip so the sequence lands on a whole second.
+        if (clip.roundHoldSec > 0) {
+          const promoted = await promoteOutputToInput(currentName)
+          if (promoted.error) { alert('Promote failed: ' + promoted.error); return }
+          const info = await probe(promoted.name, 'input')
+          if (info.error) { alert('Probe failed: ' + info.error); return }
+          const endTime = Math.max(0, info.duration - 1 / (clip.fps || 30))
+          const held = await holdFrame(promoted.name, endTime, clip.roundHoldSec)
+          if (held.error) { alert('Raise hold failed: ' + held.error); return }
+          currentName = held.output
+        }
+
         const promoted = await promoteOutputToInput(currentName)
         if (promoted.error) { alert('Promote failed: ' + promoted.error); return }
         resolved.push({ ...clip, renderedInputName: promoted.name, dirty: false })
@@ -127,7 +144,7 @@ function AppInner() {
       {/* Top toolbar */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-neutral-800 bg-neutral-900 shrink-0">
         <div className="flex items-center gap-2">
-          <span className="text-sm font-bold text-neutral-100 tracking-tight">ffmpeg editor</span>
+          <span className="text-sm font-bold text-neutral-100 tracking-tight">Nara Lossless Editor</span>
           <span className="text-[10px] text-neutral-600 border border-neutral-700 rounded px-1.5 py-0.5">EDL mode</span>
         </div>
         <div className="flex items-center gap-2">
@@ -160,9 +177,14 @@ function AppInner() {
           <div className="flex-1 flex items-center justify-center bg-black p-4 min-h-0">
             <PreviewPlayer />
           </div>
-          <div className="grid grid-cols-2 gap-3 px-3 pt-3">
+          <div className="grid grid-cols-3 gap-3 px-3 pt-3">
             <HoldFrameForm selectedClip={selectedClip} setClips={setTimelineClips} />
+            <TrimForm selectedClip={selectedClip} setClips={setTimelineClips} />
             <ReverseForm selectedClip={selectedClip} onResult={handleEditResult} />
+          </div>
+          <div className="grid grid-cols-2 gap-3 px-3 pt-3">
+            <RaiseButton selectedClip={selectedClip} setClips={setTimelineClips} />
+            <SpliceButton selectedClip={selectedClip} setClips={setTimelineClips} onSelectId={setSelectedId} />
           </div>
           <div className="p-3 shrink-0">
             <Timeline

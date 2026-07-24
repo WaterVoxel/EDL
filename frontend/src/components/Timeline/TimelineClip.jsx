@@ -1,4 +1,4 @@
-import { clipHeadPx, clipMainPx, clipTailPx, clipTotalPx } from '../../clipMath'
+import { clipHeadPx, clipMainPx, clipTailPx, clipRoundPx, clipTotalPx } from '../../clipMath'
 
 const MIN_CLIP_SEC = 0.1
 
@@ -6,6 +6,7 @@ export default function TimelineClip({ clip, pps, selected, onSelect, onTrim, in
   const headPx = clipHeadPx(clip, pps)
   const mainPx = clipMainPx(clip, pps)
   const tailPx = clipTailPx(clip, pps)
+  const roundPx = clipRoundPx(clip, pps)
   const totalPx = clipTotalPx(clip, pps)
 
   const mainDurationLabel = (clip.outSec - clip.inSec).toFixed(2) + 's'
@@ -94,6 +95,18 @@ export default function TimelineClip({ clip, pps, selected, onSelect, onTrim, in
         >
           <span className="text-[8px] text-fuchsia-100 font-medium leading-none">HOLD</span>
           <span className="text-[8px] text-fuchsia-200 font-mono leading-none mt-0.5">{clip.tailHoldSec.toFixed(1)}s</span>
+        </div>
+      )}
+
+      {/* Round segment — Raise's auto round-up extension, always trails the clip */}
+      {roundPx > 0 && (
+        <div
+          className="absolute top-0 bottom-0 rounded-r border border-amber-400 bg-gradient-to-b from-amber-600 to-amber-800 flex flex-col items-center justify-center overflow-hidden cursor-pointer"
+          style={{ left: headPx + mainPx + tailPx, width: roundPx }}
+          onClick={() => onSelect(clip)}
+        >
+          <span className="text-[8px] text-amber-100 font-medium leading-none">ROUND</span>
+          <span className="text-[8px] text-amber-200 font-mono leading-none mt-0.5">{clip.roundHoldSec.toFixed(1)}s</span>
         </div>
       )}
     </div>

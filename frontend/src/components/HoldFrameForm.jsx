@@ -6,8 +6,10 @@ export default function HoldFrameForm({ selectedClip, setClips }) {
   function apply(which) {
     if (!selectedClip) return
     const dur = parseFloat(duration)
-    if (!dur || dur <= 0) return
+    if (Number.isNaN(dur) || dur < 0) return
     const field = which === 'head' ? 'headHoldSec' : 'tailHoldSec'
+    // A duration of 0 removes any existing hold on that edge and restores
+    // the clip to its original (un-extended) length.
     setClips(prev => prev.map(c =>
       c.id === selectedClip.id ? { ...c, [field]: dur, dirty: true } : c
     ))
@@ -21,11 +23,11 @@ export default function HoldFrameForm({ selectedClip, setClips }) {
       {!selectedClip && <p className="text-[10px] text-neutral-600 mb-2">Select a clip on the timeline first.</p>}
       <div className="flex items-center gap-2">
         <input
-          type="number" step="0.1" min="0.1" value={duration}
+          type="number" step="0.1" min="0" value={duration}
           onChange={e => setDuration(e.target.value)}
           className="w-16 px-2 py-1 text-xs rounded bg-neutral-950 border border-neutral-700 text-neutral-300"
         />
-        <span className="text-[10px] text-neutral-500">sec</span>
+        <span className="text-[10px] text-neutral-500">sec (0 = remove)</span>
         <button
           onClick={() => apply('head')}
           disabled={disabled}

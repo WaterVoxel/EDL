@@ -5,7 +5,7 @@ import Ruler from './Ruler'
 import EdlTable from './EdlTable'
 import { useMedia } from '../../context/MediaContext'
 import { probe } from '../../api'
-import { clipTotalSec, clipTotalPx, GAP_PX } from '../../clipMath'
+import { clipTotalSec, clipTotalPx, clipBaseSec, roundUpAmount, GAP_PX } from '../../clipMath'
 
 const PPS = 60
 
@@ -74,9 +74,9 @@ export default function Timeline({ clips, setClips, selectedId, onSelectId, hasD
         const headPx = (c.headHoldSec || 0) * PPS
         const mainPx = (c.outSec - c.inSec) * PPS
         const withinClip = clickX - offset
-        // Clicking inside the head/tail hold segments seeks to the nearest
-        // edge of the main body, since those segments are a still frame
-        // with no independent timeline of their own.
+        // Clicking inside the head/tail/round hold segments seeks to the
+        // nearest edge of the main body, since those segments are a still
+        // frame with no independent timeline of their own.
         if (withinClip < headPx) return c.inSec
         if (withinClip > headPx + mainPx) return c.outSec
         return c.inSec + Math.max(0, Math.min(withinClip - headPx, mainPx)) / PPS
@@ -136,13 +136,33 @@ export default function Timeline({ clips, setClips, selectedId, onSelectId, hasD
         </div>
       )}
 
+      <StatusRow clips={clips} hasDirty={hasDirty} />
+
+      <EdlTable clips={clips} selectedId={selectedId} onSelect={handleSelect} />
+    </div>
+  )
+}
+
+function StatusRow({ clips, hasDirty }) {
+  const nonRound = clips
+    .filter(c => !(c.roundHoldSec > 0))
+    .map(c => ({ clip: c, base: clipBaseSec(c), amount: roundUpAmount(clipBaseSec(c)) }))
+    .filter(({ amount }) => amount > 0)
+
+  if (nonRound.length === 0 && !hasDirty) return null
+
+  return (
+    <div className="border-t border-neutral-800">
+      {nonRound.map(({ clip, base, amount }) => (
+        <p key={clip.id} className="px-3 py-1.5 text-[10px] text-amber-400">
+          ⚠ "{clip.sourceName}" duration is not rounded up ({base.toFixed(1)}s) — use Raise to round to {(base + amount).toFixed(0)}s
+        </p>
+      ))}
       {hasDirty && (
-        <p className="px-3 py-1.5 text-[10px] text-amber-400 border-t border-neutral-800">
+        <p className="px-3 py-1.5 text-[10px] text-amber-400">
           ● Unrendered edits — click Render to apply
         </p>
       )}
-
-      <EdlTable clips={clips} selectedId={selectedId} onSelect={handleSelect} />
     </div>
   )
 }
