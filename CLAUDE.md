@@ -9,15 +9,21 @@ This folder is a workspace for editing media with ffmpeg via natural-language pr
 
 ## Web GUI
 
-A Flask app (`app.py`) provides drag-and-drop upload plus Trim / Splice / Hold Frame / Reverse forms and an embedded chatbot that turns plain-English instructions into an ffmpeg command (shown for confirmation before it runs). Run it with:
+The GUI is a React + Vite + Tailwind frontend (`frontend/`) talking to a Flask JSON API backend (`app.py`). Run both servers:
 
 ```bash
-cd ~/Documents/Claude/ffmpeg
-source .venv/bin/activate
-python3 app.py
+# terminal 1: Flask API backend
+cd ~/Documents/Claude/ffmpeg && source .venv/bin/activate && python3 app.py
+
+# terminal 2: Vite React frontend (HMR dev server)
+cd ~/Documents/Claude/ffmpeg/frontend && npm run dev
 ```
 
-Then open `http://127.0.0.1:5001/`. See `app.py` and `ffmpeg_utils.py` for the route/filter implementations; the chatbot shells out to the `claude` CLI in headless mode (`claude -p --tools "" --output-format json --json-schema ...`) and never executes a proposed command without the user clicking Run.
+Then open `http://127.0.0.1:5173/`. The Vite dev server proxies all `/api`, `/input`, `/output`, and `/preview` requests to Flask on `:5001` — no CORS needed.
+
+The old vanilla-JS UI is still available at `http://127.0.0.1:5001/` as a fallback during the transition.
+
+Features: drag-drop upload, single-track timeline (drag clip edges to trim, drag to reorder, "Render Sequence" button to apply), Hold Frame form, Reverse form, a chatbot (claude CLI headless) that proposes ffmpeg commands for user confirmation before running, tech-info panels, download with metadata verification.
 
 ## Folder layout
 
