@@ -5,6 +5,7 @@ import Ruler from './Ruler'
 import EdlTable from './EdlTable'
 import { useMedia } from '../../context/MediaContext'
 import { probe } from '../../api'
+import { clipTotalSec, clipTotalPx, GAP_PX } from '../../clipMath'
 
 const PPS = 60
 
@@ -14,7 +15,7 @@ export default function Timeline({ clips, setClips, selectedId, onSelectId, hasD
   const dragFromRef = useRef(null)
 
   const selectedClip = clips.find(c => c.id === selectedId)
-  const totalDuration = clips.reduce((sum, c) => sum + (c.outSec - c.inSec), 0)
+  const totalDuration = clips.reduce((sum, c) => sum + clipTotalSec(c), 0)
 
   function handleSelect(clip) {
     onSelectId(clip.id)
@@ -45,15 +46,21 @@ export default function Timeline({ clips, setClips, selectedId, onSelectId, hasD
     dragFromRef.current = null
   }
 
+  // The playhead maps to a position within the *source clip's* native time
+  // domain (0..sourceDurationSec, since the <video> always plays the raw
+  // source), while its on-screen position must additionally skip over the
+  // clip's own head-hold segment (which has no corresponding video time —
+  // it's a still frame, not part of the source's playable range).
   const playheadPx = useMemo(() => {
     if (!selectedClip) return null
     let offset = 0
     for (const c of clips) {
       if (c.id === selectedClip.id) break
-      offset += (c.outSec - c.inSec) * PPS + 2
+      offset += clipTotalPx(c, PPS) + GAP_PX
     }
+    const headPx = (selectedClip.headHoldSec || 0) * PPS
     const clampedTime = Math.max(selectedClip.inSec, Math.min(currentTime, selectedClip.outSec))
-    return offset + (clampedTime - selectedClip.inSec) * PPS
+    return offset + headPx + (clampedTime - selectedClip.inSec) * PPS
   }, [selectedClip, currentTime, clips])
 
   function clientXToSeekTime(clientX) {
@@ -62,11 +69,19 @@ export default function Timeline({ clips, setClips, selectedId, onSelectId, hasD
     const clickX = clientX - rect.left
     let offset = 0
     for (const c of clips) {
-      const w = (c.outSec - c.inSec) * PPS
+      const w = clipTotalPx(c, PPS)
       if (c.id === selectedClip.id) {
-        return c.inSec + Math.max(0, Math.min(clickX - offset, w)) / PPS
+        const headPx = (c.headHoldSec || 0) * PPS
+        const mainPx = (c.outSec - c.inSec) * PPS
+        const withinClip = clickX - offset
+        // Clicking inside the head/tail hold segments seeks to the nearest
+        // edge of the main body, since those segments are a still frame
+        // with no independent timeline of their own.
+        if (withinClip < headPx) return c.inSec
+        if (withinClip > headPx + mainPx) return c.outSec
+        return c.inSec + Math.max(0, Math.min(withinClip - headPx, mainPx)) / PPS
       }
-      offset += w + 2
+      offset += w + GAP_PX
     }
     return null
   }
@@ -123,7 +138,7 @@ export default function Timeline({ clips, setClips, selectedId, onSelectId, hasD
 
       {hasDirty && (
         <p className="px-3 py-1.5 text-[10px] text-amber-400 border-t border-neutral-800">
-          ● Unrendered edits — click Render Sequence to apply
+          ● Unrendered edits — click Render to apply
         </p>
       )}
 

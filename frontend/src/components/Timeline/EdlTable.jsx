@@ -1,11 +1,12 @@
 import { formatTimecode } from '../../timecode'
+import { clipTotalSec } from '../../clipMath'
 
 export default function EdlTable({ clips, selectedId, onSelect }) {
   if (clips.length === 0) return null
 
   let recordIn = 0
   const rows = clips.map((clip, i) => {
-    const clipDur = clip.outSec - clip.inSec
+    const totalDur = clipTotalSec(clip)
     const row = {
       clip,
       event: String(i + 1).padStart(3, '0'),
@@ -13,9 +14,11 @@ export default function EdlTable({ clips, selectedId, onSelect }) {
       srcIn: clip.inSec,
       srcOut: clip.outSec,
       recIn: recordIn,
-      recOut: recordIn + clipDur,
+      recOut: recordIn + totalDur,
+      headHoldSec: clip.headHoldSec || 0,
+      tailHoldSec: clip.tailHoldSec || 0,
     }
-    recordIn += clipDur
+    recordIn += totalDur
     return row
   })
 
@@ -33,6 +36,7 @@ export default function EdlTable({ clips, selectedId, onSelect }) {
             <th className="text-left font-normal px-2 py-1">SRC OUT</th>
             <th className="text-left font-normal px-2 py-1">REC IN</th>
             <th className="text-left font-normal px-2 py-1">REC OUT</th>
+            <th className="text-left font-normal px-2 py-1">HOLD H/T</th>
             <th className="text-left font-normal px-2 py-1">STATUS</th>
           </tr>
         </thead>
@@ -49,6 +53,11 @@ export default function EdlTable({ clips, selectedId, onSelect }) {
               <td className="px-2 py-1 text-neutral-400">{formatTimecode(row.srcOut, row.clip.fps || 30)}</td>
               <td className="px-2 py-1 text-neutral-400">{formatTimecode(row.recIn, row.clip.fps || 30)}</td>
               <td className="px-2 py-1 text-neutral-400">{formatTimecode(row.recOut, row.clip.fps || 30)}</td>
+              <td className="px-2 py-1 text-fuchsia-400">
+                {row.headHoldSec > 0 || row.tailHoldSec > 0
+                  ? `${row.headHoldSec.toFixed(1)}s / ${row.tailHoldSec.toFixed(1)}s`
+                  : <span className="text-neutral-600">—</span>}
+              </td>
               <td className="px-2 py-1">
                 {row.clip.dirty
                   ? <span className="text-amber-400">pending</span>

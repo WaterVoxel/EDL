@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { listFiles, listOutputs, probe, trim, splice, promoteOutputToInput } from './api'
+import { listFiles, listOutputs, probe, trim, splice, holdFrame, promoteOutputToInput } from './api'
 import { MediaProvider, useMedia } from './context/MediaContext'
 import Dropzone from './components/Dropzone'
 import MediaLibrary from './components/MediaLibrary'
@@ -21,7 +21,13 @@ function AppInner() {
   const { activePreview } = useMedia()
 
   const selectedClip = timelineClips.find(c => c.id === selectedId) || null
-  const hasDirty = timelineClips.some(c => c.dirty || (!c.renderedInputName && !(c.inSec === 0 && c.outSec === c.sourceDurationSec)))
+  const hasDirty = timelineClips.some(c =>
+    c.dirty ||
+    (!c.renderedInputName && (
+      c.inSec !== 0 || c.outSec !== c.sourceDurationSec ||
+      (c.headHoldSec || 0) > 0 || (c.tailHoldSec || 0) > 0
+    ))
+  )
 
   const refresh = useCallback(() => {
     listFiles().then(setInputFiles)
@@ -42,6 +48,8 @@ function AppInner() {
       fps: info.fps || 30,
       inSec: 0,
       outSec: info.duration,
+      headHoldSec: 0,
+      tailHoldSec: 0,
       dirty: false,
       renderedInputName: null,
     }])
@@ -55,22 +63,50 @@ function AppInner() {
 
   function handleEditResult() { refresh() }
 
-  async function handleRenderSequence() {
+  async function handleRender() {
     if (timelineClips.length === 0) return
     setRendering(true)
     try {
       const resolved = []
       for (const clip of timelineClips) {
+        const needsHold = (clip.headHoldSec || 0) > 0 || (clip.tailHoldSec || 0) > 0
         const untrimmed = clip.inSec === 0 && clip.outSec === clip.sourceDurationSec
-        if (untrimmed && !clip.dirty) {
+        if (untrimmed && !needsHold && !clip.dirty) {
           resolved.push({ ...clip, renderedInputName: clip.sourceName })
-        } else {
-          const trimResult = await trim(clip.sourceName, clip.inSec.toFixed(4), clip.outSec.toFixed(4))
-          if (trimResult.error) { alert('Trim failed: ' + trimResult.error); return }
-          const promoted = await promoteOutputToInput(trimResult.output)
-          if (promoted.error) { alert('Promote failed: ' + promoted.error); return }
-          resolved.push({ ...clip, renderedInputName: promoted.name, dirty: false })
+          continue
         }
+
+        // 1. Trim to the selected in/out range.
+        const trimResult = await trim(clip.sourceName, clip.inSec.toFixed(4), clip.outSec.toFixed(4))
+        if (trimResult.error) { alert('Trim failed: ' + trimResult.error); return }
+        let currentName = trimResult.output
+
+        // 2. Apply head hold: freeze the first frame (time 0 of the now-trimmed
+        // clip) for headHoldSec, extending total length by that amount.
+        if (clip.headHoldSec > 0) {
+          const promoted = await promoteOutputToInput(currentName)
+          if (promoted.error) { alert('Promote failed: ' + promoted.error); return }
+          const held = await holdFrame(promoted.name, 0, clip.headHoldSec)
+          if (held.error) { alert('Head hold failed: ' + held.error); return }
+          currentName = held.output
+        }
+
+        // 3. Apply tail hold: freeze the last frame for tailHoldSec. Re-probe
+        // first since the clip's duration changed if a head hold was applied.
+        if (clip.tailHoldSec > 0) {
+          const promoted = await promoteOutputToInput(currentName)
+          if (promoted.error) { alert('Promote failed: ' + promoted.error); return }
+          const info = await probe(promoted.name, 'input')
+          if (info.error) { alert('Probe failed: ' + info.error); return }
+          const tailTime = Math.max(0, info.duration - 1 / (clip.fps || 30))
+          const held = await holdFrame(promoted.name, tailTime, clip.tailHoldSec)
+          if (held.error) { alert('Tail hold failed: ' + held.error); return }
+          currentName = held.output
+        }
+
+        const promoted = await promoteOutputToInput(currentName)
+        if (promoted.error) { alert('Promote failed: ' + promoted.error); return }
+        resolved.push({ ...clip, renderedInputName: promoted.name, dirty: false })
       }
 
       if (resolved.length > 1) {
@@ -96,11 +132,11 @@ function AppInner() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={handleRenderSequence}
+            onClick={handleRender}
             disabled={rendering || timelineClips.length === 0}
             className="px-3 py-1 text-xs font-medium rounded bg-emerald-600 text-white hover:bg-emerald-500 disabled:bg-neutral-700 disabled:text-neutral-500"
           >
-            {rendering ? 'Rendering…' : '▶ Render Sequence'}
+            {rendering ? 'Rendering…' : '▶ Render'}
           </button>
           <button onClick={() => location.reload()} className="px-3 py-1 text-xs rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 hover:border-neutral-500">↻ Refresh</button>
         </div>
@@ -125,7 +161,7 @@ function AppInner() {
             <PreviewPlayer />
           </div>
           <div className="grid grid-cols-2 gap-3 px-3 pt-3">
-            <HoldFrameForm selectedClip={selectedClip} onResult={handleEditResult} />
+            <HoldFrameForm selectedClip={selectedClip} setClips={setTimelineClips} />
             <ReverseForm selectedClip={selectedClip} onResult={handleEditResult} />
           </div>
           <div className="p-3 shrink-0">

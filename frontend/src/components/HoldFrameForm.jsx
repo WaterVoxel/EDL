@@ -1,27 +1,19 @@
 import { useState } from 'react'
-import { holdFrame } from '../api'
 
-const MIN_TAIL_OFFSET = 0.05
-
-export default function HoldFrameForm({ selectedClip, onResult }) {
+export default function HoldFrameForm({ selectedClip, setClips }) {
   const [duration, setDuration] = useState('1')
-  const [loading, setLoading] = useState(null) // 'head' | 'tail' | null
 
-  async function run(which) {
+  function apply(which) {
     if (!selectedClip) return
     const dur = parseFloat(duration)
     if (!dur || dur <= 0) return
-    setLoading(which)
-    const time = which === 'head'
-      ? selectedClip.inSec
-      : Math.max(selectedClip.inSec, selectedClip.outSec - MIN_TAIL_OFFSET)
-    const data = await holdFrame(selectedClip.sourceName, time, dur)
-    setLoading(null)
-    if (data.error) alert('Error: ' + data.error + (data.detail ? '\n' + data.detail : ''))
-    else onResult(data.output)
+    const field = which === 'head' ? 'headHoldSec' : 'tailHoldSec'
+    setClips(prev => prev.map(c =>
+      c.id === selectedClip.id ? { ...c, [field]: dur, dirty: true } : c
+    ))
   }
 
-  const disabled = !selectedClip || loading !== null
+  const disabled = !selectedClip
 
   return (
     <div className="rounded-md border border-neutral-800 bg-neutral-900 p-3">
@@ -35,20 +27,25 @@ export default function HoldFrameForm({ selectedClip, onResult }) {
         />
         <span className="text-[10px] text-neutral-500">sec</span>
         <button
-          onClick={() => run('head')}
+          onClick={() => apply('head')}
           disabled={disabled}
-          className="flex-1 px-2 py-1 text-xs rounded bg-indigo-600 text-white hover:bg-indigo-500 disabled:bg-neutral-700 disabled:text-neutral-500"
+          className="flex-1 px-2 py-1 text-xs rounded bg-fuchsia-700 text-white hover:bg-fuchsia-600 disabled:bg-neutral-700 disabled:text-neutral-500"
         >
-          {loading === 'head' ? '…' : 'Head'}
+          Head
         </button>
         <button
-          onClick={() => run('tail')}
+          onClick={() => apply('tail')}
           disabled={disabled}
-          className="flex-1 px-2 py-1 text-xs rounded bg-indigo-600 text-white hover:bg-indigo-500 disabled:bg-neutral-700 disabled:text-neutral-500"
+          className="flex-1 px-2 py-1 text-xs rounded bg-fuchsia-700 text-white hover:bg-fuchsia-600 disabled:bg-neutral-700 disabled:text-neutral-500"
         >
-          {loading === 'tail' ? '…' : 'Tail'}
+          Tail
         </button>
       </div>
+      {selectedClip && (selectedClip.headHoldSec > 0 || selectedClip.tailHoldSec > 0) && (
+        <p className="mt-2 text-[10px] text-fuchsia-400">
+          Head: {(selectedClip.headHoldSec || 0).toFixed(1)}s · Tail: {(selectedClip.tailHoldSec || 0).toFixed(1)}s — click Render to apply.
+        </p>
+      )}
     </div>
   )
 }

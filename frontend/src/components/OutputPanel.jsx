@@ -20,7 +20,7 @@ export default function OutputPanel({ files }) {
   }
 
   // Auto-show the most recently rendered output whenever the list changes
-  // (e.g. right after Render Sequence), so the right column always reflects
+  // (e.g. right after clicking Render), so the right column always reflects
   // the latest render without requiring a manual click.
   useEffect(() => {
     if (files.length === 0) {

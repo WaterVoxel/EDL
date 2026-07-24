@@ -1,12 +1,14 @@
-import { useRef } from 'react'
+import { clipHeadPx, clipMainPx, clipTailPx, clipTotalPx } from '../../clipMath'
 
 const MIN_CLIP_SEC = 0.1
 
 export default function TimelineClip({ clip, pps, selected, onSelect, onTrim, index, onDragStart, onDragOver, onDrop }) {
-  const startRef = useRef(null)
+  const headPx = clipHeadPx(clip, pps)
+  const mainPx = clipMainPx(clip, pps)
+  const tailPx = clipTailPx(clip, pps)
+  const totalPx = clipTotalPx(clip, pps)
 
-  const widthPx = (clip.outSec - clip.inSec) * pps
-  const durationLabel = (clip.outSec - clip.inSec).toFixed(2) + 's'
+  const mainDurationLabel = (clip.outSec - clip.inSec).toFixed(2) + 's'
 
   function handleEdgeDrag(edge, e) {
     e.stopPropagation()
@@ -44,30 +46,56 @@ export default function TimelineClip({ clip, pps, selected, onSelect, onTrim, in
 
   return (
     <div
-      ref={startRef}
-      className={`relative flex-shrink-0 h-full rounded border cursor-pointer select-none overflow-hidden bg-gradient-to-b from-neutral-700 to-neutral-800 ${borderClass}`}
-      style={{ width: Math.max(widthPx, 24) }}
-      onClick={() => onSelect(clip)}
+      className="relative flex-shrink-0 h-full select-none"
+      style={{ width: Math.max(totalPx, 24) }}
       draggable
       onDragStart={e => { e.dataTransfer.effectAllowed = 'move'; onDragStart(index) }}
       onDragOver={e => { e.preventDefault(); onDragOver(index) }}
       onDrop={e => { e.preventDefault(); onDrop(index) }}
     >
-      {/* Left trim handle */}
+      {/* Head hold segment — distinct color, represents a pending/rendered freeze-frame extension */}
+      {headPx > 0 && (
+        <div
+          className="absolute top-0 bottom-0 left-0 rounded-l border border-fuchsia-500 bg-gradient-to-b from-fuchsia-700 to-fuchsia-900 flex flex-col items-center justify-center overflow-hidden cursor-pointer"
+          style={{ width: headPx }}
+          onClick={() => onSelect(clip)}
+        >
+          <span className="text-[8px] text-fuchsia-100 font-medium leading-none">HOLD</span>
+          <span className="text-[8px] text-fuchsia-200 font-mono leading-none mt-0.5">{clip.headHoldSec.toFixed(1)}s</span>
+        </div>
+      )}
+
+      {/* Main body — the trimmed source clip */}
       <div
-        className="absolute top-0 bottom-0 left-0 w-1.5 cursor-ew-resize hover:bg-indigo-400/50 z-10"
-        onPointerDown={e => handleEdgeDrag('left', e)}
-      />
-      {/* Right trim handle */}
-      <div
-        className="absolute top-0 bottom-0 right-0 w-1.5 cursor-ew-resize hover:bg-indigo-400/50 z-10"
-        onPointerDown={e => handleEdgeDrag('right', e)}
-      />
-      {/* Label */}
-      <div className="absolute inset-0 flex flex-col items-start justify-between px-2 py-1 pointer-events-none">
-        <span className="text-[9px] text-neutral-200 truncate max-w-full font-medium">{clip.sourceName}</span>
-        <span className="text-[9px] text-neutral-400 font-mono">{durationLabel}</span>
+        className={`absolute top-0 bottom-0 rounded overflow-hidden cursor-pointer bg-gradient-to-b from-neutral-700 to-neutral-800 border ${borderClass}`}
+        style={{ left: headPx, width: Math.max(mainPx, 24) }}
+        onClick={() => onSelect(clip)}
+      >
+        <div
+          className="absolute top-0 bottom-0 left-0 w-1.5 cursor-ew-resize hover:bg-indigo-400/50 z-10"
+          onPointerDown={e => handleEdgeDrag('left', e)}
+        />
+        <div
+          className="absolute top-0 bottom-0 right-0 w-1.5 cursor-ew-resize hover:bg-indigo-400/50 z-10"
+          onPointerDown={e => handleEdgeDrag('right', e)}
+        />
+        <div className="absolute inset-0 flex flex-col items-start justify-between px-2 py-1 pointer-events-none">
+          <span className="text-[9px] text-neutral-200 truncate max-w-full font-medium">{clip.sourceName}</span>
+          <span className="text-[9px] text-neutral-400 font-mono">{mainDurationLabel}</span>
+        </div>
       </div>
+
+      {/* Tail hold segment */}
+      {tailPx > 0 && (
+        <div
+          className="absolute top-0 bottom-0 rounded-r border border-fuchsia-500 bg-gradient-to-b from-fuchsia-700 to-fuchsia-900 flex flex-col items-center justify-center overflow-hidden cursor-pointer"
+          style={{ left: headPx + mainPx, width: tailPx }}
+          onClick={() => onSelect(clip)}
+        >
+          <span className="text-[8px] text-fuchsia-100 font-medium leading-none">HOLD</span>
+          <span className="text-[8px] text-fuchsia-200 font-mono leading-none mt-0.5">{clip.tailHoldSec.toFixed(1)}s</span>
+        </div>
+      )}
     </div>
   )
 }

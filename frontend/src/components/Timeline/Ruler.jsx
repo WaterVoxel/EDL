@@ -1,5 +1,7 @@
+import { clipTotalSec } from '../../clipMath'
+
 export default function Ruler({ clips, pps }) {
-  const totalDuration = clips.reduce((sum, c) => sum + (c.outSec - c.inSec), 0)
+  const totalDuration = clips.reduce((sum, c) => sum + clipTotalSec(c), 0)
   const totalWidth = totalDuration * pps + clips.length * 2
 
   // one tick per second, labeled every 5s to stay readable at typical zoom
