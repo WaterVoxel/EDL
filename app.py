@@ -125,6 +125,17 @@ def clear_input():
     return jsonify({"removed": removed})
 
 
+@app.route("/api/clear_output", methods=["POST"])
+def clear_output():
+    removed = []
+    for name in os.listdir(fu.OUTPUT_DIR):
+        p = os.path.join(fu.OUTPUT_DIR, name)
+        if os.path.isfile(p) and name.lower().endswith(fu.ALLOWED_EXTENSIONS):
+            os.remove(p)
+            removed.append(name)
+    return jsonify({"removed": removed})
+
+
 # ---------- trim ----------
 
 @app.route("/api/trim", methods=["POST"])

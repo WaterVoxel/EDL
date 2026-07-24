@@ -16,6 +16,7 @@ export const upload = (file) => {
   return fetch('/api/upload', { method: 'POST', body: fd }).then(r => r.json())
 }
 export const clearInput = () => fetch('/api/clear_input', { method: 'POST' }).then(r => r.json())
+export const clearOutput = () => fetch('/api/clear_output', { method: 'POST' }).then(r => r.json())
 export const trim = (input, start, end, output) => postJSON('/api/trim', { input, start, end, output })
 export const splice = (inputs, output) => postJSON('/api/splice', { inputs, output })
 export const holdFrame = (input, time, duration, output) => postJSON('/api/hold_frame', { input, time, duration, output })

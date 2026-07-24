@@ -1,7 +1,8 @@
-import { probe } from '../api'
+import { probe, clearInput } from '../api'
 import { useMedia } from '../context/MediaContext'
+import ClearButton from './ClearButton'
 
-export default function MediaLibrary({ files, onAddToTimeline }) {
+export default function MediaLibrary({ files, onAddToTimeline, onCleared }) {
   const { setActivePreview, videoRef } = useMedia()
 
   function handleClick(name) {
@@ -16,8 +17,13 @@ export default function MediaLibrary({ files, onAddToTimeline }) {
 
   return (
     <div className="rounded-md bg-neutral-900 border border-neutral-800">
-      <div className="px-2 py-1 border-b border-neutral-800 text-[9px] font-semibold uppercase tracking-wide text-neutral-500">
-        Media Bin
+      <div className="flex items-center justify-between px-2 py-1 border-b border-neutral-800">
+        <span className="text-[9px] font-semibold uppercase tracking-wide text-neutral-500">Media Bin</span>
+        <ClearButton
+          label="Clear"
+          confirmText="Delete all files in input/? This cannot be undone."
+          onClear={() => clearInput().then(() => onCleared())}
+        />
       </div>
       <ul className="max-h-36 overflow-y-auto divide-y divide-neutral-800">
         {files.map(f => (

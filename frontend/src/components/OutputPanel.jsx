@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
-import { probe } from '../api'
+import { probe, clearOutput } from '../api'
 import TechInfoPanel from './TechInfoPanel'
 import DownloadButton from './DownloadButton'
+import ClearButton from './ClearButton'
 
-export default function OutputPanel({ files }) {
+export default function OutputPanel({ files, onCleared }) {
   const videoRef = useRef(null)
   const [selectedName, setSelectedName] = useState(null)
   const [info, setInfo] = useState(null)
@@ -33,6 +34,15 @@ export default function OutputPanel({ files }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [files.length])
 
+  function handleClear() {
+    clearOutput().then(() => {
+      if (videoRef.current) videoRef.current.removeAttribute('src')
+      setSelectedName(null)
+      setInfo(null)
+      onCleared()
+    })
+  }
+
   return (
     <div className="flex flex-col gap-2">
       <div className="rounded-md bg-black border border-neutral-800 flex items-center justify-center aspect-video">
@@ -41,8 +51,13 @@ export default function OutputPanel({ files }) {
       <TechInfoPanel info={info} />
       <DownloadButton outputName={selectedName} />
       <div className="rounded-md bg-neutral-900 border border-neutral-800">
-        <div className="px-2 py-1 border-b border-neutral-800 text-[9px] font-semibold uppercase tracking-wide text-neutral-500">
-          Exports
+        <div className="flex items-center justify-between px-2 py-1 border-b border-neutral-800">
+          <span className="text-[9px] font-semibold uppercase tracking-wide text-neutral-500">Exports</span>
+          <ClearButton
+            label="Clear"
+            confirmText="Delete all files in output/? This cannot be undone."
+            onClear={handleClear}
+          />
         </div>
         <ul className="max-h-28 overflow-y-auto divide-y divide-neutral-800">
           {files.map(f => (

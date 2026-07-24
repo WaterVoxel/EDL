@@ -6,7 +6,6 @@ import MediaLibrary from './components/MediaLibrary'
 import OutputPanel from './components/OutputPanel'
 import PreviewPlayer from './components/PreviewPlayer'
 import TechInfoPanel from './components/TechInfoPanel'
-import ClearInputButton from './components/ClearInputButton'
 import HoldFrameForm from './components/HoldFrameForm'
 import TrimForm from './components/TrimForm'
 import ReverseForm from './components/ReverseForm'
@@ -17,6 +16,8 @@ import Timeline from './components/Timeline/Timeline'
 
 const MIN_RIGHT_PANEL = 260
 const MAX_RIGHT_PANEL = 720
+const MIN_LEFT_PANEL = 180
+const MAX_LEFT_PANEL = 560
 
 function AppInner() {
   const [inputFiles, setInputFiles] = useState([])
@@ -25,7 +26,8 @@ function AppInner() {
   const [selectedId, setSelectedId] = useState(null)
   const [rendering, setRendering] = useState(false)
   const [rightPanelWidth, setRightPanelWidth] = useState(320)
-  const resizingRef = useRef(false)
+  const [leftPanelWidth, setLeftPanelWidth] = useState(224)
+  const resizingRef = useRef(null)
   const { activePreview } = useMedia()
 
   const selectedClip = timelineClips.find(c => c.id === selectedId) || null
@@ -145,24 +147,29 @@ function AppInner() {
     }
   }
 
-  function startResize(e) {
-    e.preventDefault()
-    resizingRef.current = true
-    document.body.style.cursor = 'col-resize'
+  function startResize(side) {
+    return function (e) {
+      e.preventDefault()
+      resizingRef.current = side
+      document.body.style.cursor = 'col-resize'
 
-    function onMove(ev) {
-      if (!resizingRef.current) return
-      const fromRight = window.innerWidth - ev.clientX
-      setRightPanelWidth(Math.max(MIN_RIGHT_PANEL, Math.min(MAX_RIGHT_PANEL, fromRight)))
+      function onMove(ev) {
+        if (resizingRef.current === 'right') {
+          const fromRight = window.innerWidth - ev.clientX
+          setRightPanelWidth(Math.max(MIN_RIGHT_PANEL, Math.min(MAX_RIGHT_PANEL, fromRight)))
+        } else if (resizingRef.current === 'left') {
+          setLeftPanelWidth(Math.max(MIN_LEFT_PANEL, Math.min(MAX_LEFT_PANEL, ev.clientX)))
+        }
+      }
+      function onUp() {
+        resizingRef.current = null
+        document.body.style.cursor = ''
+        document.removeEventListener('pointermove', onMove)
+        document.removeEventListener('pointerup', onUp)
+      }
+      document.addEventListener('pointermove', onMove)
+      document.addEventListener('pointerup', onUp)
     }
-    function onUp() {
-      resizingRef.current = false
-      document.body.style.cursor = ''
-      document.removeEventListener('pointermove', onMove)
-      document.removeEventListener('pointerup', onUp)
-    }
-    document.addEventListener('pointermove', onMove)
-    document.addEventListener('pointerup', onUp)
   }
 
   const displayInfo = activePreview?.info ? { ...activePreview.info, _name: activePreview.name } : null
@@ -190,15 +197,22 @@ function AppInner() {
       {/* Main content */}
       <div className="flex flex-1 min-h-0">
         {/* Left: Media bin + always-visible metadata inspector */}
-        <div className="w-56 flex flex-col gap-2 p-2 border-r border-neutral-800 overflow-y-auto shrink-0">
+        <div
+          style={{ width: leftPanelWidth }}
+          className="flex flex-col gap-2 p-2 overflow-y-auto shrink-0"
+        >
           <Dropzone onUpload={handleUpload} />
-          <div className="flex items-center justify-between">
-            <span className="text-[9px] text-neutral-500">{inputFiles.length} file(s)</span>
-            <ClearInputButton onCleared={handleCleared} />
-          </div>
-          <MediaLibrary files={inputFiles} onAddToTimeline={handleAddToTimeline} />
+          <span className="text-[9px] text-neutral-500">{inputFiles.length} file(s)</span>
+          <MediaLibrary files={inputFiles} onAddToTimeline={handleAddToTimeline} onCleared={handleCleared} />
           <TechInfoPanel info={displayInfo} />
         </div>
+
+        {/* Drag handle to resize the left panel */}
+        <div
+          onPointerDown={startResize('left')}
+          className="w-1.5 shrink-0 cursor-col-resize bg-neutral-800 hover:bg-indigo-500 active:bg-indigo-500 transition-colors"
+          title="Drag to resize"
+        />
 
         {/* Center: Preview + toolbar + Timeline + Chat */}
         <div className="flex-1 flex flex-col min-w-0">
@@ -234,7 +248,7 @@ function AppInner() {
 
         {/* Drag handle to resize the right panel */}
         <div
-          onPointerDown={startResize}
+          onPointerDown={startResize('right')}
           className="w-1.5 shrink-0 cursor-col-resize bg-neutral-800 hover:bg-indigo-500 active:bg-indigo-500 transition-colors"
           title="Drag to resize"
         />
@@ -244,7 +258,7 @@ function AppInner() {
           style={{ width: rightPanelWidth }}
           className="flex flex-col gap-2 p-2 overflow-y-auto shrink-0"
         >
-          <OutputPanel files={outputFiles} />
+          <OutputPanel files={outputFiles} onCleared={refresh} />
         </div>
       </div>
     </div>
