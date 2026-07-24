@@ -217,6 +217,103 @@ def build_holdframe_filter(t, dur, fps, sample_rate=44100, channel_layout="stere
     )
 
 
+def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
+                           sample_rate=44100, channel_layout="stereo"):
+    """Build one filter_complex string that renders an entire timeline (a
+    sequence of trimmed clips, each optionally extended by a frozen-frame
+    hold at its lead and/or trail edge) as a single continuous video.
+
+    clip_specs[i] is a dict: {inSec, outSec, fps, has_audio, lead_hold_sec,
+    trail_hold_sec}. lead_hold_sec should only be nonzero for clip 0 and
+    trail_hold_sec only for the last clip (callers must enforce this — this
+    function does not check clip position). Input index i in the filter
+    graph corresponds to the i-th "-i" argument on the ffmpeg command line,
+    in the same order as clip_specs.
+
+    Per clip: an optional leading freeze (one frame at inSec, looped) is
+    prepended, the main trimmed segment follows, then an optional trailing
+    freeze (one frame at outSec, looped) is appended — these 1-3 pieces are
+    concatenated into one per-clip segment, normalized to the common
+    target resolution/fps, and finally every clip's normalized segment is
+    concatenated into [outv][outa].
+    """
+    chains = []
+    norm_v_labels = []
+    norm_a_labels = []
+    for i, spec in enumerate(clip_specs):
+        in_sec = spec["inSec"]
+        out_sec = spec["outSec"]
+        fps = spec["fps"] or 30.0
+        has_audio = spec["has_audio"]
+        lead_hold = spec.get("lead_hold_sec") or 0
+        trail_hold = spec.get("trail_hold_sec") or 0
+        frame_dur = 1.0 / fps
+
+        v_pieces = []
+        a_pieces = []
+
+        if lead_hold > 0:
+            n_loops = max(round(lead_hold * fps) - 1, 0)
+            chains.append(
+                f"[{i}:v]trim=start={in_sec}:end={in_sec + frame_dur},setpts=PTS-STARTPTS,"
+                f"loop=loop={n_loops}:size=1:start=0,setpts=PTS-STARTPTS[vlead{i}]"
+            )
+            v_pieces.append(f"[vlead{i}]")
+            chains.append(
+                f"anullsrc=channel_layout={channel_layout}:sample_rate={sample_rate}:duration={lead_hold}[alead{i}]"
+            )
+            a_pieces.append(f"[alead{i}]")
+
+        chains.append(f"[{i}:v]trim=start={in_sec}:end={out_sec},setpts=PTS-STARTPTS[vmain{i}]")
+        v_pieces.append(f"[vmain{i}]")
+        if has_audio:
+            chains.append(f"[{i}:a]atrim=start={in_sec}:end={out_sec},asetpts=PTS-STARTPTS[amain{i}]")
+        else:
+            chains.append(
+                f"anullsrc=channel_layout={channel_layout}:sample_rate={sample_rate}:"
+                f"duration={out_sec - in_sec}[amain{i}]"
+            )
+        a_pieces.append(f"[amain{i}]")
+
+        if trail_hold > 0:
+            n_loops = max(round(trail_hold * fps) - 1, 0)
+            chains.append(
+                f"[{i}:v]trim=start={out_sec - frame_dur}:end={out_sec},setpts=PTS-STARTPTS,"
+                f"loop=loop={n_loops}:size=1:start=0,setpts=PTS-STARTPTS[vtrail{i}]"
+            )
+            v_pieces.append(f"[vtrail{i}]")
+            chains.append(
+                f"anullsrc=channel_layout={channel_layout}:sample_rate={sample_rate}:duration={trail_hold}[atrail{i}]"
+            )
+            a_pieces.append(f"[atrail{i}]")
+
+        if len(v_pieces) > 1:
+            chains.append(f"{''.join(v_pieces)}concat=n={len(v_pieces)}:v=1:a=0[vseg{i}]")
+            v_seg_label = f"[vseg{i}]"
+        else:
+            v_seg_label = v_pieces[0]
+
+        if len(a_pieces) > 1:
+            chains.append(f"{''.join(a_pieces)}concat=n={len(a_pieces)}:v=0:a=1[aseg{i}]")
+            a_seg_label = f"[aseg{i}]"
+        else:
+            a_seg_label = a_pieces[0]
+
+        chains.append(
+            f"{v_seg_label}scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+            f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={target_fps}[vnorm{i}]"
+        )
+        chains.append(
+            f"{a_seg_label}aformat=sample_rates={sample_rate}:channel_layouts={channel_layout}[anorm{i}]"
+        )
+        norm_v_labels.append(f"[vnorm{i}]")
+        norm_a_labels.append(f"[anorm{i}]")
+
+    interleaved = "".join(f"{v}{a}" for v, a in zip(norm_v_labels, norm_a_labels))
+    chains.append(f"{interleaved}concat=n={len(clip_specs)}:v=1:a=1[outv][outa]")
+    return ";".join(chains)
+
+
 def estimate_reverse_memory_bytes(width, height, duration_s, fps):
     if not width or not height or not fps:
         return 0

@@ -17,14 +17,7 @@ export const upload = (file) => {
 }
 export const clearInput = () => fetch('/api/clear_input', { method: 'POST' }).then(r => r.json())
 export const clearOutput = () => fetch('/api/clear_output', { method: 'POST' }).then(r => r.json())
-export const trim = (input, start, end, output) => postJSON('/api/trim', { input, start, end, output })
-export const splice = (inputs, output) => postJSON('/api/splice', { inputs, output })
-export const holdFrame = (input, time, duration, output) => postJSON('/api/hold_frame', { input, time, duration, output })
+export const renderTimeline = (clips, output) => postJSON('/api/render_timeline', { clips, output })
 export const reverse = (input, confirm) => postJSON('/api/reverse', { input, confirm })
 export const chat = (message, session_id) => postJSON('/api/chat', { message, session_id })
 export const execute = (command) => postJSON('/api/execute', { command })
-
-export const promoteOutputToInput = async (outputName) => {
-  const blob = await fetch(`/output/${encodeURIComponent(outputName)}`).then(r => r.blob())
-  return upload(new File([blob], outputName, { type: blob.type }))
-}

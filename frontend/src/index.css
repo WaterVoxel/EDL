@@ -12,3 +12,27 @@ body {
   display: flex;
   flex-direction: column;
 }
+
+* {
+  scrollbar-color: #404040 #18181b; /* neutral-700 thumb, neutral-900 track */
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: #18181b; /* neutral-900 */
+}
+
+*::-webkit-scrollbar-thumb {
+  background: #404040; /* neutral-700 */
+  border-radius: 6px;
+  border: 2px solid #18181b;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: #6366f1; /* indigo-500, matches panel-resize-handle hover */
+}

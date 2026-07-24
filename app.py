@@ -64,7 +64,7 @@ def _list_dir(base):
     for name in sorted(os.listdir(base)):
         p = os.path.join(base, name)
         if os.path.isfile(p) and name.lower().endswith(fu.ALLOWED_EXTENSIONS):
-            files.append({"name": name, "size": os.path.getsize(p)})
+            files.append({"name": name, "size": os.path.getsize(p), "modified": os.path.getmtime(p)})
     return files
 
 
@@ -223,6 +223,91 @@ def splice():
     args.append(out_path)
 
     result = fu.run_ffmpeg(args)
+    if result.returncode != 0:
+        return jsonify({"error": "ffmpeg failed", "detail": result.stderr[-4000:]}), 500
+    return jsonify({"output": out_name})
+
+
+# ---------- render timeline ----------
+
+@app.route("/api/render_timeline", methods=["POST"])
+def render_timeline():
+    data = request.get_json(force=True)
+    clips = data.get("clips") or []
+    if not clips:
+        return jsonify({"error": "need at least 1 clip"}), 400
+
+    try:
+        in_paths = [fu.safe_path(c["input"], fu.INPUT_DIR) for c in clips]
+    except (fu.PathError, KeyError) as e:
+        return jsonify({"error": str(e)}), 400
+    for p in in_paths:
+        if not os.path.exists(p):
+            return jsonify({"error": f"input file not found: {p}"}), 404
+
+    infos = []
+    for p in in_paths:
+        try:
+            infos.append(fu.get_video_info(p))
+        except RuntimeError as e:
+            return jsonify({"error": f"probe failed for {p}", "detail": str(e)}), 500
+
+    # Server always derives fps/has_audio/resolution itself — never trusts
+    # client-supplied values — same principle /api/hold_frame already
+    # follows. Only inSec/outSec/hold durations come from the request.
+    clip_specs = []
+    for i, (c, info) in enumerate(zip(clips, infos)):
+        try:
+            in_sec = float(c["inSec"])
+            out_sec = float(c["outSec"])
+        except (KeyError, ValueError, TypeError):
+            return jsonify({"error": f"clip {i}: inSec/outSec must be numeric"}), 400
+        if out_sec <= in_sec or in_sec < 0 or out_sec > info["duration"] + 0.001:
+            return jsonify({"error": f"clip {i}: invalid inSec/outSec for source duration {info['duration']}"}), 400
+
+        is_first = i == 0
+        is_last = i == len(clips) - 1
+        lead_hold = float(c.get("headHoldSec") or 0) if is_first else 0.0
+        # Freezing an already-frozen frame is a pixel no-op, so a trailing
+        # tail-hold and round-hold (Raise) on the same last clip just add.
+        trail_hold = (float(c.get("tailHoldSec") or 0) + float(c.get("roundHoldSec") or 0)) if is_last else 0.0
+
+        clip_specs.append({
+            "inSec": in_sec,
+            "outSec": out_sec,
+            "fps": info["fps"] or 30.0,
+            "has_audio": info["has_audio"],
+            "lead_hold_sec": lead_hold,
+            "trail_hold_sec": trail_hold,
+        })
+
+    target_w = max(i["width"] for i in infos)
+    target_h = max(i["height"] for i in infos)
+    target_fps = max(i["fps"] or 30 for i in infos)
+
+    audio_infos = [i for i in infos if i["has_audio"]]
+    combined_info = {
+        "has_audio": True,
+        "audio_bit_rate": max((i["audio_bit_rate"] or 0 for i in audio_infos), default=0),
+        "audio_sample_rate": max((i["audio_sample_rate"] or 0 for i in audio_infos), default=0),
+        "audio_channels": max((i["audio_channels"] or 0 for i in audio_infos), default=0),
+    }
+
+    out_name = fu.unique_output_name(data.get("output") or "render.mp4")
+    out_path = os.path.join(fu.OUTPUT_DIR, out_name)
+
+    filt = fu.build_timeline_filter(clip_specs, target_w, target_h, target_fps)
+
+    args = []
+    for p in in_paths:
+        args += ["-i", p]
+    args += ["-filter_complex", filt, "-map", "[outv]", "-map", "[outa]"]
+    args += fu.lossless_encode_args(combined_info)
+    args.append(out_path)
+
+    # A single-pass whole-timeline render at -qp 0 can run long; the
+    # default 600s timeout was sized for single short operations.
+    result = fu.run_ffmpeg(args, timeout=1800)
     if result.returncode != 0:
         return jsonify({"error": "ffmpeg failed", "detail": result.stderr[-4000:]}), 500
     return jsonify({"output": out_name})

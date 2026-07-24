@@ -62,9 +62,7 @@ export default function EdlTable({ clips, selectedId, onSelect, onDelete }) {
               <td className="px-1.5 py-0.5">
                 {row.clip.dirty
                   ? <span className="text-amber-400">pending</span>
-                  : row.clip.renderedInputName
-                    ? <span className="text-emerald-400">rendered</span>
-                    : <span className="text-neutral-600">—</span>}
+                  : <span className="text-emerald-400">rendered</span>}
               </td>
               <td className="px-1.5 py-0.5">
                 <button

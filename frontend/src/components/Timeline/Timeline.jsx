@@ -1,10 +1,11 @@
-import { useRef, useMemo, useEffect } from 'react'
+import { useRef, useMemo, useEffect, useState } from 'react'
 import TimelineClip from './TimelineClip'
 import Playhead from './Playhead'
 import Ruler from './Ruler'
 import EdlTable from './EdlTable'
 import { useMedia } from '../../context/MediaContext'
 import { probe } from '../../api'
+import { parseTimecode } from '../../timecode'
 import { clipTotalSec, clipTotalPx, clipBaseSec, roundUpAmount, sanitizeHoldPlacement, GAP_PX } from '../../clipMath'
 
 const PPS = 60
@@ -13,6 +14,7 @@ export default function Timeline({ clips, setClips, selectedId, onSelectId, hasD
   const { currentTime, seekTo, videoRef, setActivePreview } = useMedia()
   const trackRef = useRef(null)
   const dragFromRef = useRef(null)
+  const [timeInput, setTimeInput] = useState('')
 
   const selectedClip = clips.find(c => c.id === selectedId)
   const totalDuration = clips.reduce((sum, c) => sum + clipTotalSec(c), 0)
@@ -34,7 +36,11 @@ export default function Timeline({ clips, setClips, selectedId, onSelectId, hasD
   }
 
   function handleDelete(id) {
-    setClips(prev => sanitizeHoldPlacement(prev.filter(c => c.id !== id)))
+    // Removing a clip changes the rendered sequence even though the
+    // remaining clips themselves are unedited, so mark them dirty too.
+    setClips(prev => sanitizeHoldPlacement(
+      prev.filter(c => c.id !== id).map(c => ({ ...c, dirty: true }))
+    ))
     if (id === selectedId) onSelectId(null)
   }
 
@@ -60,9 +66,10 @@ export default function Timeline({ clips, setClips, selectedId, onSelectId, hasD
       const next = [...prev]
       const [moved] = next.splice(dragFromRef.current, 1)
       next.splice(targetIdx, 0, moved)
-      // Reordering can move a clip that held a head/tail/round segment
-      // away from the sequence's outer edge, so re-anchor those segments.
-      return sanitizeHoldPlacement(next)
+      // Reordering changes the rendered sequence, and can move a clip that
+      // held a head/tail/round segment away from the sequence's outer
+      // edge, so re-anchor those segments and mark everything dirty.
+      return sanitizeHoldPlacement(next.map(c => ({ ...c, dirty: true })))
     })
     dragFromRef.current = null
   }
@@ -117,14 +124,42 @@ export default function Timeline({ clips, setClips, selectedId, onSelectId, hasD
     if (t != null) seekTo(t)
   }
 
+  function handleTimeInputSubmit(e) {
+    e.preventDefault()
+    if (!selectedClip) return
+    const parsed = parseTimecode(timeInput, selectedClip.fps || 30)
+    if (parsed == null) return
+    const clamped = Math.max(selectedClip.inSec, Math.min(parsed, selectedClip.outSec))
+    seekTo(clamped)
+  }
+
   return (
     <div className="rounded-md bg-neutral-900 border border-neutral-800 flex flex-col">
       <div className="flex items-center justify-between px-2.5 py-1.5 border-b border-neutral-800">
         <h2 className="text-[9px] font-semibold uppercase tracking-wide text-neutral-500">Timeline</h2>
-        <span className="text-[9px] text-neutral-600">
-          {clips.length} clip(s) · {totalDuration.toFixed(2)}s total
-          {selectedId && <span className="ml-2 text-neutral-700">Del/Backspace to remove selected clip</span>}
-        </span>
+        <div className="flex items-center gap-2">
+          <form onSubmit={handleTimeInputSubmit} className="flex items-center gap-1">
+            <input
+              value={timeInput}
+              onChange={e => setTimeInput(e.target.value)}
+              disabled={!selectedClip}
+              placeholder="00:00:00:00"
+              title="Enter seconds (12.5) or timecode (HH:MM:SS:FF) and press Go"
+              className="w-20 px-1.5 py-0.5 text-[10px] font-mono rounded bg-neutral-950 border border-neutral-700 text-neutral-300 disabled:opacity-50"
+            />
+            <button
+              type="submit"
+              disabled={!selectedClip}
+              className="px-1.5 py-0.5 text-[10px] rounded bg-indigo-600 text-white hover:bg-indigo-500 disabled:bg-neutral-700 disabled:text-neutral-500"
+            >
+              Go
+            </button>
+          </form>
+          <span className="text-[9px] text-neutral-600">
+            {clips.length} clip(s) · {totalDuration.toFixed(2)}s total
+            {selectedId && <span className="ml-2 text-neutral-700">Del/Backspace to remove selected clip</span>}
+          </span>
+        </div>
       </div>
 
       {clips.length === 0 ? (

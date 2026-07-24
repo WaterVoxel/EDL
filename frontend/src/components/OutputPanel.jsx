@@ -45,7 +45,7 @@ export default function OutputPanel({ files, onCleared }) {
 
   return (
     <div className="flex flex-col gap-2">
-      <div className="rounded-md bg-black border border-neutral-800 flex items-center justify-center aspect-video">
+      <div className="rounded-md bg-black border border-neutral-800 flex items-center justify-center aspect-video max-h-[38vh]">
         <video ref={videoRef} controls className="max-w-full max-h-full" />
       </div>
       <TechInfoPanel info={info} />
@@ -59,14 +59,17 @@ export default function OutputPanel({ files, onCleared }) {
             onClear={handleClear}
           />
         </div>
-        <ul className="max-h-28 overflow-y-auto divide-y divide-neutral-800">
+        <ul className="max-h-56 overflow-y-auto divide-y divide-neutral-800">
           {files.map(f => (
             <li
               key={f.name}
               onClick={() => loadOutput(f.name)}
               className={`px-2 py-1 text-[11px] cursor-pointer truncate ${f.name === selectedName ? 'bg-indigo-900/40 text-indigo-300' : 'text-neutral-300 hover:bg-neutral-800/70'}`}
             >
-              {f.name}
+              <div>{f.name}</div>
+              {f.modified && (
+                <div className="text-[9px] text-neutral-500">{new Date(f.modified * 1000).toLocaleString()}</div>
+              )}
             </li>
           ))}
           {files.length === 0 && <li className="px-2 py-2 text-[11px] text-neutral-600 text-center">No exports yet</li>}

@@ -26,7 +26,6 @@ export default function SpliceButton({ selectedClip, clips, setClips, onSelectId
       tailHoldSec: 0,
       roundHoldSec: 0,
       dirty: true,
-      renderedInputName: null,
       displayName: nextSplitName(baseName, clips),
     }
     const right = {
@@ -35,7 +34,6 @@ export default function SpliceButton({ selectedClip, clips, setClips, onSelectId
       inSec: splitTime,
       headHoldSec: 0,
       dirty: true,
-      renderedInputName: null,
       displayName: nextSplitName(baseName, clips, [left]),
     }
     setClips(prev => {

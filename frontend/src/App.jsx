@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { listFiles, listOutputs, probe, trim, splice, holdFrame, promoteOutputToInput } from './api'
+import { listFiles, listOutputs, probe, renderTimeline } from './api'
 import { MediaProvider, useMedia } from './context/MediaContext'
 import Dropzone from './components/Dropzone'
 import MediaLibrary from './components/MediaLibrary'
@@ -31,13 +31,7 @@ function AppInner() {
   const { activePreview } = useMedia()
 
   const selectedClip = timelineClips.find(c => c.id === selectedId) || null
-  const hasDirty = timelineClips.some(c =>
-    c.dirty ||
-    (!c.renderedInputName && (
-      c.inSec !== 0 || c.outSec !== c.sourceDurationSec ||
-      (c.headHoldSec || 0) > 0 || (c.tailHoldSec || 0) > 0 || (c.roundHoldSec || 0) > 0
-    ))
-  )
+  const hasDirty = timelineClips.some(c => c.dirty)
 
   const refresh = useCallback(() => {
     listFiles().then(setInputFiles)
@@ -61,8 +55,7 @@ function AppInner() {
       headHoldSec: 0,
       tailHoldSec: 0,
       roundHoldSec: 0,
-      dirty: false,
-      renderedInputName: null,
+      dirty: true,
     }])
   }
 
@@ -78,69 +71,17 @@ function AppInner() {
     if (timelineClips.length === 0) return
     setRendering(true)
     try {
-      const resolved = []
-      for (const clip of timelineClips) {
-        const needsHold = (clip.headHoldSec || 0) > 0 || (clip.tailHoldSec || 0) > 0 || (clip.roundHoldSec || 0) > 0
-        const untrimmed = clip.inSec === 0 && clip.outSec === clip.sourceDurationSec
-        if (untrimmed && !needsHold && !clip.dirty) {
-          resolved.push({ ...clip, renderedInputName: clip.sourceName })
-          continue
-        }
-
-        // 1. Trim to the selected in/out range.
-        const trimResult = await trim(clip.sourceName, clip.inSec.toFixed(4), clip.outSec.toFixed(4))
-        if (trimResult.error) { alert('Trim failed: ' + trimResult.error); return }
-        let currentName = trimResult.output
-
-        // 2. Apply head hold: freeze the first frame (time 0 of the now-trimmed
-        // clip) for headHoldSec, extending total length by that amount. Only
-        // ever present on the sequence's first clip.
-        if (clip.headHoldSec > 0) {
-          const promoted = await promoteOutputToInput(currentName)
-          if (promoted.error) { alert('Promote failed: ' + promoted.error); return }
-          const held = await holdFrame(promoted.name, 0, clip.headHoldSec)
-          if (held.error) { alert('Head hold failed: ' + held.error); return }
-          currentName = held.output
-        }
-
-        // 3. Apply tail hold: freeze the last frame for tailHoldSec. Re-probe
-        // first since the clip's duration changed if a head hold was applied.
-        // Only ever present on the sequence's last clip.
-        if (clip.tailHoldSec > 0) {
-          const promoted = await promoteOutputToInput(currentName)
-          if (promoted.error) { alert('Promote failed: ' + promoted.error); return }
-          const info = await probe(promoted.name, 'input')
-          if (info.error) { alert('Probe failed: ' + info.error); return }
-          const tailTime = Math.max(0, info.duration - 1 / (clip.fps || 30))
-          const held = await holdFrame(promoted.name, tailTime, clip.tailHoldSec)
-          if (held.error) { alert('Tail hold failed: ' + held.error); return }
-          currentName = held.output
-        }
-
-        // 4. Apply Raise's round-up hold: same mechanism as tail hold, always
-        // trails the sequence's last clip so the whole program's total
-        // duration lands on a whole second.
-        if (clip.roundHoldSec > 0) {
-          const promoted = await promoteOutputToInput(currentName)
-          if (promoted.error) { alert('Promote failed: ' + promoted.error); return }
-          const info = await probe(promoted.name, 'input')
-          if (info.error) { alert('Probe failed: ' + info.error); return }
-          const endTime = Math.max(0, info.duration - 1 / (clip.fps || 30))
-          const held = await holdFrame(promoted.name, endTime, clip.roundHoldSec)
-          if (held.error) { alert('Raise hold failed: ' + held.error); return }
-          currentName = held.output
-        }
-
-        const promoted = await promoteOutputToInput(currentName)
-        if (promoted.error) { alert('Promote failed: ' + promoted.error); return }
-        resolved.push({ ...clip, renderedInputName: promoted.name, dirty: false })
-      }
-
-      if (resolved.length > 1) {
-        const spliceResult = await splice(resolved.map(c => c.renderedInputName))
-        if (spliceResult.error) { alert('Splice failed: ' + spliceResult.error); return }
-      }
-      setTimelineClips(resolved)
+      const payload = timelineClips.map(c => ({
+        input: c.sourceName,
+        inSec: c.inSec,
+        outSec: c.outSec,
+        headHoldSec: c.headHoldSec || 0,
+        tailHoldSec: c.tailHoldSec || 0,
+        roundHoldSec: c.roundHoldSec || 0,
+      }))
+      const result = await renderTimeline(payload)
+      if (result.error) { alert('Render failed: ' + result.error + (result.detail ? '\n' + result.detail : '')); return }
+      setTimelineClips(prev => prev.map(c => ({ ...c, dirty: false })))
       refresh()
     } finally {
       setRendering(false)
