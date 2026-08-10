@@ -37,7 +37,7 @@ def serve_input(name):
 
 @app.route("/output/<path:name>")
 def serve_output(name):
-    return send_from_directory(fu.OUTPUT_DIR, name)
+    return send_from_directory(get_output_dir(), name)
 
 
 @app.route("/preview/<which>/<path:name>")
@@ -75,7 +75,7 @@ def list_files():
 
 @app.route("/api/outputs")
 def list_outputs():
-    return jsonify(_list_dir(fu.OUTPUT_DIR))
+    return jsonify(_list_dir(get_output_dir()))
 
 
 @app.route("/api/probe/<name>")
@@ -125,15 +125,265 @@ def clear_input():
     return jsonify({"removed": removed})
 
 
+@app.route("/api/files/<path:name>", methods=["DELETE"])
+def delete_input_file(name):
+    # Single-file counterpart to clear_input: removes one source file from
+    # input/. safe_path guards against path traversal; only allowed media
+    # extensions are deletable (same filter clear_input uses).
+    try:
+        path = fu.safe_path(name, fu.INPUT_DIR)
+    except fu.PathError as e:
+        return jsonify({"error": str(e)}), 400
+    if not name.lower().endswith(fu.ALLOWED_EXTENSIONS):
+        return jsonify({"error": "not a media file"}), 400
+    if not os.path.isfile(path):
+        return jsonify({"error": "file not found"}), 404
+    os.remove(path)
+    return jsonify({"ok": True, "removed": name})
+
+
+# ---------- project library ----------
+
+PROJECTS_DIR = os.path.join(fu.PROJECT_ROOT, "projects")
+
+
+@app.route("/api/projects", methods=["GET"])
+def list_projects():
+    os.makedirs(PROJECTS_DIR, exist_ok=True)
+    items = []
+    for name in sorted(os.listdir(PROJECTS_DIR)):
+        if name.endswith(".nara"):
+            p = os.path.join(PROJECTS_DIR, name)
+            items.append({"name": name, "modified": os.path.getmtime(p)})
+    return jsonify(items)
+
+
+@app.route("/api/projects", methods=["POST"])
+def save_project():
+    data = request.get_json(force=True)
+    name = secure_filename(data.get("name") or "project.nara")
+    if not name.endswith(".nara"):
+        name += ".nara"
+    project = data.get("project")
+    if not isinstance(project, dict) or not isinstance(project.get("clips"), list):
+        return jsonify({"error": "invalid project payload — expected {clips: [...]}"}), 400
+    os.makedirs(PROJECTS_DIR, exist_ok=True)
+    with open(os.path.join(PROJECTS_DIR, name), "w") as f:
+        json.dump(project, f, indent=2)
+    return jsonify({"ok": True, "name": name})
+
+
+@app.route("/api/projects/<name>", methods=["GET"])
+def load_project(name):
+    try:
+        path = fu.safe_path(name, PROJECTS_DIR)
+    except fu.PathError as e:
+        return jsonify({"error": str(e)}), 400
+    if not os.path.exists(path):
+        return jsonify({"error": "project not found"}), 404
+    with open(path) as f:
+        return jsonify(json.load(f))
+
+
+@app.route("/api/projects/<name>", methods=["DELETE"])
+def delete_project(name):
+    try:
+        path = fu.safe_path(name, PROJECTS_DIR)
+    except fu.PathError as e:
+        return jsonify({"error": str(e)}), 400
+    if not os.path.exists(path):
+        return jsonify({"error": "project not found"}), 404
+    os.remove(path)
+    return jsonify({"ok": True})
+
+
+# ---------- export settings ----------
+
+SETTINGS_FILE = os.path.join(fu.PROJECT_ROOT, ".export_settings.json")
+
+
+def _load_export_settings():
+    try:
+        with open(SETTINGS_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_export_settings(settings):
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(settings, f, indent=2)
+
+
+def get_output_dir():
+    """Return the current export directory (from settings or default)."""
+    settings = _load_export_settings()
+    custom = settings.get("output_dir")
+    if custom and os.path.isdir(custom):
+        return custom
+    return fu.OUTPUT_DIR
+
+
+def get_export_quality():
+    """Return the current export quality mode (from settings or default)."""
+    quality = _load_export_settings().get("quality")
+    return quality if quality in fu.EXPORT_QUALITIES else "lossless"
+
+
+@app.route("/api/browse_directory", methods=["POST"])
+def browse_directory():
+    """Open a native macOS folder-picker dialog and return the selected path."""
+    data = request.get_json(force=True) if request.data else {}
+    initial_dir = data.get("initial") or fu.OUTPUT_DIR
+
+    try:
+        import subprocess as _sp
+        # Use osascript (AppleScript) for a native folder picker — it's
+        # simpler and more reliable than tkinter on macOS, which requires
+        # additional setup (Tcl/Tk framework) and often fails headless.
+        script = (
+            'tell application "System Events"\n'
+            f'  set theFolder to choose folder with prompt "Select export directory" '
+            f'default location POSIX file "{initial_dir}"\n'
+            '  return POSIX path of theFolder\n'
+            'end tell'
+        )
+        result = _sp.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            # User cancelled or error
+            return jsonify({"cancelled": True, "path": ""})
+        path = result.stdout.strip().rstrip("/")
+        return jsonify({"cancelled": False, "path": path})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/reveal_file", methods=["POST"])
+def reveal_file():
+    """Reveal a rendered file in the OS file browser (Finder on macOS)."""
+    data = request.get_json(force=True)
+    name = data.get("name") or ""
+    try:
+        path = fu.safe_path(name, get_output_dir())
+    except fu.PathError as e:
+        return jsonify({"error": str(e)}), 400
+    if not os.path.exists(path):
+        return jsonify({"error": "file not found"}), 404
+
+    try:
+        # `open -R` asks Finder to reveal the file (selects it in its
+        # containing folder) rather than opening/playing it.
+        result = subprocess.run(["open", "-R", path], capture_output=True, text=True, timeout=15)
+        if result.returncode != 0:
+            return jsonify({"error": result.stderr.strip() or "could not open Finder"}), 500
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/rename_output", methods=["POST"])
+def rename_output():
+    """Rename a file in the Export Bin (output/) in place, preserving its
+    extension. safe_path guards both names against traversal; the new name
+    must be a plain media filename and must not collide with an existing
+    one."""
+    data = request.get_json(force=True)
+    old = data.get("name") or ""
+    new = secure_filename(data.get("newName") or "")
+    if not new:
+        return jsonify({"error": "new name required"}), 400
+    out_dir = get_output_dir()
+    try:
+        old_path = fu.safe_path(old, out_dir)
+    except fu.PathError as e:
+        return jsonify({"error": str(e)}), 400
+    if not os.path.isfile(old_path):
+        return jsonify({"error": "file not found"}), 404
+    # Preserve the original extension if the user didn't supply one.
+    old_ext = os.path.splitext(old)[1]
+    if not os.path.splitext(new)[1] and old_ext:
+        new += old_ext
+    if not new.lower().endswith(fu.ALLOWED_EXTENSIONS):
+        return jsonify({"error": "new name must be a media file"}), 400
+    try:
+        new_path = fu.safe_path(new, out_dir)
+    except fu.PathError as e:
+        return jsonify({"error": str(e)}), 400
+    if os.path.exists(new_path):
+        return jsonify({"error": f"a file named {new} already exists"}), 409
+    os.rename(old_path, new_path)
+    return jsonify({"ok": True, "name": new})
+
+
+@app.route("/api/export_settings", methods=["GET"])
+def get_export_settings():
+    settings = _load_export_settings()
+    return jsonify({
+        "output_dir": settings.get("output_dir") or "",
+        "default_output_dir": fu.OUTPUT_DIR,
+        "quality": get_export_quality(),
+    })
+
+
+@app.route("/api/export_settings", methods=["POST"])
+def set_export_settings():
+    data = request.get_json(force=True)
+    settings = _load_export_settings()
+    output_dir = (data.get("output_dir") or "").strip()
+    if output_dir:
+        if not os.path.isabs(output_dir):
+            return jsonify({"error": "output_dir must be an absolute path"}), 400
+        if not os.path.isdir(output_dir):
+            try:
+                os.makedirs(output_dir, exist_ok=True)
+            except OSError as e:
+                return jsonify({"error": f"cannot create directory: {e}"}), 400
+        settings["output_dir"] = output_dir
+    else:
+        settings.pop("output_dir", None)
+    if "quality" in data:
+        quality = data.get("quality") or "lossless"
+        if quality not in fu.EXPORT_QUALITIES:
+            return jsonify({"error": f"quality must be one of {', '.join(fu.EXPORT_QUALITIES)}"}), 400
+        settings["quality"] = quality
+    _save_export_settings(settings)
+    return jsonify({
+        "ok": True,
+        "output_dir": settings.get("output_dir", ""),
+        "quality": get_export_quality(),
+    })
+
+
 @app.route("/api/clear_output", methods=["POST"])
 def clear_output():
+    export_dir = get_output_dir()
     removed = []
-    for name in os.listdir(fu.OUTPUT_DIR):
-        p = os.path.join(fu.OUTPUT_DIR, name)
+    for name in os.listdir(export_dir):
+        p = os.path.join(export_dir, name)
         if os.path.isfile(p) and name.lower().endswith(fu.ALLOWED_EXTENSIONS):
             os.remove(p)
             removed.append(name)
     return jsonify({"removed": removed})
+
+
+def _parse_time_to_sec(value):
+    """Parse a ffmpeg -ss/-to style time value: either a plain number of
+    seconds ("12.5") or a "[HH:]MM:SS[.ms]" timecode ("00:00:05.000"), the
+    two forms /api/trim's start/end fields actually accept (see the legacy
+    UI's own placeholder text). Only used to size the under50mb bitrate
+    budget — trimming itself is still done by ffmpeg's own -ss/-to."""
+    s = str(value).strip()
+    if ":" not in s:
+        return float(s)
+    parts = s.split(":")
+    parts = [float(p) for p in parts]
+    while len(parts) < 3:
+        parts.insert(0, 0.0)
+    hh, mm, ss = parts[-3], parts[-2], parts[-1]
+    return hh * 3600 + mm * 60 + ss
 
 
 # ---------- trim ----------
@@ -161,8 +411,22 @@ def trim():
     out_name = fu.unique_output_name(data.get("output") or _derive_name(data["input"], "trimmed"))
     out_path = os.path.join(fu.OUTPUT_DIR, out_name)
 
-    args = ["-i", in_path, "-ss", str(start), "-to", str(end)]
-    args += fu.lossless_encode_args(info)
+    input_args = ["-i", in_path, "-ss", str(start), "-to", str(end)]
+
+    quality = get_export_quality()
+    if quality in ("under50mb", "under50mb_hevc"):
+        try:
+            trim_duration = _parse_time_to_sec(end) - _parse_time_to_sec(start)
+        except ValueError:
+            return jsonify({"error": "start/end must be numeric seconds or a HH:MM:SS.ms timecode"}), 400
+        codec = "hevc" if quality == "under50mb_hevc" else "h264"
+        try:
+            fu.render_size_capped(input_args, [], info, out_path, trim_duration, codec=codec)
+        except RuntimeError as e:
+            return jsonify({"error": "ffmpeg failed", "detail": str(e)[-4000:]}), 500
+        return jsonify({"output": out_name})
+
+    args = input_args + fu.encode_args(info, quality)
     args.append(out_path)
     result = fu.run_ffmpeg(args)
     if result.returncode != 0:
@@ -208,6 +472,9 @@ def splice():
         "audio_bit_rate": max((i["audio_bit_rate"] or 0 for i in audio_infos), default=0),
         "audio_sample_rate": max((i["audio_sample_rate"] or 0 for i in audio_infos), default=0),
         "audio_channels": max((i["audio_channels"] or 0 for i in audio_infos), default=0),
+        # For "match source" quality: the best-quality input sets the target.
+        "video_bit_rate": max((i["video_bit_rate"] or 0 for i in infos), default=0),
+        "bit_rate": max((i["bit_rate"] or 0 for i in infos), default=0),
     }
 
     out_name = fu.unique_output_name(data.get("output") or "spliced.mp4")
@@ -215,11 +482,23 @@ def splice():
 
     filt = fu.build_concat_filter(len(in_paths), target_w, target_h, target_fps, has_audio_flags)
 
-    args = []
+    input_args = []
     for p in in_paths:
-        args += ["-i", p]
-    args += ["-filter_complex", filt, "-map", "[outv]", "-map", "[outa]"]
-    args += fu.lossless_encode_args(combined_info)
+        input_args += ["-i", p]
+    filter_args = ["-filter_complex", filt, "-map", "[outv]", "-map", "[outa]"]
+
+    quality = get_export_quality()
+    if quality in ("under50mb", "under50mb_hevc"):
+        total_sec = sum(i["duration"] for i in infos)
+        codec = "hevc" if quality == "under50mb_hevc" else "h264"
+        try:
+            fu.render_size_capped(input_args, filter_args, combined_info, out_path, total_sec, codec=codec)
+        except RuntimeError as e:
+            return jsonify({"error": "ffmpeg failed", "detail": str(e)[-4000:]}), 500
+        return jsonify({"output": out_name})
+
+    args = input_args + filter_args
+    args += fu.encode_args(combined_info, quality)
     args.append(out_path)
 
     result = fu.run_ffmpeg(args)
@@ -238,7 +517,10 @@ def render_timeline():
         return jsonify({"error": "need at least 1 clip"}), 400
 
     try:
-        in_paths = [fu.safe_path(c["input"], fu.INPUT_DIR) for c in clips]
+        in_paths = [
+            fu.safe_path(c["input"], get_output_dir() if c.get("dir") == "output" else fu.INPUT_DIR)
+            for c in clips
+        ]
     except (fu.PathError, KeyError) as e:
         return jsonify({"error": str(e)}), 400
     for p in in_paths:
@@ -264,6 +546,14 @@ def render_timeline():
             return jsonify({"error": f"clip {i}: inSec/outSec must be numeric"}), 400
         if out_sec <= in_sec or in_sec < 0 or out_sec > info["duration"] + 0.001:
             return jsonify({"error": f"clip {i}: invalid inSec/outSec for source duration {info['duration']}"}), 400
+        # Clamp the trim window to the video stream's own end. The container
+        # duration (the frontend's historical default outSec) can outlast the
+        # last video frame when audio runs longer; trimming video and audio
+        # to different effective lengths would desync every following clip.
+        video_dur = info.get("video_duration") or info["duration"]
+        out_sec = min(out_sec, video_dur)
+        if out_sec <= in_sec:
+            return jsonify({"error": f"clip {i}: trim window lies past the video stream end ({video_dur}s)"}), 400
 
         is_first = i == 0
         is_last = i == len(clips) - 1
@@ -272,6 +562,74 @@ def render_timeline():
         # tail-hold and round-hold (Raise) on the same last clip just add.
         trail_hold = (float(c.get("tailHoldSec") or 0) + float(c.get("roundHoldSec") or 0)) if is_last else 0.0
 
+        # Slow-down: pure PTS stretch, so the only quality constraint is
+        # the effective frame rate — refuse anything that would fall below
+        # 12 fps (frames held so long the motion visibly stutters).
+        try:
+            # `or` would coerce a literal 0 to the default and skip the
+            # range check below — only substitute the default for absent/null.
+            raw_speed = c.get("speed")
+            speed = 1.0 if raw_speed is None else float(raw_speed)
+        except (ValueError, TypeError):
+            return jsonify({"error": f"clip {i}: speed must be numeric"}), 400
+        clip_fps = info["fps"] or 30.0
+        if not (0 < speed <= 1.0):
+            return jsonify({"error": f"clip {i}: speed must be in (0, 1] — only slow-down is supported"}), 400
+        if speed < 1.0 and clip_fps * speed < 12 - 1e-9:
+            return jsonify({
+                "error": f"clip {i}: speed {speed} would drop the effective rate to "
+                         f"{clip_fps * speed:.1f} fps — below the 12 fps minimum for this {clip_fps:.0f} fps source"
+            }), 400
+
+        # Crop is a spatial pre-filter, in source-pixel coordinates picked
+        # by the user on the frontend — bounds are checked against the
+        # server's own probe of this file, never trusted blindly.
+        crop = None
+        raw_crop = c.get("crop")
+        if raw_crop:
+            try:
+                crop_w = int(raw_crop["w"])
+                crop_h = int(raw_crop["h"])
+                crop_x = int(raw_crop["x"])
+                crop_y = int(raw_crop["y"])
+            except (KeyError, ValueError, TypeError):
+                return jsonify({"error": f"clip {i}: crop w/h/x/y must be integers"}), 400
+            if crop_w <= 0 or crop_h <= 0 or crop_x < 0 or crop_y < 0:
+                return jsonify({"error": f"clip {i}: crop dimensions/offset must be non-negative, w/h positive"}), 400
+            if crop_x + crop_w > info["width"] or crop_y + crop_h > info["height"]:
+                return jsonify({
+                    "error": f"clip {i}: crop {crop_w}x{crop_h}+{crop_x}+{crop_y} "
+                             f"exceeds source resolution {info['width']}x{info['height']}"
+                }), 400
+            crop = {"w": crop_w, "h": crop_h, "x": crop_x, "y": crop_y}
+
+        # Optional per-clip crop keyframes: only meaningful when a crop is
+        # already set (they animate the crop box's position over time; the
+        # box's own w/h stays fixed and comes from `crop`). t is seconds
+        # relative to the clip's main body (0 → outSec-inSec, in SOURCE
+        # units — the crop filter runs before any trim/setpts, so its `t`
+        # variable is the source frame's own timestamp).
+        crop_keyframes = None
+        raw_kfs = c.get("cropKeyframes")
+        if raw_kfs and crop:
+            if not isinstance(raw_kfs, list):
+                return jsonify({"error": f"clip {i}: cropKeyframes must be a list"}), 400
+            max_t = out_sec - in_sec
+            parsed = []
+            for j, kf in enumerate(raw_kfs):
+                try:
+                    kt = float(kf["t"])
+                    kx = int(kf["x"])
+                    ky = int(kf["y"])
+                except (KeyError, ValueError, TypeError):
+                    return jsonify({"error": f"clip {i} keyframe {j}: t/x/y must be numeric (t float, x/y int)"}), 400
+                if kt < -1e-6 or kt > max_t + 1e-6:
+                    return jsonify({"error": f"clip {i} keyframe {j}: t={kt} lies outside the clip's main body [0, {max_t:.3f}]"}), 400
+                if kx < 0 or ky < 0 or kx + crop["w"] > info["width"] or ky + crop["h"] > info["height"]:
+                    return jsonify({"error": f"clip {i} keyframe {j}: crop origin ({kx},{ky}) with size {crop['w']}x{crop['h']} lies outside source {info['width']}x{info['height']}"}), 400
+                parsed.append({"t": max(0.0, min(max_t, kt)), "x": kx, "y": ky})
+            crop_keyframes = parsed
+
         clip_specs.append({
             "inSec": in_sec,
             "outSec": out_sec,
@@ -279,35 +637,176 @@ def render_timeline():
             "has_audio": info["has_audio"],
             "lead_hold_sec": lead_hold,
             "trail_hold_sec": trail_hold,
+            "reversed": bool(c.get("reversed")),
+            "speed": speed,
+            "video_duration": info.get("video_duration") or info["duration"],
+            "crop": crop,
+            "crop_keyframes": crop_keyframes,
         })
 
-    target_w = max(i["width"] for i in infos)
-    target_h = max(i["height"] for i in infos)
+    # A cropped clip's own frame size is the crop box, not the source's —
+    # the common target resolution (every clip gets scaled/padded to this)
+    # must be derived from post-crop dimensions.
+    def effective_wh(info, spec):
+        if spec.get("crop"):
+            return spec["crop"]["w"], spec["crop"]["h"]
+        return info["width"], info["height"]
+
+    effective_dims = [effective_wh(info, spec) for info, spec in zip(infos, clip_specs)]
+    target_w = max(w for w, h in effective_dims)
+    target_h = max(h for w, h in effective_dims)
     target_fps = max(i["fps"] or 30 for i in infos)
 
+    # Explicit opt-out: strip audio from the render entirely regardless of
+    # what any input clip has. build_timeline_filter normally always emits
+    # [outa] (filling silence via anullsrc for silent/stretched segments),
+    # so has_audio below is hardcoded True in the normal case — but when
+    # no_audio is requested build_timeline_filter never builds an audio
+    # graph or an [outa] label at all (see its own docstring for why a
+    # plain -an can't be bolted on afterward instead), so has_audio must
+    # flip to False here too, or audio_args()/render_size_capped would try
+    # to attach -c:a aac to a stream that was never mapped.
+    no_audio = bool(data.get("noAudio"))
     audio_infos = [i for i in infos if i["has_audio"]]
     combined_info = {
-        "has_audio": True,
+        "has_audio": not no_audio,
         "audio_bit_rate": max((i["audio_bit_rate"] or 0 for i in audio_infos), default=0),
         "audio_sample_rate": max((i["audio_sample_rate"] or 0 for i in audio_infos), default=0),
         "audio_channels": max((i["audio_channels"] or 0 for i in audio_infos), default=0),
+        # For "match source" quality: the best-quality input sets the target.
+        "video_bit_rate": max((i["video_bit_rate"] or 0 for i in infos), default=0),
+        "bit_rate": max((i["bit_rate"] or 0 for i in infos), default=0),
     }
 
-    out_name = fu.unique_output_name(data.get("output") or "render.mp4")
-    out_path = os.path.join(fu.OUTPUT_DIR, out_name)
+    export_dir = get_output_dir()
+    out_name = data.get("output") or "render.mp4"
+    # Ensure unique within the export directory
+    base, ext = os.path.splitext(out_name)
+    candidate = out_name
+    n = 1
+    while os.path.exists(os.path.join(export_dir, candidate)):
+        candidate = f"{base}_{n}{ext}"
+        n += 1
+    out_name = candidate
+    out_path = os.path.join(export_dir, out_name)
 
-    filt = fu.build_timeline_filter(clip_specs, target_w, target_h, target_fps)
+    filt = fu.build_timeline_filter(clip_specs, target_w, target_h, target_fps, no_audio=no_audio)
 
-    args = []
+    input_args = []
     for p in in_paths:
-        args += ["-i", p]
-    args += ["-filter_complex", filt, "-map", "[outv]", "-map", "[outa]"]
-    args += fu.lossless_encode_args(combined_info)
+        input_args += ["-i", p]
+    filter_args = ["-filter_complex", filt, "-map", "[outv]"]
+    if not no_audio:
+        filter_args += ["-map", "[outa]"]
+
+    quality = get_export_quality()
+    if quality in ("under50mb", "under50mb_hevc"):
+        total_sec = sum(_clip_total_sec(spec) for spec in clip_specs)
+        codec = "hevc" if quality == "under50mb_hevc" else "h264"
+        try:
+            fu.render_size_capped(input_args, filter_args, combined_info, out_path, total_sec, codec=codec)
+        except RuntimeError as e:
+            return jsonify({"error": "ffmpeg failed", "detail": str(e)[-4000:]}), 500
+        return jsonify({"output": out_name})
+
+    args = input_args + filter_args
+    args += fu.encode_args(combined_info, quality)
     args.append(out_path)
 
     # A single-pass whole-timeline render at -qp 0 can run long; the
     # default 600s timeout was sized for single short operations.
     result = fu.run_ffmpeg(args, timeout=1800)
+    if result.returncode != 0:
+        return jsonify({"error": "ffmpeg failed", "detail": result.stderr[-4000:]}), 500
+    return jsonify({"output": out_name})
+
+
+def _clip_total_sec(spec):
+    """Timeline-domain duration of one build_timeline_filter clip_spec:
+    lead/trail holds (absolute seconds) plus the main trimmed body stretched
+    by any slow-down speed. Mirrors the same components build_timeline_filter
+    itself sums into its per-clip `expected_sec` (frame-snapped there; this
+    is the same math without the frame-grid rounding, which is precise
+    enough for sizing a bitrate budget but not for building a filter graph).
+    """
+    lead = spec.get("lead_hold_sec") or 0
+    trail = spec.get("trail_hold_sec") or 0
+    speed = spec.get("speed") or 1.0
+    main = (spec["outSec"] - spec["inSec"]) / speed
+    return lead + trail + main
+
+
+# ---------- reformat ----------
+
+@app.route("/api/reformat", methods=["POST"])
+def reformat():
+    """Scale a single clip DOWN to fit inside a (resolution tier, aspect
+    ratio) bounding box (fu.REFORMAT_PRESETS), preserving its own aspect
+    ratio exactly (contain-fit, never upscaled, no letterboxing — output
+    dimensions are whatever the proportional scale-down produces).
+    ratio="adaptive" is special: it keeps the SOURCE's own aspect ratio
+    (not one of the 6 fixed ratios) sized to roughly that resolution
+    tier's pixel budget — see fu.reformat_adaptive_dims. Reads the source
+    from input/ or output/ (never modifies it) and always writes to the
+    export directory (get_output_dir()), like render_timeline — never the
+    media bin.
+    """
+    data = request.get_json(force=True)
+    resolution = data.get("resolution")
+    ratio = data.get("ratio")
+    if resolution not in fu.REFORMAT_PRESETS:
+        return jsonify({"error": f"resolution must be one of {list(fu.REFORMAT_RESOLUTIONS)}"}), 400
+    if ratio != "adaptive" and ratio not in fu.REFORMAT_RATIOS:
+        return jsonify({"error": f"ratio must be 'adaptive' or one of {list(fu.REFORMAT_RATIOS)}"}), 400
+
+    try:
+        in_path = fu.safe_path(
+            data.get("input"), get_output_dir() if data.get("dir") == "output" else fu.INPUT_DIR
+        )
+    except fu.PathError as e:
+        return jsonify({"error": str(e)}), 400
+    if not os.path.exists(in_path):
+        return jsonify({"error": "input file not found"}), 404
+
+    try:
+        info = fu.get_video_info(in_path)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 500
+    if not info["width"] or not info["height"]:
+        return jsonify({"error": "could not determine source resolution"}), 500
+
+    if ratio == "adaptive":
+        out_w, out_h = fu.reformat_adaptive_dims(info["width"], info["height"], resolution)
+    else:
+        target_w, target_h = fu.REFORMAT_PRESETS[resolution][ratio]
+        out_w, out_h = fu.reformat_scale_dims(info["width"], info["height"], target_w, target_h)
+
+    export_dir = get_output_dir()
+    out_name = data.get("output") or _derive_name(data.get("input", "reformat.mp4"), "reformat")
+    base, ext = os.path.splitext(out_name)
+    candidate = out_name
+    n = 1
+    while os.path.exists(os.path.join(export_dir, candidate)):
+        candidate = f"{base}_{n}{ext}"
+        n += 1
+    out_name = candidate
+    out_path = os.path.join(export_dir, out_name)
+
+    input_args = ["-i", in_path]
+    filter_args = ["-vf", f"scale={out_w}:{out_h}"]
+
+    quality = get_export_quality()
+    if quality in ("under50mb", "under50mb_hevc"):
+        codec = "hevc" if quality == "under50mb_hevc" else "h264"
+        try:
+            fu.render_size_capped(input_args, filter_args, info, out_path, info["duration"], codec=codec)
+        except RuntimeError as e:
+            return jsonify({"error": "ffmpeg failed", "detail": str(e)[-4000:]}), 500
+        return jsonify({"output": out_name})
+
+    args = input_args + filter_args + fu.encode_args(info, quality)
+    args.append(out_path)
+    result = fu.run_ffmpeg(args)
     if result.returncode != 0:
         return jsonify({"error": "ffmpeg failed", "detail": result.stderr[-4000:]}), 500
     return jsonify({"output": out_name})
@@ -338,8 +837,12 @@ def hold_frame():
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 500
     fps = info["fps"] or 30.0
-    if t < 0 or t >= info["duration"]:
-        return jsonify({"error": f"time must be within [0, {info['duration']})"}), 400
+    # Bound by the video stream's duration, not the container's — the
+    # container can outlast the last video frame (e.g. audio runs longer),
+    # and freezing "past the end" would select no frame at all.
+    video_dur = info.get("video_duration") or info["duration"]
+    if t < 0 or t >= video_dur:
+        return jsonify({"error": f"time must be within [0, {video_dur})"}), 400
 
     out_name = fu.unique_output_name(data.get("output") or _derive_name(data["input"], "held"))
     out_path = os.path.join(fu.OUTPUT_DIR, out_name)
@@ -349,9 +852,24 @@ def hold_frame():
     # plus anullsrc silence during the hold), so audio is present regardless
     # of the source's has_audio flag.
     hold_info = {**info, "has_audio": True}
-    args = ["-i", in_path, "-filter_complex", filt,
-            "-map", "[outv]", "-map", "[outa]"]
-    args += fu.lossless_encode_args(hold_info)
+    input_args = ["-i", in_path]
+    filter_args = ["-filter_complex", filt, "-map", "[outv]", "-map", "[outa]"]
+
+    quality = get_export_quality()
+    if quality in ("under50mb", "under50mb_hevc"):
+        # A hold ADDS duration (freezes on top of the existing timeline,
+        # doesn't replace any of it), so the output is the original
+        # duration plus the hold, not just the original alone.
+        total_sec = info["duration"] + dur
+        codec = "hevc" if quality == "under50mb_hevc" else "h264"
+        try:
+            fu.render_size_capped(input_args, filter_args, hold_info, out_path, total_sec, codec=codec)
+        except RuntimeError as e:
+            return jsonify({"error": "ffmpeg failed", "detail": str(e)[-4000:]}), 500
+        return jsonify({"output": out_name})
+
+    args = input_args + filter_args
+    args += fu.encode_args(hold_info, quality)
     args.append(out_path)
 
     result = fu.run_ffmpeg(args)
@@ -393,8 +911,20 @@ def reverse():
     out_name = fu.unique_output_name(data.get("output") or _derive_name(data["input"], "reversed"))
     out_path = os.path.join(fu.OUTPUT_DIR, out_name)
 
-    args = ["-i", in_path, "-vf", "reverse", "-af", "areverse"]
-    args += fu.lossless_encode_args(info)
+    input_args = ["-i", in_path]
+    filter_args = ["-vf", "reverse", "-af", "areverse"]
+
+    quality = get_export_quality()
+    if quality in ("under50mb", "under50mb_hevc"):
+        codec = "hevc" if quality == "under50mb_hevc" else "h264"
+        try:
+            fu.render_size_capped(input_args, filter_args, info, out_path, info["duration"], codec=codec)
+        except RuntimeError as e:
+            return jsonify({"error": "ffmpeg failed", "detail": str(e)[-4000:]}), 500
+        return jsonify({"output": out_name})
+
+    args = input_args + filter_args
+    args += fu.encode_args(info, quality)
     args.append(out_path)
     result = fu.run_ffmpeg(args)
     if result.returncode != 0:
@@ -409,13 +939,20 @@ def _derive_name(input_name, suffix):
 
 # ---------- chatbot ----------
 
-def build_file_context():
+def build_file_context(selected_clip=None):
     inputs = [f["name"] for f in _list_dir(fu.INPUT_DIR)]
     outputs = [f["name"] for f in _list_dir(fu.OUTPUT_DIR)]
-    return (
+    context = (
         f"Files currently in input/: {', '.join(inputs) if inputs else '(none)'}.\n"
         f"Files currently in output/: {', '.join(outputs) if outputs else '(none)'}."
     )
+    if selected_clip:
+        # The clip selected on the timeline when the user sent this message —
+        # lets "make it slower"/"crop this" resolve without the user having
+        # to name the file, and tells the model which file to write back to
+        # so the frontend can offer to load the result onto that same clip.
+        context += f"\nThe user currently has {selected_clip!r} selected on the timeline — assume that's the target file unless they name a different one."
+    return context
 
 
 def ask_claude(instruction, context, session_id=None):
@@ -472,7 +1009,7 @@ def chat():
     if not instruction:
         return jsonify({"error": "empty message"}), 400
 
-    context = build_file_context()
+    context = build_file_context(data.get("selected_clip"))
 
     try:
         proc = ask_claude(instruction, context, session_id)
@@ -527,6 +1064,25 @@ def chat():
     })
 
 
+def _output_arg_info(argv):
+    """The chatbot's ffmpeg command names its own output path (unlike
+    render_timeline, which derives it itself) — recover which file was
+    actually written, and whether it landed in input/ or output/, so the
+    caller can offer to load it back onto the timeline in place of the clip
+    that was being edited. Mirrors validate_ffmpeg_command's own path-arg
+    detection (last positional argument not starting with '-')."""
+    if len(argv) <= 1 or argv[-1].startswith("-"):
+        return None
+    out_path = argv[-1]
+    abs_p = out_path if os.path.isabs(out_path) else os.path.join(fu.PROJECT_ROOT, out_path)
+    resolved = os.path.realpath(abs_p)
+    if resolved.startswith(os.path.realpath(fu.OUTPUT_DIR) + os.sep):
+        return {"name": os.path.basename(resolved), "dir": "output"}
+    if resolved.startswith(os.path.realpath(fu.INPUT_DIR) + os.sep):
+        return {"name": os.path.basename(resolved), "dir": "input"}
+    return None
+
+
 @app.route("/api/execute", methods=["POST"])
 def execute():
     data = request.get_json(force=True)
@@ -543,7 +1099,7 @@ def execute():
     if result.returncode != 0:
         return jsonify({"error": "ffmpeg failed", "detail": result.stderr[-4000:]}), 500
 
-    return jsonify({"ok": True, "stderr_tail": result.stderr[-1000:]})
+    return jsonify({"ok": True, "stderr_tail": result.stderr[-1000:], "output": _output_arg_info(argv)})
 
 
 if __name__ == "__main__":

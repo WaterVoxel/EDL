@@ -1,0 +1,45 @@
+{
+  "version": 2,
+  "clips": [
+    {
+      "crop": null,
+      "dirty": false,
+      "fps": 24,
+      "headHoldSec": 0,
+      "id": "9e11cbf0-6f5f-4306-94a7-945d41bfa2e3",
+      "inSec": 0,
+      "outSec": 3.416667,
+      "reversed": false,
+      "roundHoldSec": 0.5833330000000001,
+      "sourceDir": "input",
+      "sourceDurationSec": 3.416667,
+      "sourceHeight": 1080,
+      "sourceName": "008_1800.mp4",
+      "sourceWidth": 2520,
+      "speed": 1,
+      "tailHoldSec": 0
+    }
+  ],
+  "track2Clips": [
+    {
+      "id": "2a6063e0-ee7e-44c0-92ce-ede779af39cf",
+      "sourceName": "008_1800_v002.mp4",
+      "sourceDir": "input",
+      "sourceDurationSec": 4.041667,
+      "sourceWidth": 4398,
+      "sourceHeight": 1886,
+      "fps": 24,
+      "inSec": 0,
+      "outSec": 3.4583340000000002,
+      "headHoldSec": 0,
+      "tailHoldSec": 0,
+      "roundHoldSec": 0,
+      "reversed": false,
+      "speed": 1,
+      "crop": null,
+      "dirty": false,
+      "displayName": "Reconstructed01"
+    }
+  ],
+  "selectedId": "9e11cbf0-6f5f-4306-94a7-945d41bfa2e3"
+}

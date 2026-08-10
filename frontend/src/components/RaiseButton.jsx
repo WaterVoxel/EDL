@@ -29,7 +29,7 @@ export default function RaiseButton({ clips, setClips }) {
         onClick={apply}
         disabled={amount <= 0}
         title="Hold the last frame of the sequence to round its total duration up to the next whole second"
-        className="px-1.5 py-0.5 text-[11px] rounded bg-amber-600 text-white hover:bg-amber-500 disabled:bg-neutral-700 disabled:text-neutral-500"
+        className="px-1.5 py-0.5 text-[9px] rounded bg-amber-600 text-white hover:bg-amber-500 disabled:bg-neutral-700 disabled:text-neutral-500"
       >
         Round Up
       </button>

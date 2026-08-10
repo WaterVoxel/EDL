@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "clips": [
+    {
+      "id": "545d1a26-ad8a-4de1-9d91-00909b54e727",
+      "sourceName": "008_0280.mp4",
+      "sourceDir": "input",
+      "sourceDurationSec": 9.041667,
+      "sourceWidth": 2206,
+      "sourceHeight": 946,
+      "fps": 24,
+      "inSec": 0,
+      "outSec": 9.041667,
+      "headHoldSec": 0,
+      "tailHoldSec": 0,
+      "roundHoldSec": 0.9583329999999997,
+      "reversed": true,
+      "speed": 1,
+      "crop": null,
+      "dirty": false
+    }
+  ],
+  "track2Clips": [],
+  "selectedId": "545d1a26-ad8a-4de1-9d91-00909b54e727"
+}

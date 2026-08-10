@@ -1,0 +1,44 @@
+{
+  "version": 2,
+  "clips": [
+    {
+      "id": "aa9b3eb6-1f45-4682-934a-74cc52ef13dc",
+      "sourceName": "SPHE_008_1850_fg01_v001_AI-MP4.mp4",
+      "sourceDir": "input",
+      "sourceDurationSec": 1.583333,
+      "sourceWidth": 2520,
+      "sourceHeight": 1080,
+      "fps": 24,
+      "inSec": 0,
+      "outSec": 1.583333,
+      "headHoldSec": 0,
+      "tailHoldSec": 0,
+      "roundHoldSec": 0,
+      "reversed": false,
+      "speed": 1,
+      "crop": null,
+      "dirty": false
+    },
+    {
+      "id": "119c1764-46e2-4b27-8c21-06776316634b",
+      "sourceName": "SPHE_008_1850_fg01_v001_AI-MP4.mp4",
+      "sourceDir": "input",
+      "sourceDurationSec": 1.583333,
+      "sourceWidth": 2520,
+      "sourceHeight": 1080,
+      "fps": 24,
+      "inSec": 0,
+      "outSec": 1.583333,
+      "headHoldSec": 0,
+      "tailHoldSec": 0,
+      "roundHoldSec": 0.8333339999999998,
+      "reversed": true,
+      "speed": 1,
+      "crop": null,
+      "dirty": false,
+      "displayName": "SPHE_008_1850_fg01_v001_AI-MP401"
+    }
+  ],
+  "track2Clips": [],
+  "selectedId": "aa9b3eb6-1f45-4682-934a-74cc52ef13dc"
+}

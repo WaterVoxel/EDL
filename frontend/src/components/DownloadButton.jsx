@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { probe } from '../api'
 
-export default function DownloadButton({ outputName, onInfoRefresh }) {
+export default function DownloadButton({ outputName, onInfoRefresh, compact = false }) {
   const [status, setStatus] = useState('')
   const [loading, setLoading] = useState(false)
 
@@ -36,12 +36,25 @@ export default function DownloadButton({ outputName, onInfoRefresh }) {
     }
   }
 
+  if (compact) {
+    return (
+      <button
+        onClick={handleDownload}
+        disabled={loading}
+        title={status || 'Download the selected export'}
+        className="px-2.5 py-1 text-[9px] rounded bg-neutral-700 text-neutral-400 hover:text-neutral-200 disabled:bg-neutral-600 disabled:cursor-default"
+      >
+        ↓ Download
+      </button>
+    )
+  }
+
   return (
     <div className="mt-2">
       <button
         onClick={handleDownload}
         disabled={loading}
-        className="px-2.5 py-1 text-[11px] rounded bg-indigo-600 text-white hover:bg-indigo-500 disabled:bg-neutral-600 disabled:cursor-default"
+        className="px-2.5 py-1 text-[9px] rounded bg-neutral-700 text-neutral-400 hover:text-neutral-200 disabled:bg-neutral-600 disabled:cursor-default"
       >
         ↓ Download
       </button>

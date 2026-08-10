@@ -1,0 +1,27 @@
+{
+  "version": 2,
+  "clips": [
+    {
+      "id": "1d00a007-2dd1-46d3-bbcf-0a9a6cce7173",
+      "sourceName": "004_0280.mp4",
+      "sourceDir": "input",
+      "sourceDurationSec": 7.041667,
+      "sourceWidth": 2206,
+      "sourceHeight": 946,
+      "fps": 24,
+      "inSec": 0,
+      "outSec": 2.930468,
+      "headHoldSec": 0.5,
+      "tailHoldSec": 0,
+      "roundHoldSec": 0.5695320000000001,
+      "reversed": false,
+      "speed": 1,
+      "crop": null,
+      "cropKeyframes": [],
+      "dirty": false,
+      "displayName": "004_0281"
+    }
+  ],
+  "track2Clips": [],
+  "selectedId": "1d00a007-2dd1-46d3-bbcf-0a9a6cce7173"
+}

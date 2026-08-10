@@ -1,8 +1,14 @@
 export const GAP_PX = 2
 export const ROUND_EPSILON = 0.0005
 
+export function clipSpeed(clip) {
+  return clip.speed && clip.speed > 0 ? clip.speed : 1
+}
+
+// Duration the clip's main body occupies on the TIMELINE — the source
+// window stretched by any slow-down (0.5 speed doubles the played length).
 export function clipMainSec(clip) {
-  return clip.outSec - clip.inSec
+  return (clip.outSec - clip.inSec) / clipSpeed(clip)
 }
 
 export function clipTotalSec(clip) {
@@ -42,12 +48,99 @@ export function clipTotalPx(clip, pps) {
   return clipTotalSec(clip) * pps
 }
 
+// Pixel X of the playhead for a given timeline position, in the timeline's
+// own coordinate system (gutter + per-clip widths + inter-clip gaps). Pure
+// so the playback engine can drive the playhead imperatively every frame
+// without a React re-render, and so it's unit-testable. Returns null when
+// there are no clips. `layout` carries the Timeline's px constants.
+export function timelinePosToPx(clips, pos, layout) {
+  if (clips.length === 0) return null
+  const { pps, gutterPx = 0, trackPad = 0, gapPx = 0 } = layout
+  let remaining = pos
+  let px = gutterPx + trackPad
+  for (let i = 0; i < clips.length; i++) {
+    const dur = clipTotalSec(clips[i])
+    if (remaining <= dur) return px + remaining * pps
+    remaining -= dur
+    px += dur * pps + gapPx
+  }
+  return px
+}
+
 // How much a duration misses landing on the next whole second. Returns 0 if
 // already whole (within a small epsilon to tolerate float rounding).
 export function roundUpAmount(totalSec) {
   const nextWhole = Math.ceil(totalSec - ROUND_EPSILON)
   const amount = nextWhole - totalSec
   return amount > ROUND_EPSILON && amount < 1 - ROUND_EPSILON ? amount : 0
+}
+
+// Decompose a clip list into an ordered list of playback SEGMENTS — the
+// single source of truth the timeline playback engine drives. Each clip
+// yields up to three segments, mirroring resolveTimelinePos's zones exactly
+// so the two can't drift:
+//   • head-hold  → mode 'freeze' (frozen on the first visual frame)
+//   • main body  → mode 'native' when forward AND normal-speed (the browser
+//                  can decode-play it itself), else 'scrub' (reversed or
+//                  slow-mo must be seeked frame-by-frame)
+//   • tail+round → mode 'freeze' (frozen on the last visual frame; the two
+//                  holds are merged — both freeze the same frame)
+// Segment fields: { clip, mode, timelineStart, timelineEnd, sourceStart,
+// rate, frozenSourceTime }. `sourceStart` is the source time at
+// timelineStart for a native/scrub body; `rate` is the play speed (≤1).
+export function buildSegments(clips) {
+  const segments = []
+  let elapsed = 0
+  for (const c of clips) {
+    const headHold = c.headHoldSec || 0
+    const mainDur = clipMainSec(c)
+    const tailHold = (c.tailHoldSec || 0) + (c.roundHoldSec || 0)
+    const speed = clipSpeed(c)
+
+    if (headHold > 0) {
+      segments.push({
+        clip: c, mode: 'freeze',
+        timelineStart: elapsed, timelineEnd: elapsed + headHold,
+        frozenSourceTime: c.reversed ? c.outSec : c.inSec,
+      })
+      elapsed += headHold
+    }
+
+    if (mainDur > 0) {
+      const native = !c.reversed && speed === 1
+      segments.push({
+        clip: c, mode: native ? 'native' : 'scrub',
+        timelineStart: elapsed, timelineEnd: elapsed + mainDur,
+        sourceStart: c.reversed ? c.outSec : c.inSec,
+        rate: speed,
+      })
+      elapsed += mainDur
+    }
+
+    if (tailHold > 0) {
+      segments.push({
+        clip: c, mode: 'freeze',
+        timelineStart: elapsed, timelineEnd: elapsed + tailHold,
+        frozenSourceTime: c.reversed ? c.inSec : c.outSec,
+      })
+      elapsed += tailHold
+    }
+  }
+  return segments
+}
+
+// Which segment contains `pos` (the last segment whose span covers it), and
+// the clamped position within the full segment list. Returns null for an
+// empty list. Used by the engine to pick a play mode at any timeline pos.
+export function segmentAt(segments, pos) {
+  if (segments.length === 0) return null
+  for (let i = 0; i < segments.length; i++) {
+    const s = segments[i]
+    if (pos < s.timelineEnd || i === segments.length - 1) {
+      return { index: i, segment: s }
+    }
+  }
+  return { index: segments.length - 1, segment: segments[segments.length - 1] }
 }
 
 // Fixed literal Tailwind class names (not template-interpolated) so the

@@ -1,0 +1,655 @@
+NARA LOSSLESS EDITOR -- TECHNICAL ARCHITECTURE
+================================================
+
+This document explains HOW the app works internally, with the heaviest
+focus on the part that gives it its name: how it edits video without
+ever re-encoding a pixel unless you explicitly ask it to, and exactly
+what happens to your data at each step of a render.
+
+It assumes you already know what the app does from a user's
+perspective (see README.txt for that, or click the app's title for the
+in-app About dialog). This is the "how" document, written for someone
+reading or modifying the code.
+
+
+CONTENTS
+--------
+ 1. What this app actually is
+ 2. System topology (two servers, no shell, no auth)
+ 3. The core idea: edits are decisions, not media operations
+ 4. THE LOSSLESS PIPELINE (encode_args)
+ 5. THE RENDER FILTER GRAPH (build_timeline_filter), step by step
+ 6. Frame-accurate math: epsilons, frame budgets, and why they matter
+ 7. The clip data model
+ 8. Two-track timeline: V1, V2, Analyze, Reconstruct
+ 9. Preview transcoding is fully isolated from the lossless path
+10. The Agentic Assistant Editor and its security model
+11. Backend API reference
+12. Known sharp edges
+
+
+1. WHAT THIS APP ACTUALLY IS
+-----------------------------
+
+Nara Lossless Editor is a local, single-user, EDL-style (Edit Decision
+List) video editor. It is not a hosted service, has no accounts, and
+binds only to 127.0.0.1 -- it never listens on the network. It is a
+Flask JSON API backend that drives ffmpeg, paired with a React 19 +
+Vite + Tailwind 4 frontend. It also doubles as a general ffmpeg
+workspace: a chat panel lets you describe an edit in English and get a
+runnable ffmpeg command back, gated behind an approval step.
+
+Its one core promise is this: every edit you stage on the timeline is
+applied in exactly one ffmpeg encode pass, and if you choose the
+Lossless quality mode, every pixel in your output is bit-for-bit
+identical to the corresponding pixel in your source -- verified by
+comparing raw frame hashes, not by eye and not by a similarity score
+like PSNR.
+
+
+2. SYSTEM TOPOLOGY
+--------------------
+
+Two processes run side by side:
+
+    Flask backend      127.0.0.1:5001   app.py
+    Vite dev server    127.0.0.1:5173   frontend/ (React UI)
+
+The Vite dev server proxies /api, /input, /output, and /preview
+requests straight through to Flask (see frontend/vite.config.js), so
+the browser only ever talks to one origin and no CORS handling exists
+anywhere in the code. The React UI is 100% dependent on Flask being up
+-- every fetch 404s otherwise.
+
+Flask also serves a second, much older UI directly at
+http://127.0.0.1:5001/ (templates/index.html + static/app.js, plain
+JavaScript, no build step). It supports only upload/trim/splice/hold/
+reverse/chat and is intentionally feature-frozen -- it predates the
+timeline/render pipeline described in this document and is kept only
+as a working fallback.
+
+
+3. THE CORE IDEA: EDITS ARE DECISIONS, NOT MEDIA OPERATIONS
+--------------------------------------------------------------
+
+Every trim, hold, reverse, speed change, or crop you make in the UI is
+stored as plain data on a JavaScript object -- nothing touches a file
+on disk. The timeline is not a working copy of your media; it is a
+list of decisions about how to eventually build one. Nothing is
+written to output/ until you click Render, at which point the ENTIRE
+decision list is sent to the backend in one HTTP request and rendered
+in one ffmpeg process.
+
+This matters technically for two reasons:
+
+  - There is no accumulation of generation loss. A ten-times-edited
+    clip that has never been rendered has been re-encoded zero times.
+    Contrast with editors that apply each edit destructively to a
+    working file -- every such edit is a fresh encode, and lossy
+    formats degrade a little more each time.
+
+  - Undo is free and instant, because "undo" just means popping a
+    JavaScript object off a history stack (see
+    frontend/src/hooks/useUndoableState.js) -- there is no file state
+    to roll back.
+
+The on-screen Edit Decision List (EdlTable.jsx) is a literal rendering
+of this philosophy: source file, IN/OUT points, hold durations,
+reversed flag, and speed, per clip, in SMPTE-style timecode. You can
+export this list as a CMX-style .edl text file, or export/import the
+whole timeline as a .nara JSON file to resume editing later.
+
+
+4. THE LOSSLESS PIPELINE (encode_args, in ffmpeg_utils.py)
+--------------------------------------------------------------
+
+This is the single most important function in the codebase for the
+app's core claim. It picks the ffmpeg encoder flags for whichever of
+three quality modes is active, and the choice made for the default
+mode is deliberately unusual and hand-verified rather than copied from
+common advice.
+
+Three modes:
+
+    lossless (default)   -qp 0            bit-exact, largest files
+    match                ABR at source bitrate, capped 1.5x   ~same size
+    high                  CRF 18            visually lossless, smallest
+
+LOSSLESS MODE: WHY -qp 0 AND NOT -crf 0
+
+The internet's standard advice for "lossless x264" is -crf 0. This app
+deliberately does NOT use that flag. Instead:
+
+    -c:v libx264 -qp 0 -preset medium
+
+-crf 0 is libx264's rate-control mode at its most conservative
+setting -- it still runs through the encoder's perceptual
+rate-distortion optimizer, just tuned all the way toward quality. -qp 0
+instead fixes the quantizer to zero for every macroblock directly,
+bypassing that rate-control heuristic entirely.
+
+The difference is not theoretical here: it was hand-verified on this
+project's actual ffmpeg build (Homebrew libx264) that -crf 0 does NOT
+round-trip bit-exact on 10-bit sources (yuv420p10le) -- only -qp 0
+does. -crf 0 = lossless is true for 8-bit content, which is why it's
+the commonly cited flag, but this app's whole purpose is editing
+arbitrary source footage, some of which may be a 10-bit master. Rather
+than ship a flag that's "lossless most of the time," it ships the one
+that was actually confirmed lossless on the sources that matter.
+
+Two side effects of -qp 0, both expected and harmless:
+
+  - libx264 always switches to the H.264 "High 4:4:4 Predictive"
+    profile under -qp 0. You will see this in Media Info Out even
+    though your source may have used a completely different profile.
+
+  - Losslessly re-encoding a source that was ALREADY lossy (i.e. any
+    normal camera or streaming file, not a raw/lossless master)
+    typically produces a file 2-3x the size of the source. This is
+    not a bug -- it is the mathematical cost of preserving information
+    a lossy encoder had already thrown away encoding decisions for.
+    You are not losing anything further; you are paying disk space to
+    stop losing anything further.
+
+MATCH MODE
+
+Targets the source's own video bitrate as an ABR (average bitrate)
+target, with a 1.5x maxrate ceiling and a buffer twice the target size
+(standard libx264 VBV settings to avoid quality collapse on complex
+frames while still averaging back down). If the source stream doesn't
+report its own bitrate, it's estimated as (container bitrate - audio
+bitrate); if that's unavailable too, it falls back to High mode.
+
+HIGH MODE
+
+CRF 18 -- visually lossless to the eye, usually noticeably smaller
+than the source, no bit-exactness guarantee.
+
+AUDIO -- IDENTICAL IN ALL THREE MODES
+
+Audio is lossy (AAC) by nature regardless of mode, so there is no
+"lossless audio" mode to offer. What the app does instead is refuse to
+let the encoder degrade audio any further than the source already was:
+bitrate is set to whichever is higher of the source's own audio
+bitrate or a 192 kbps floor, and sample rate / channel count are
+copied from the source rather than left at ffmpeg's defaults (which
+would silently resample/downmix). This is the one place lossy is
+unavoidable, so the code's job is damage control, not perfection.
+
+VERIFICATION METHODOLOGY
+
+Every lossless claim in this document and in the code is checked the
+same way: run "ffmpeg -f framemd5" against both the source and the
+render, and compare every single frame's hash. Not a spot check, not a
+visual comparison, not PSNR. This is enforced project convention (see
+.claude/skills/verify-render/SKILL.md) any time build_timeline_filter
+or encode_args changes.
+
+
+5. THE RENDER FILTER GRAPH (build_timeline_filter), STEP BY STEP
+----------------------------------------------------------------
+
+/api/render_timeline takes the whole clip list and calls
+build_timeline_filter() once to produce a single ffmpeg -filter_complex
+string. Every clip's crop, holds, trim, reversal, and speed change are
+expressed as one continuous chain of filters feeding into one shared
+concat node -- the entire timeline renders in one ffmpeg process, one
+encode pass, no intermediate files.
+
+Per clip, in this exact order:
+
+    STEP 0  crop            (if a crop box was set)
+    STEP 1  lead hold       (if this is the first clip)
+    STEP 2  trim -> reverse -> speed stretch   (the main body)
+    STEP 3  trail hold      (if this is the last clip)
+    STEP 4  concat the above 1-3 pieces into one clip segment
+    STEP 5  scale/pad/fps-normalize to the timeline's common canvas
+    STEP 6  hard-cap the frame count (see section 6)
+
+Then all clips' normalized segments are concatenated once more into
+the final [outv][outa] output.
+
+STEP 0 -- CROP COMES FIRST, BEFORE ANYTHING ELSE
+
+    [0:v]crop=W:H:X:Y[vsrc0]
+
+Crop is defined as a spatial transform of the WHOLE source, not
+something tied to the trim window. It has to run before both the main
+trim and the hold sampling, because a hold freezes a frame from the
+same input at a DIFFERENT timestamp than the main body -- if crop ran
+later, it would need to be applied twice (once for the hold's frame,
+once for the main body), doubling the chance of the two drifting out
+of sync. Cropping once, upstream of everything, guarantees the hold
+freeze and the main footage are always cropped identically.
+
+STEP 1 & 3 -- HOLD (FROZEN FRAME) MECHANICS
+
+A hold is built as: isolate exactly one source frame with trim, reset
+its timestamp to zero, then use ffmpeg's loop filter to repeat that
+single buffered frame enough times to fill the requested duration.
+
+    [vsrc0]trim=start=T:end=T+1/fps,setpts=PTS-STARTPTS,
+           loop=loop=N:size=1:start=0,setpts=PTS-STARTPTS[vlead0]
+
+loop's size=1 means its buffer holds exactly one frame; N is
+round(hold_seconds * fps) - 1, because trim's own output already
+counts as the first occurrence of that frame, so only N additional
+repeats are needed to reach the target frame count. The hold's audio
+is pure digital silence for the hold's exact duration (anullsrc) --
+there is no "real" audio for a frame that never actually played, so
+silence is the only accurate representation, not an approximation.
+
+WHICH TIMESTAMP A HOLD FREEZES ON FLIPS UNDER REVERSAL
+
+A hold always freezes the frame that is visually ADJACENT to it in
+final playback order. For a forward clip, the lead hold (which plays
+first) freezes the frame at inSec, because that's also the first frame
+of the main body that follows it. But if the clip is reversed, the
+main body's first-played frame is actually the one originally at
+outSec (since it now plays backward) -- so the lead hold must freeze
+outSec instead, or there would be a visible jump-cut between the
+frozen frame and the first frame of playback. The trail hold mirrors
+this in the opposite direction. This swap is driven by a single
+ternary keyed on the clip's reversed flag.
+
+STEP 2 -- TRIM, THEN REVERSE, THEN SPEED (in that fixed order)
+
+    [vsrc0]trim=start=IN:end=OUT,setpts=PTS-STARTPTS,reverse,
+           setpts=(1/speed)*PTS[vmain0]
+
+This order is not arbitrary. trim followed by setpts=PTS-STARTPTS
+isolates the clip's window and re-zeroes its timestamps to start at
+zero -- this is mandatory before reverse, which needs a bounded,
+self-contained stream it can buffer and play backward; it cannot
+reverse an unbounded live feed. reverse must therefore run on the
+already-trimmed, already-zeroed segment. The speed stretch runs LAST,
+after reversal, so that it stretches the timing of the segment that is
+already in its final (possibly reversed) frame order.
+
+Speed itself is a pure PTS stretch: setpts=(1/speed)*PTS with speed in
+(0, 1] multiplies every frame's presentation timestamp by a factor
+greater than or equal to 1, holding each frame on screen longer. NO
+interpolation happens and NO frames are generated -- when the
+downstream fps-normalization step (Step 5) resamples this stretched,
+now-sparser timeline back onto a constant frame rate, it fills the gap
+by repeating existing frames, not by inventing new ones.
+
+A slowed segment gets silent audio, not stretched real audio --
+stretching real audio's timing would shift its pitch and tempo, which
+is explicitly out of scope for what this feature promises ("lossless
+time stretch" refers to the video only). The app also refuses any
+speed value that would drop the EFFECTIVE frame rate (source fps x
+speed) below 12 fps, since below that threshold slow motion stops
+reading as smooth and starts reading as a stutter -- this is a
+perceptual-quality guard enforced server-side, not a filter limitation.
+
+STEP 4 -- CONCAT THE PER-CLIP PIECES
+
+Whichever of [lead hold, main body, trail hold] actually exist for
+this clip (1 to 3 pieces) are concatenated into one per-clip segment.
+If there's only one piece, concat is skipped entirely (ffmpeg's concat
+filter requires at least 2 inputs, so calling it with 1 would be
+invalid).
+
+STEP 5 -- NORMALIZE EVERY CLIP TO ONE SHARED CANVAS
+
+    scale=W:H:force_original_aspect_ratio=decrease,
+    pad=W:H:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=FPS
+
+Every clip in the timeline can come from a different source resolution
+and frame rate. Before the final concat, each clip's segment is scaled
+to fit inside the timeline's shared target canvas without cropping or
+distorting its aspect ratio, then letterboxed/pillarboxed (centered,
+padded with black) to exactly fill that canvas, then resampled to the
+shared frame rate -- all of which ffmpeg's concat filter requires
+every input to already agree on. The target width/height/fps
+themselves are computed as the MAXIMUM across every clip in the
+timeline (using each clip's post-crop size if it was cropped), so nothing
+in the timeline is ever downscaled to match a smaller neighbor -- only
+smaller clips get scaled up to match the biggest one.
+
+STEP 6 -- THE HARD FRAME-COUNT CAP
+
+Covered in detail in the next section, because it's the kind of bug
+you can't see until you go looking for it with exact frame hashes.
+
+
+6. FRAME-ACCURATE MATH: EPSILONS, FRAME BUDGETS, AND WHY THEY MATTER
+------------------------------------------------------------------------
+
+This section documents two specific numerical-precision issues the
+code defends against. Both were found by testing against exact frame
+hashes, not by inspection -- they are the kind of off-by-one-frame bug
+that looks fine until you diff every frame of a render against its
+source.
+
+EPSILON TOLERANCE ON FRAME-INDEX MATH
+
+Converting a time in seconds to a frame index means multiplying by fps
+and rounding. When a timestamp is SUPPOSED to land exactly on a frame
+boundary (say, 2.0 seconds at 30fps = frame 60 exactly), floating-point
+representation error can push the actual computed value to something
+like 59.999999999997 or 60.000000000003 -- and a plain floor() or
+ceil() on that number picks the wrong adjacent integer roughly half the
+time. The fix is a small epsilon (1e-6) added or subtracted before
+flooring/ceiling, nudging borderline values back onto the side of the
+boundary they were actually intended to land on, regardless of which
+direction the float error happened to go.
+
+THE HARD FRAME-COUNT CAP (why every per-clip chain ends in a trim)
+
+The whole filter_complex graph runs on an internal microsecond
+timebase. The fps= normalization filter (Step 5, previous section)
+can, on rare boundary cases, emit ONE extra duplicate frame at the end
+of a clip's segment -- an end timestamp that lands exactly on a frame
+tick can round up instead of down. Left alone, that single spurious
+frame pushes every SUBSEQUENT clip's start time later by one frame
+period, and the error compounds across every clip boundary in the
+timeline -- a ten-clip timeline could end up several frames adrift by
+the end, with each clip transition landing at a very slightly wrong
+time.
+
+The fix: the exact expected frame count for each clip's normalized
+segment is computed independently, from first principles (hold frame
+counts + main-body frame count adjusted for speed), BEFORE the
+normalization filter runs. Every per-clip chain then ends with an
+explicit trim=start_frame=0:end_frame=<that exact count>, which
+truncates away the spurious duplicate if the fps filter happened to
+produce one. The clip's audio track is padded or cut to match that
+same exact duration, so video and audio segment lengths are always
+forced identical -- a mismatch there is what would otherwise cause
+progressive audio/video drift down the timeline.
+
+OUT-OF-BOUNDS HOLD SAMPLING (the container-vs-video-duration trap)
+
+A video file's container can report a longer duration than its video
+stream actually has, because many containers pad to match whichever
+track is longest -- usually audio. If a hold's one-frame sample window
+were placed using the CONTAINER duration and that lands even slightly
+past the video stream's real last frame, ffmpeg's trim filter selects
+zero frames there: the freeze silently vanishes from the video track
+while its silence still gets inserted into the audio track, desyncing
+everything after it. Every place in this codebase that samples a
+specific instant in time -- hold freezes, outSec clamping, reverse's
+memory estimate -- uses the VIDEO STREAM's own duration for this
+reason, not the container's. This is why get_video_info() tracks
+"duration" and "video_duration" as two separate fields rather than one.
+
+
+7. THE CLIP DATA MODEL
+-------------------------
+
+A clip on the timeline (frontend/src/App.jsx, handleAddToTimeline) is
+this exact shape:
+
+    id                 client-generated UUID; stable identity for
+                       selection, React keys, and a deterministic
+                       display color (hashed into a fixed 8-color
+                       palette so the same clip keeps its color across
+                       reorders and splits)
+    sourceName         filename on disk
+    sourceDir          'input' | 'output' -- lets a clip reference
+                       either an original file or a previous render
+    sourceDurationSec  the VIDEO STREAM's duration (see section 6),
+                       captured once at add-time
+    sourceWidth/Height native pixel dimensions, used by crop math
+    fps                probed frame rate (falls back to 30)
+    inSec / outSec     the trim window into the source, in source-time
+                       seconds (not timeline seconds)
+    headHoldSec        freeze duration before the sequence's first
+                       clip -- only ever nonzero on clip index 0
+    tailHoldSec        freeze duration after the sequence's last clip
+                       -- only ever nonzero on the last clip
+    roundHoldSec       "Raise"'s round-up-to-whole-second extension,
+                       also only on the last clip
+    reversed           plays the trim window backward
+    speed              slow-motion multiplier in (0, 1]; 1 = normal
+    crop               { key, w, h, x, y } in source-pixel coordinates,
+                       or null
+    dirty              true if this clip has unrendered changes
+    displayName        optional UI label override (used by Splice,
+                       Analyze, Reconstruct so a derived clip's label
+                       can diverge from its literal sourceName)
+
+The invariant that head-holds only ever live on the first clip and
+tail/round-holds only on the last is actively enforced by
+sanitizeHoldPlacement() (clipMath.js) after any operation that could
+reorder or restructure the timeline -- reordering, splitting,
+duplicating, or deleting a clip all re-run this check and zero out any
+hold that ended up stranded away from an actual sequence edge.
+
+Timeline-domain duration math (also clipMath.js): a clip's played
+length on the timeline is (outSec - inSec) / speed -- slowing a clip
+to 0.5x DOUBLES its footprint on the timeline, which is why the
+timeline visually stretches a clip when you slow it down.
+
+
+8. TWO-TRACK TIMELINE: V1, V2, ANALYZE, RECONSTRUCT
+------------------------------------------------------
+
+V1 is the timeline of record: it drives the playhead, the transport
+controls, the ruler, and the undo history. V2 is a scratch reference
+lane, deliberately kept OUTSIDE the undo history, because its usual
+job is to hold a single freshly-dropped file until Analyze reshapes it
+-- it's meant to be rebuilt from a rule, not hand-edited step by step.
+When both tracks have content, V2 composites "on top" of V1 for
+preview purposes only, the way a video track sits on top of another in
+a conventional NLE; V1's own timing is unaffected either way.
+
+ANALYZE clones V1's entire cut structure -- the same IN/OUT points and
+the same hold durations, clip for clip -- onto whatever file was
+dropped on V2, always forced to play forward (reversed is intentionally
+not copied: bringing in a different piece of footage to conform to your
+cuts is not the same operation as replaying it backwards). This is the
+"conform an alternate take, a cleaned master, or an AI-reprocessed
+version to my exact edit" workflow. If V1's cuts run past the end of
+whatever's on V2, the affected segment is clamped to fit and a warning
+is surfaced with the exact overflow amount.
+
+RECONSTRUCT is step 2 of a round-trip workflow, not a standalone
+inverse of Analyze. The intended sequence: Analyze conforms V2 to V1's
+cuts (as above); the user then takes V2's rendered footage out of the
+app entirely -- through an external tool, e.g. a style-transfer model
+-- and drops the result back onto V2. Render V2 always merges every V2
+clip into ONE continuous file, and dropping a file back onto V2
+(handleAddToV2) always replaces V2 with a single fresh clip -- so by
+the time Reconstruct runs, V2 is always exactly one clip, even if V1
+has several. Reconstruct strips the edit artifacts V1's decisions baked
+into that round-tripped footage back OUT of V2's own clip. It never
+touches or copies V1's own sourceName -- V2 keeps whatever file is
+already on it.
+
+Because V2 always collapses to one clip, holds and round-up are
+computed as SEQUENCE-level facts about V1 -- headHoldSec from V1's
+FIRST clip, tailHoldSec+roundHoldSec from V1's LAST clip -- the same
+convention sanitizeHoldPlacement/RaiseButton already enforce elsewhere
+(a head-hold only ever lives on the first clip of a sequence, tail/
+round-hold only ever on the last). An earlier version of this function
+paired V2 clip i against V1 clip i positionally, which silently dropped
+any hold or reversed flag living on a V1 clip other than the one V2
+happened to line up against -- fixed by aggregating over the whole V1
+sequence instead of any single clip.
+
+What "reverse the decision" means differs per field, because holds,
+speed, and crop are physically baked into the pixels by the time
+footage comes back from outside the app:
+  reversed  -- copied AS-IS, not toggled, and ONLY when every V1 clip
+              agrees on it. If V1 played backward, the round-tripped
+              file is ALSO in that reversed frame order, so setting
+              V2's own reversed flag to the same value plays it
+              backward a second time, landing back on true
+              chronological order. A V1 sequence with SOME clips
+              reversed and some not can't be represented by a single
+              V2 clip's one reversed flag -- that case warns and
+              leaves V2's own flag untouched rather than guessing.
+  holds     -- V1's sequence-level head/tail/round holds are duplicated
+              frames physically present at the very start/end of the
+              rendered output; trimmed off V2's own inSec/outSec
+              window.
+  speed     -- V1's slow-down is already realized as repeated frames
+              at the stretched duration; V2's speed resets to 1 so it
+              isn't slowed a second time.
+  crop      -- UNRECOVERABLE. Pixels outside V1's crop box don't exist
+              in the round-tripped footage. Reset to null rather than
+              pretending to restore them.
+Requires clips on both V1 and V2.
+
+Either track can be rendered independently through the exact same
+lossless pipeline described in sections 4 and 5.
+
+
+9. PREVIEW TRANSCODING IS FULLY ISOLATED FROM THE LOSSLESS PATH
+---------------------------------------------------------------------
+
+Browsers cannot natively decode many of the codecs this app is
+specifically built to edit losslessly -- ProRes, DNxHD, 10-bit sources,
+and others. get_or_make_preview() solves this without ever touching
+the lossless render path:
+
+  - If a source is already browser-safe (H.264/VP8/VP9/AV1 video with
+    AAC/MP3/Opus/Vorbis/silent audio), its ORIGINAL file path is
+    returned completely unchanged. No transcode ever happens for
+    footage that doesn't need one.
+
+  - Otherwise, a disposable H.264 + yuv420p + AAC proxy is generated
+    once into .preview_cache/, keyed by filename AND modification
+    time (so editing a source file in place invalidates its stale
+    cached preview automatically), and reused on every subsequent
+    preview request for that unchanged file.
+
+This transcode is intentionally NOT lossless -- it exists purely so an
+HTML5 <video> tag has something to play, and it is never fed back into
+any edit, trim, splice, hold, reverse, or render operation. Every one
+of those operations always reads from the original source file. The
+only code path that ever touches .preview_cache/ is the /preview route
+itself.
+
+
+10. THE AGENTIC ASSISTANT EDITOR AND ITS SECURITY MODEL
+-------------------------------------------------------------
+
+The chat panel turns a plain-English request into a proposed ffmpeg
+command, via a two-step, human-in-the-loop flow:
+
+  1. /api/chat sends your instruction (plus the current file listing
+     and, if a clip is selected, its filename as the likely target) to
+     a local Claude CLI process, run non-interactively with NO tool
+     access of its own -- it can only respond with structured text
+     (an ffmpeg command + a one-sentence explanation), matching a
+     strict JSON schema. It cannot execute anything itself. The server
+     validates the proposed command but does not run it.
+
+  2. Only after you click Run does /api/execute receive the
+     user-approved command string and re-validate it independently
+     before finally running it.
+
+The validator (validate_ffmpeg_command) has two layers:
+
+  - No shell is ever involved. subprocess.run is always called with
+    an argv LIST, never shell=True -- so characters like ; ( ) $ are
+    inert data inside one argument, not shell syntax. This is why the
+    code deliberately does NOT blocklist those characters: ffmpeg's
+    own -filter_complex syntax legitimately uses them, and there is no
+    shell present for them to exploit in the first place.
+
+  - The first token must be literally "ffmpeg", and even then the
+    real hardcoded binary path is substituted in regardless of what
+    the model produced -- there is no way a crafted string can make a
+    different program execute. Every input/output path in the command
+    is resolved to its real absolute path and must fall inside this
+    project's input/ or output/ directories; anything outside is
+    rejected, and any input path that doesn't actually exist on disk
+    is rejected too.
+
+Net effect: the assistant has full creative freedom over what ffmpeg
+command it proposes, but it can never touch a file outside this
+project's own folders and can never execute anything other than the
+real ffmpeg binary.
+
+When a Run succeeds and a clip is selected on the timeline, the
+produced file is loaded onto that clip in place -- its trim, holds,
+reverse, speed, and crop are all reset to defaults, because the edit
+is now baked into new pixels and none of those settings, which
+referred to the old source, still mean anything.
+
+
+11. BACKEND API REFERENCE
+----------------------------
+
+Media serving
+    GET  /                          legacy vanilla-JS UI
+    GET  /input/<name>              raw file from input/
+    GET  /output/<name>             raw file from the current export dir
+    GET  /preview/<in|out>/<name>   browser-playable proxy (see section 9)
+
+Listing / probing
+    GET  /api/files                 list input/
+    GET  /api/outputs               list the current export dir
+    GET  /api/probe/<name>          ffprobe details for one file
+
+Upload / clear
+    POST /api/upload                add a file to input/ (2 GB cap)
+    POST /api/clear_input           delete everything in input/
+    POST /api/clear_output          delete everything in the export dir
+
+Project library (.nara JSON files)
+    GET    /api/projects            list saved projects
+    POST   /api/projects            save one
+    GET    /api/projects/<name>     load one
+    DELETE /api/projects/<name>     delete one
+
+Export settings
+    GET  /api/export_settings       current output dir + quality mode
+    POST /api/export_settings       change either
+    POST /api/browse_directory      native macOS folder picker
+    POST /api/reveal_file           reveal a file in Finder
+
+One-shot editing operations (legacy-UI-facing; each writes one new file)
+    POST /api/trim                  -ss/-to trim of one file
+    POST /api/splice                concatenate 2+ files
+    POST /api/hold_frame            freeze one frame for a duration
+    POST /api/reverse               reverse one file (RAM-estimate
+                                     warn/confirm flow above 2 GiB)
+
+The main render pipeline
+    POST /api/render_timeline       render an entire clip list in one
+                                     ffmpeg pass (sections 4-6 above)
+
+Chat / assistant
+    POST /api/chat                  propose an ffmpeg command (never runs it)
+    POST /api/execute               run a user-approved command
+
+Every route follows the same error convention: {"error": ..., "detail":
+...} with 400 for validation/path problems, 404 for missing files, 500
+for ffmpeg/probe failures, 502 for chat-CLI failures, 504 for timeouts.
+Every client-supplied filename is resolved through a traversal guard
+(safe_path) before it touches the filesystem.
+
+
+12. KNOWN SHARP EDGES
+------------------------
+
+  - The server NEVER trusts client-supplied fps, audio presence, or
+    resolution for a render -- it always re-probes the actual file
+    itself. Only the edit decisions themselves (in/out points, hold
+    durations, reversed, speed, crop) come from the request.
+
+  - A literal speed value of 0 is deliberately checked with an
+    explicit "is None" test rather than Python's "or" pattern -- using
+    "or" would treat 0 the same as "not provided" and silently
+    substitute the default speed, skipping validation that should have
+    rejected it. This was a real bug caught during testing.
+
+  - /api/reverse can return HTTP 200 (not an error status) carrying a
+    warning instead of a result, when its RAM estimate for buffering
+    the whole clip exceeds 2 GiB and the request didn't already say
+    confirm: true. This is a deliberate soft-block, not a failure.
+
+  - Only /api/render_timeline respects a custom export directory
+    (get_output_dir()); the older single-shot routes (trim, splice,
+    hold_frame, reverse) still write to the default output/ directory
+    regardless of that setting.
+
+  - All machine-specific paths (ffmpeg/ffprobe binary locations, the
+    Claude CLI path) are hardcoded for this specific development
+    machine, not auto-detected.

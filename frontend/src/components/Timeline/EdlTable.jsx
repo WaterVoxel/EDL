@@ -27,6 +27,10 @@ export default function EdlTable({ clips, selectedId, onSelect, onDelete }) {
       <div className="px-2.5 py-1 text-[9px] font-semibold uppercase tracking-wide text-neutral-500">
         Edit Decision List
       </div>
+      {/* Fixed height (not max-height) — holds exactly the header + 4 EVT
+          rows and never resizes as clips are added/removed/split; a 5th
+          row scrolls within this same box instead of growing it. */}
+      <div className="h-[90px] overflow-y-auto">
       <table className="w-full text-[10px] font-mono">
         <thead>
           <tr className="text-neutral-500 border-b border-neutral-800">
@@ -49,7 +53,10 @@ export default function EdlTable({ clips, selectedId, onSelect, onDelete }) {
               className={`cursor-pointer border-b border-neutral-900 group ${row.clip.id === selectedId ? 'bg-indigo-900/30' : 'hover:bg-neutral-800/50'}`}
             >
               <td className="px-2.5 py-0.5 text-neutral-400">{row.event}</td>
-              <td className="px-1.5 py-0.5 text-neutral-300 truncate max-w-[140px]">{row.reel}</td>
+              <td className="px-1.5 py-0.5 text-neutral-300 truncate max-w-[140px]">
+                {row.clip.reversed && <span title="Reversed">◀ </span>}
+                {row.reel}
+              </td>
               <td className="px-1.5 py-0.5 text-neutral-400">{formatTimecode(row.srcIn, row.clip.fps || 30)}</td>
               <td className="px-1.5 py-0.5 text-neutral-400">{formatTimecode(row.srcOut, row.clip.fps || 30)}</td>
               <td className="px-1.5 py-0.5 text-neutral-400">{formatTimecode(row.recIn, row.clip.fps || 30)}</td>
@@ -77,6 +84,7 @@ export default function EdlTable({ clips, selectedId, onSelect, onDelete }) {
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   )
 }

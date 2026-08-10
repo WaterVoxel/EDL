@@ -1,23 +1,37 @@
 import { useState, useEffect } from 'react'
+import NumericStepper from './NumericStepper'
 
-export default function TrimForm({ selectedClip, setClips }) {
+// Formats/parses a source-time value in whichever unit the shared
+// timecode/frames toggle (TransportBar) is currently set to, so Trim's
+// In/Out fields always match what the transport clock and Splice show.
+function toDisplay(sec, mode, fps) {
+  return mode === 'frames' ? String(Math.round(sec * fps)) : sec.toFixed(2)
+}
+function fromDisplay(value, mode, fps) {
+  const n = parseFloat(value)
+  if (Number.isNaN(n)) return NaN
+  return mode === 'frames' ? n / fps : n
+}
+
+export default function TrimForm({ selectedClip, setClips, displayMode = 'timecode' }) {
   const [inVal, setInVal] = useState('')
   const [outVal, setOutVal] = useState('')
+  const fps = selectedClip?.fps || 24
 
   useEffect(() => {
     if (selectedClip) {
-      setInVal(selectedClip.inSec.toFixed(2))
-      setOutVal(selectedClip.outSec.toFixed(2))
+      setInVal(toDisplay(selectedClip.inSec, displayMode, fps))
+      setOutVal(toDisplay(selectedClip.outSec, displayMode, fps))
     } else {
       setInVal('')
       setOutVal('')
     }
-  }, [selectedClip?.id, selectedClip?.inSec, selectedClip?.outSec])
+  }, [selectedClip?.id, selectedClip?.inSec, selectedClip?.outSec, displayMode, fps])
 
   function apply() {
     if (!selectedClip) return
-    const newIn = parseFloat(inVal)
-    const newOut = parseFloat(outVal)
+    const newIn = fromDisplay(inVal, displayMode, fps)
+    const newOut = fromDisplay(outVal, displayMode, fps)
     if (Number.isNaN(newIn) || Number.isNaN(newOut)) return
     const clampedIn = Math.max(0, Math.min(newIn, selectedClip.sourceDurationSec - 0.1))
     const clampedOut = Math.min(selectedClip.sourceDurationSec, Math.max(newOut, clampedIn + 0.1))
@@ -34,36 +48,44 @@ export default function TrimForm({ selectedClip, setClips }) {
   }
 
   const disabled = !selectedClip
+  const maxDisplay = selectedClip
+    ? (displayMode === 'frames' ? Math.round(selectedClip.sourceDurationSec * fps) : selectedClip.sourceDurationSec)
+    : Infinity
 
   return (
     <div className="flex items-center gap-1.5">
       <span className="text-[9px] font-semibold uppercase tracking-wide text-neutral-500 whitespace-nowrap">Trim</span>
-      <input
-        type="number" step="0.01" min="0" placeholder="in" value={inVal}
-        onChange={e => setInVal(e.target.value)}
+      <NumericStepper
+        value={inVal}
+        onChange={setInVal}
+        step={displayMode === 'frames' ? 1 : 0.01}
+        min={0}
+        max={maxDisplay}
         disabled={disabled}
         title="Or drag the clip's edges directly on the timeline"
-        className="w-11 px-1.5 py-0.5 text-[11px] rounded bg-neutral-950 border border-neutral-700 text-neutral-300 disabled:opacity-50"
       />
       <span className="text-[9px] text-neutral-500">–</span>
-      <input
-        type="number" step="0.01" min="0" placeholder="out" value={outVal}
-        onChange={e => setOutVal(e.target.value)}
+      <NumericStepper
+        value={outVal}
+        onChange={setOutVal}
+        step={displayMode === 'frames' ? 1 : 0.01}
+        min={0}
+        max={maxDisplay}
         disabled={disabled}
         title="Or drag the clip's edges directly on the timeline"
-        className="w-11 px-1.5 py-0.5 text-[11px] rounded bg-neutral-950 border border-neutral-700 text-neutral-300 disabled:opacity-50"
       />
+      <span className="text-[9px] text-neutral-600">{displayMode === 'frames' ? 'fr' : 's'}</span>
       <button
         onClick={apply}
         disabled={disabled}
-        className="px-1.5 py-0.5 text-[11px] rounded bg-indigo-600 text-white hover:bg-indigo-500 disabled:bg-neutral-700 disabled:text-neutral-500"
+        className="px-1.5 py-0.5 text-[9px] rounded bg-indigo-600 text-white hover:bg-indigo-500 disabled:bg-neutral-700 disabled:text-neutral-500"
       >
         Apply
       </button>
       <button
         onClick={reset}
         disabled={disabled}
-        className="px-1.5 py-0.5 text-[11px] rounded border border-neutral-700 text-neutral-500 hover:text-neutral-300 disabled:opacity-50"
+        className="px-1.5 py-0.5 text-[9px] rounded border border-neutral-700 text-neutral-500 hover:text-neutral-300 disabled:opacity-50"
       >
         Reset
       </button>

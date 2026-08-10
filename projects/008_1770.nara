@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "clips": [
+    {
+      "id": "47e6c3d6-b978-4204-ba02-4772fe027c2f",
+      "sourceName": "008_1770_nara.mp4",
+      "sourceDir": "input",
+      "sourceDurationSec": 5.791667,
+      "sourceWidth": 2520,
+      "sourceHeight": 1080,
+      "fps": 24,
+      "inSec": 0,
+      "outSec": 5.791667,
+      "headHoldSec": 0,
+      "tailHoldSec": 0,
+      "roundHoldSec": 0.20833299999999966,
+      "reversed": true,
+      "speed": 1,
+      "crop": null,
+      "dirty": false
+    }
+  ],
+  "track2Clips": [],
+  "selectedId": "47e6c3d6-b978-4204-ba02-4772fe027c2f"
+}

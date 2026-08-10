@@ -1,7 +1,7 @@
 import { useState, useRef } from 'react'
 import { chat, execute } from '../api'
 
-export default function ChatPanel({ onResult }) {
+export default function ChatPanel({ onResult, selectedClipName }) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [sessionId, setSessionId] = useState(null)
@@ -21,7 +21,7 @@ export default function ChatPanel({ onResult }) {
     setLoading(true)
     scrollBottom()
 
-    const data = await chat(msg, sessionId)
+    const data = await chat(msg, sessionId, selectedClipName)
     setLoading(false)
     if (data.session_id) setSessionId(data.session_id)
 
@@ -44,7 +44,11 @@ export default function ChatPanel({ onResult }) {
       setMessages(prev => prev.map((m, i) => i === idx ? { ...m, running: false, execError: res.error + (res.detail ? ' — ' + res.detail : '') } : m))
     } else {
       setMessages(prev => prev.map((m, i) => i === idx ? { ...m, running: false, done: true } : m))
-      onResult()
+      // Tell App.jsx exactly which file this command produced (name + dir),
+      // so it can offer to load the result onto the timeline clip that was
+      // being edited, instead of the change only ever showing up as a new
+      // file in the Export Bin.
+      onResult(res.output)
     }
   }
 
@@ -56,9 +60,14 @@ export default function ChatPanel({ onResult }) {
   return (
     <div className="rounded-md bg-neutral-900 border border-neutral-800 flex flex-col flex-1 min-h-0">
       <div className="flex items-center justify-between px-2 py-1 border-b border-neutral-800">
-        <h2 className="text-[9px] font-semibold uppercase tracking-wide text-neutral-500">Chat</h2>
+        <h2 className="text-[9px] font-semibold uppercase tracking-wide text-neutral-500">Agentic Assistant Editor</h2>
         <button onClick={handleNew} className="px-1.5 py-0.5 text-[9px] rounded border border-neutral-700 text-neutral-500 hover:text-neutral-300">New</button>
       </div>
+      {selectedClipName && (
+        <div className="px-2 py-1 border-b border-neutral-800 text-[9px] text-neutral-500 truncate">
+          Editing: <span className="text-neutral-300">{selectedClipName}</span>
+        </div>
+      )}
       <div ref={logRef} className="flex-1 min-h-[100px] max-h-60 overflow-y-auto p-1.5 text-[11px] space-y-1.5">
         {messages.map((m, i) => (
           <div key={i}>

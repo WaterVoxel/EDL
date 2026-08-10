@@ -1,0 +1,45 @@
+{
+  "version": 2,
+  "clips": [
+    {
+      "crop": null,
+      "dirty": true,
+      "fps": 24,
+      "headHoldSec": 0,
+      "id": "6f0eb156-b391-4176-a128-9206f9b10a45",
+      "inSec": 0,
+      "outSec": 2.125,
+      "reversed": false,
+      "roundHoldSec": 0.875,
+      "sourceDir": "input",
+      "sourceDurationSec": 2.125,
+      "sourceHeight": 1080,
+      "sourceName": "SPHE_002_0470_fg01_v001_AI-MP4.mp4",
+      "sourceWidth": 2520,
+      "speed": 1,
+      "tailHoldSec": 1
+    }
+  ],
+  "track2Clips": [
+    {
+      "id": "1d3afca3-c84e-42f6-b739-b27bfcfe8df4",
+      "sourceName": "002_0470_nara.mp4",
+      "sourceDir": "input",
+      "sourceDurationSec": 4.041667,
+      "sourceWidth": 2206,
+      "sourceHeight": 946,
+      "fps": 24,
+      "inSec": 0,
+      "outSec": 2.1666670000000003,
+      "headHoldSec": 0,
+      "tailHoldSec": 0,
+      "roundHoldSec": 0,
+      "reversed": false,
+      "speed": 1,
+      "crop": null,
+      "dirty": false,
+      "displayName": "Reconstructed01"
+    }
+  ],
+  "selectedId": "6f0eb156-b391-4176-a128-9206f9b10a45"
+}
