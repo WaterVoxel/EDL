@@ -2,18 +2,18 @@
   "version": 2,
   "clips": [
     {
-      "id": "eabf6702-cd95-4b38-945e-61c73153a778",
-      "sourceName": "SPHE_008_0040_fg01_v001_AI-MP4.mp4",
+      "id": "311b8103-a0b5-4e90-9f03-0320423240c2",
+      "sourceName": "SPHE_008_0440_fg01_v001_AI-MP4.mp4",
       "sourceDir": "input",
-      "sourceDurationSec": 1.666667,
+      "sourceDurationSec": 1.583333,
       "sourceWidth": 2520,
       "sourceHeight": 1080,
       "fps": 24,
       "inSec": 0,
-      "outSec": 1.666667,
+      "outSec": 1.583333,
       "headHoldSec": 1,
       "tailHoldSec": 1,
-      "roundHoldSec": 0.3333330000000001,
+      "roundHoldSec": 0.4166669999999999,
       "reversed": false,
       "speed": 1,
       "crop": null,
@@ -22,5 +22,5 @@
     }
   ],
   "track2Clips": [],
-  "selectedId": "eabf6702-cd95-4b38-945e-61c73153a778"
+  "selectedId": "311b8103-a0b5-4e90-9f03-0320423240c2"
 }

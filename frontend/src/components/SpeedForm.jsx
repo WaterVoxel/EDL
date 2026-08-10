@@ -12,7 +12,6 @@ export function allowedSpeeds(sourceFps) {
 }
 
 export default function SpeedForm({ selectedClip, setClips }) {
-  const disabled = !selectedClip
   const speeds = selectedClip ? allowedSpeeds(selectedClip.fps) : [1.0]
   const current = selectedClip?.speed && selectedClip.speed > 0 ? selectedClip.speed : 1
 

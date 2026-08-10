@@ -1,0 +1,26 @@
+{
+  "version": 2,
+  "clips": [
+    {
+      "id": "90f3ac15-4ba6-4dd8-a21d-c2a16d038bfa",
+      "sourceName": "SPHE_008_1320_fg01_v001_AI-MP4.mp4",
+      "sourceDir": "input",
+      "sourceDurationSec": 5.208333,
+      "sourceWidth": 2520,
+      "sourceHeight": 1080,
+      "fps": 24,
+      "inSec": 0,
+      "outSec": 5.208333,
+      "headHoldSec": 0.5,
+      "tailHoldSec": 0,
+      "roundHoldSec": 0.29166700000000034,
+      "reversed": false,
+      "speed": 1,
+      "crop": null,
+      "cropKeyframes": [],
+      "dirty": true
+    }
+  ],
+  "track2Clips": [],
+  "selectedId": "90f3ac15-4ba6-4dd8-a21d-c2a16d038bfa"
+}

@@ -31,7 +31,7 @@ function EyeIcon({ off, className }) {
 }
 
 export default function Timeline({
-  clips, setClips, selectedId, selectedPart = 'main', onSelectId, onSelectItem, hasDirty, onUndo, canUndo,
+  clips, setClips, selectedId, selectedPart = 'main', onSelectId, onSelectItem, onUndo, canUndo,
   track2Clips = [], setTrack2Clips, selectedId2 = null, selectedPart2 = 'main', onSelectItem2,
   focusedTrack = 1, onFocusTrack, onAddToV2, onAnalyze, onReconstruct, onRenderV2,
   timeDisplayMode, onToggleTimeDisplayMode, animateEnabled = false,
@@ -220,7 +220,7 @@ export default function Timeline({
       }
       if (e.key === ' ' && clips.length > 0) {
         e.preventDefault()
-        transport.playing ? transport.stop() : transport.play()
+        if (transport.playing) { transport.stop() } else { transport.play() }
         return
       }
       if (e.key === 'ArrowRight') {
@@ -249,7 +249,7 @@ export default function Timeline({
   }, [focusedTrack, selectedId, selectedPart, selectedId2, selectedPart2, clips.length, transport, canUndo, onUndo])
 
   function handleDragStart(idx) { dragFromRef.current = idx }
-  function handleDragOver(idx) {}
+  function handleDragOver(_idx) {}
   function handleDrop(targetIdx) {
     if (dragFromRef.current == null || dragFromRef.current === targetIdx) return
     setClips(prev => {
@@ -265,7 +265,7 @@ export default function Timeline({
   }
 
   function handleDragStart2(idx) { dragFromRef2.current = idx }
-  function handleDragOver2(idx) {}
+  function handleDragOver2(_idx) {}
   function handleDrop2(targetIdx) {
     if (!setTrack2Clips || dragFromRef2.current == null || dragFromRef2.current === targetIdx) return
     setTrack2Clips(prev => {
