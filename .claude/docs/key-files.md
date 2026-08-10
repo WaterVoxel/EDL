@@ -52,4 +52,4 @@ Where to look for what. Paths relative to the repo root.
 | `templates/index.html` + `static/app.js` | LEGACY vanilla-JS UI at `:5001/` — feature-frozen fallback, don't extend. |
 | `README.txt` | Beginner-oriented plain-text run instructions (user-facing). |
 | `CLAUDE.md` (root) | Claude Code index — table of contents for these docs + skills. |
-| `input/`, `output/`, `projects/`, `.preview_cache/` | Media in, renders out, saved `.nara` projects, transcoded previews. All gitignored except `projects/`. |
+| `input/`, `output/`, `projects/`, `.preview_cache/` | Media in, renders out, saved `.nara` projects, transcoded previews. All gitignored, including `projects/` (though its previously-committed `.nara` files remain tracked). |

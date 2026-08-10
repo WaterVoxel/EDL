@@ -44,4 +44,4 @@ This project verifies render correctness with **exact frame hashes**, not visual
 
 - Imperative one-line commit subjects summarizing multiple changes.
 - No remote — local-only history on `main`.
-- Gitignored: `.venv/`, `input/`, `output/`, `.preview_cache/`, `frontend/node_modules/`, `frontend/dist/`, `.DS_Store`.
+- Gitignored: `.venv/`, `input/`, `output/`, `.preview_cache/`, `frontend/node_modules/`, `frontend/dist/`, `.DS_Store`, `projects/` (already-tracked `.nara` files remain tracked — the ignore only stops new/changed ones from being added).
