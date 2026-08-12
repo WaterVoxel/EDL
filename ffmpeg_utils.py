@@ -575,6 +575,44 @@ def build_holdframe_filter(t, dur, fps, sample_rate=44100, channel_layout="stere
     )
 
 
+def keyframe_ladder(keyframes, coord, in_sec):
+    """Piecewise-linear ffmpeg expression mapping `t` → keyframes[coord].
+
+    Emits a nested if(lt(t,...),branch,else) ladder. Endpoints HOLD: before
+    the first keyframe the value is the first keyframe's, after the last it's
+    the last keyframe's — matching cropAnimation.sampleCropOrigin's own
+    extrapolation model exactly (the preview and the render must agree).
+
+    `keyframes` must be sorted by t (invariant #1 of the frontend's keyframe
+    contract) and indexed relative to the clip's main body; `in_sec` is added
+    so the ladder is expressed in the SOURCE frame's own timestamps. Both the
+    `crop` and `overlay` filters this feeds run on the RAW input before any
+    trim/setpts, so their `t` variable is source time.
+
+    Verified by hand: these ladders parse to at least 64 nesting levels, and
+    both filters re-evaluate the expression per frame (overlay defaults to
+    eval=frame, so it needs no explicit eval= option).
+    """
+    kfs = sorted(keyframes, key=lambda k: k["t"])
+    expr = f"{kfs[-1][coord]:.4f}"
+    for j in range(len(kfs) - 1, 0, -1):
+        a = kfs[j - 1]
+        b = kfs[j]
+        ta = a["t"] + in_sec
+        tb = b["t"] + in_sec
+        va = a[coord]
+        vb = b[coord]
+        if tb - ta < 1e-9:
+            branch = f"{vb:.4f}"
+        else:
+            slope = (vb - va) / (tb - ta)
+            branch = f"({va:.4f}+({slope:.6f})*(t-{ta:.4f}))"
+        expr = f"if(lt(t,{tb:.4f}),{branch},{expr})"
+    # Before the very first keyframe → hold at kfs[0].
+    first_t = kfs[0]["t"] + in_sec
+    return f"if(lt(t,{first_t:.4f}),{kfs[0][coord]:.4f},{expr})"
+
+
 def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
                            sample_rate=44100, channel_layout="stereo", no_audio=False):
     """Build one filter_complex string that renders an entire timeline (a
@@ -634,6 +672,36 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
     trail hold (which samples a frame from the same input) is cropped
     identically to the main segment — a crop is a spatial transform of the
     whole source, not something tied to the trim window.
+
+    spec["overlay"] (optional dict {input_index, w, h, x, y, keyframes,
+    in_sec, out_sec}) composites a SECOND video on top of this clip — the V2
+    animated-overlay feature: a region that was cropped out of this clip,
+    processed externally, and is being placed back exactly where it came
+    from, following the same animated path. Like crop, it is applied to the
+    RAW input before trim/reverse/speed/holds, which is what makes it correct
+    for free under every one of those: `t` is source time (the same unit the
+    keyframes and the crop ladder already use, so one generator serves both),
+    a hold freezes an already-composited frame, and reverse/speed transform
+    the composite as a unit. `x`/`y` follow the same keyframe ladder as an
+    animated crop when keyframes are present, so the overlay tracks the crop
+    box that produced it frame for frame.
+
+    A clip may carry BOTH crop and overlay, and order matters: the overlay is
+    composited onto the full frame FIRST, then crop applies to the result.
+    (Cropping first would throw away the very pixels the overlay is meant to
+    be placed back onto.)
+
+    The overlaid input is time-aligned to this clip's own trim window via
+    setpts=PTS-STARTPTS+in_sec/TB — the processed region starts at frame 0 of
+    its own file but belongs at in_sec on the source's clock.
+    eof_action=pass + repeatlast=0 mean a shorter overlay simply stops
+    compositing (the background continues untouched) rather than freezing its
+    last frame over the rest of the clip, and never truncates the render to
+    the overlay's length. Hand-verified: with an overlay covering source
+    t=1..4 of a 5s background, frames outside that window come back
+    pixel-clean, the output keeps its full 150-frame length, and the region
+    the overlay never touches is BIT-EXACT against the same render without
+    it.
     """
     chains = []
     norm_v_labels = []
@@ -653,6 +721,42 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
         v_pieces = []
         a_pieces = []
 
+        # Raw video for this clip, before any spatial pre-filter.
+        v_src = f"[{i}:v]"
+
+        # Composite the V2 overlay onto the FULL frame first — a crop (if any)
+        # must apply to the already-composited picture, since cropping first
+        # would discard the pixels the overlay is being placed back onto.
+        overlay = spec.get("overlay")
+        if overlay:
+            ov_idx = overlay["input_index"]
+            ov_kfs = overlay.get("keyframes") or []
+            # The overlay file's OWN trim window (its clip on V2 is editable
+            # like any other), then re-based to 0 and shifted to in_sec: the
+            # processed region starts at frame 0 of its file but belongs at
+            # in_sec on the background's source clock. Trimming before the
+            # shift also stops a longer processed file painting past the body.
+            ov_in = overlay.get("in_sec") or 0
+            ov_out = overlay.get("out_sec")
+            trim_step = f"trim=start={ov_in}:end={ov_out}" if ov_out else f"trim=start={ov_in}"
+            chains.append(
+                f"[{ov_idx}:v]{trim_step},setpts=PTS-STARTPTS+{in_sec}/TB[ovin{i}]"
+            )
+            if len(ov_kfs) >= 1:
+                ox = f"'{keyframe_ladder(ov_kfs, 'x', in_sec)}'"
+                oy = f"'{keyframe_ladder(ov_kfs, 'y', in_sec)}'"
+            else:
+                ox = f"{overlay['x']}"
+                oy = f"{overlay['y']}"
+            # eof_action=pass + repeatlast=0: a shorter overlay stops
+            # compositing and leaves the rest of the background untouched,
+            # instead of freezing its last frame over it or truncating the
+            # render. shortest is left at its default (0) for the same reason.
+            chains.append(
+                f"{v_src}[ovin{i}]overlay=x={ox}:y={oy}:eof_action=pass:repeatlast=0[vov{i}]"
+            )
+            v_src = f"[vov{i}]"
+
         if crop:
             keyframes = spec.get("crop_keyframes") or []
             if len(keyframes) >= 1:
@@ -663,46 +767,16 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
                 # trim/setpts, so t == source seconds here, and the
                 # frontend already emits keyframes indexed by source
                 # seconds relative to inSec via clip main-body time).
-                # Endpoints hold: before the first keyframe → first x/y,
-                # after the last → last x/y, matching sampleCropOrigin's
-                # own extrapolation model.
-                kfs = sorted(keyframes, key=lambda k: k["t"])
-                # Keyframes are indexed relative to the clip's main body
-                # (which starts at inSec on the source). Add in_sec so the
-                # `t` variable (source seconds) lines up with the intended
-                # moments even when the clip is trimmed.
-                def piecewise(coord):
-                    # Build an if/if/... ladder mapping t → coord.
-                    # Fallback (past the last keyframe) is the last value.
-                    expr = f"{kfs[-1][coord]:.4f}"
-                    for j in range(len(kfs) - 1, 0, -1):
-                        a = kfs[j - 1]
-                        b = kfs[j]
-                        ta = a["t"] + in_sec
-                        tb = b["t"] + in_sec
-                        va = a[coord]
-                        vb = b[coord]
-                        if tb - ta < 1e-9:
-                            branch = f"{vb:.4f}"
-                        else:
-                            slope = (vb - va) / (tb - ta)
-                            branch = f"({va:.4f}+({slope:.6f})*(t-{ta:.4f}))"
-                        expr = f"if(lt(t,{tb:.4f}),{branch},{expr})"
-                    # Before the very first keyframe → hold at kfs[0].
-                    first_t = kfs[0]["t"] + in_sec
-                    expr = f"if(lt(t,{first_t:.4f}),{kfs[0][coord]:.4f},{expr})"
-                    return expr
-
-                x_expr = piecewise("x")
-                y_expr = piecewise("y")
+                # keyframe_ladder adds in_sec itself and holds at both
+                # endpoints, matching sampleCropOrigin's extrapolation.
+                x_expr = keyframe_ladder(keyframes, "x", in_sec)
+                y_expr = keyframe_ladder(keyframes, "y", in_sec)
                 chains.append(
-                    f"[{i}:v]crop={crop['w']}:{crop['h']}:x='{x_expr}':y='{y_expr}'[vsrc{i}]"
+                    f"{v_src}crop={crop['w']}:{crop['h']}:x='{x_expr}':y='{y_expr}'[vsrc{i}]"
                 )
             else:
-                chains.append(f"[{i}:v]crop={crop['w']}:{crop['h']}:{crop['x']}:{crop['y']}[vsrc{i}]")
+                chains.append(f"{v_src}crop={crop['w']}:{crop['h']}:{crop['x']}:{crop['y']}[vsrc{i}]")
             v_src = f"[vsrc{i}]"
-        else:
-            v_src = f"[{i}:v]"
 
         # Snap hold sampling to the frame grid, clamped to the last frame
         # that actually exists in the video stream. out_sec routinely lands
@@ -745,10 +819,31 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
         expected_sec = (lead_frames + trail_frames) / fps + (n_main / fps) / speed
         n_norm_frames = max(int(round(expected_sec * target_fps)), 1)
 
+        # v_src feeds up to three consumers (lead hold, main body, trail
+        # hold). ffmpeg auto-splits a raw INPUT pad like [0:v] across multiple
+        # consumers, but a FILTER-PRODUCED label (crop's [vsrcN], overlay's
+        # [vovN]) must be split explicitly — consuming one twice is an error.
+        # Without this, crop-or-overlay + any hold fails to render at all:
+        # only the first consumer gets the filtered picture and the rest bind
+        # to the unfiltered source, so concat then rejects the mismatched
+        # sizes ("Input link parameters (1920x1080) do not match ... (512x512)",
+        # exit 234) — or, when the sizes happen to agree (an overlay doesn't
+        # change frame size), it silently renders the body WITHOUT the
+        # composite instead of failing. Verified by hand both ways.
+        n_consumers = 1 + (1 if lead_hold > 0 else 0) + (1 if trail_hold > 0 else 0)
+        if n_consumers > 1 and not v_src.startswith(f"[{i}:v"):
+            split_labels = [f"[vsp{i}_{k}]" for k in range(n_consumers)]
+            chains.append(f"{v_src}split={n_consumers}{''.join(split_labels)}")
+            lead_src = split_labels[0] if lead_hold > 0 else None
+            main_src = split_labels[1 if lead_hold > 0 else 0]
+            trail_src = split_labels[-1] if trail_hold > 0 else None
+        else:
+            lead_src = main_src = trail_src = v_src
+
         if lead_hold > 0:
             n_loops = max(round(lead_hold * fps) - 1, 0)
             chains.append(
-                f"{v_src}trim=start={lead_sample_start}:end={lead_sample_end},setpts=PTS-STARTPTS,"
+                f"{lead_src}trim=start={lead_sample_start}:end={lead_sample_end},setpts=PTS-STARTPTS,"
                 f"loop=loop={n_loops}:size=1:start=0,setpts=PTS-STARTPTS[vlead{i}]"
             )
             v_pieces.append(f"[vlead{i}]")
@@ -765,7 +860,7 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
         # longer, and the fps normalization below repeats them to fill the
         # constant output rate.
         v_speed_step = f",setpts={1.0 / speed}*PTS" if speed != 1.0 else ""
-        chains.append(f"{v_src}trim=start={in_sec}:end={out_sec},setpts=PTS-STARTPTS{v_reverse_step}{v_speed_step}[vmain{i}]")
+        chains.append(f"{main_src}trim=start={in_sec}:end={out_sec},setpts=PTS-STARTPTS{v_reverse_step}{v_speed_step}[vmain{i}]")
         v_pieces.append(f"[vmain{i}]")
         if not no_audio:
             if speed != 1.0:
@@ -789,7 +884,7 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
         if trail_hold > 0:
             n_loops = max(round(trail_hold * fps) - 1, 0)
             chains.append(
-                f"{v_src}trim=start={trail_sample_start}:end={trail_sample_end},setpts=PTS-STARTPTS,"
+                f"{trail_src}trim=start={trail_sample_start}:end={trail_sample_end},setpts=PTS-STARTPTS,"
                 f"loop=loop={n_loops}:size=1:start=0,setpts=PTS-STARTPTS[vtrail{i}]"
             )
             v_pieces.append(f"[vtrail{i}]")

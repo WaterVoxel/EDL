@@ -46,6 +46,53 @@ export function sortKeyframes(kfs) {
   return [...kfs].sort((a, b) => a.t - b.t)
 }
 
+// Rebase keyframes when a clip's trim changes. Two things would otherwise
+// break, because `t` is measured FROM inSec rather than from the source's
+// own zero:
+//   • moving inSec slides every keyframe onto different source frames, so
+//     a pan the user placed against specific content drifts off it;
+//   • shortening the body leaves keyframes past its end, and render
+//     validation REJECTS the whole job (app.py bounds-checks every t
+//     against outSec-inSec) — the edit appears to work, then Render fails.
+// Fix: shift t by the inSec delta so each keyframe keeps its absolute
+// source position, then replace anything now outside [0, dur] with a single
+// keyframe at that edge carrying the curve's own interpolated value there.
+// The retained span of the pan is preserved exactly, and the result is
+// always in range. Returns the same array identity when nothing moves, so
+// callers can skip a needless dirty flag.
+export function retimeKeyframesForTrim(kfs, oldInSec, newInSec, newOutSec) {
+  if (!kfs || kfs.length === 0) return kfs
+  const dur = Math.max(0, newOutSec - newInSec)
+  const delta = (oldInSec || 0) - (newInSec || 0)
+  const shifted = sortKeyframes(kfs.map(k => ({ t: k.t + delta, x: k.x, y: k.y })))
+  const inside = shifted.filter(k => k.t >= -EPS && k.t <= dur + EPS)
+  const next = []
+  // Sampling the shifted curve at the boundary is exact: sampleCropOrigin
+  // holds endpoints, so this works even when every keyframe fell outside.
+  if (inside.length !== shifted.length || shifted[0].t < -EPS) {
+    if (shifted[0].t < -EPS) {
+      const at0 = sampleCropOrigin(shifted, 0)
+      next.push({ t: 0, x: at0.x, y: at0.y })
+    }
+  }
+  for (const k of inside) {
+    if (next.length > 0 && Math.abs(k.t - next[next.length - 1].t) < EPS) continue
+    next.push({ t: Math.max(0, Math.min(dur, k.t)), x: k.x, y: k.y })
+  }
+  if (shifted[shifted.length - 1].t > dur + EPS) {
+    const atEnd = sampleCropOrigin(shifted, dur)
+    if (next.length > 0 && Math.abs(dur - next[next.length - 1].t) < EPS) next.pop()
+    next.push({ t: dur, x: atEnd.x, y: atEnd.y })
+  }
+  if (next.length === 0) {
+    const at0 = sampleCropOrigin(shifted, 0)
+    next.push({ t: 0, x: at0.x, y: at0.y })
+  }
+  const unchanged = next.length === kfs.length
+    && next.every((k, i) => Math.abs(k.t - kfs[i].t) < EPS && k.x === kfs[i].x && k.y === kfs[i].y)
+  return unchanged ? kfs : next
+}
+
 // Add a keyframe at `t`. If one already exists at (nearly) the same t,
 // overwrite its x/y instead of introducing a duplicate — a duplicate would
 // make the render expression ambiguous (two branches with the same
@@ -72,6 +119,23 @@ export function removeNearestKeyframe(kfs, t) {
     if (d < bestDist) { bestIdx = i; bestDist = d }
   }
   return kfs.filter((_, i) => i !== bestIdx)
+}
+
+// The furthest origin a keyframed pan ever reaches (`fallback` — normally
+// the static crop origin — acts as the floor). The crop box has to fit
+// inside the source frame at EVERY keyframe, not just the one under the
+// playhead, so this is what a resize must clamp against: growing the box
+// while parked on a keyframe near x=0 would otherwise push a later
+// keyframe past the frame edge, and render_timeline rejects the whole job
+// (app.py validates every keyframe's x+w / y+h against the source).
+export function maxKeyframeOrigin(kfs, fallback) {
+  let x = fallback?.x || 0
+  let y = fallback?.y || 0
+  for (const k of kfs) {
+    if (k.x > x) x = k.x
+    if (k.y > y) y = k.y
+  }
+  return { x, y }
 }
 
 // Linearly interpolate crop origin at time `t`. Extrapolation: hold the

@@ -48,10 +48,21 @@ This project's correctness bar for anything touching the render pipeline (holds,
 
    Assert exact hash equality for every frame — write a small python loop over both hash lists rather than spot-checking.
 
-5. Also check A/V sync: video and audio stream durations within 0.1s:
+5. **If you generate synthetic test media, tag its colorspace.** A `lavfi` source (`testsrc`, `color`) is written with `color_space=unknown`/`color_range=unknown`, so putting it next to a real bt709 file makes ffmpeg perform an actual color conversion — the diff then shows a genuine per-pixel difference that looks exactly like "the render isn't lossless" but is only the untagged input. This cost a false negative on the overlay work. Generate test files with the tags spelled out:
+
+   ```bash
+   ffmpeg -f lavfi -i "testsrc=size=960x960:rate=30" -t 3 \
+     -c:v libx264 -qp 0 -pix_fmt yuv420p \
+     -color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv \
+     /tmp/overlay_test.mp4
+   ```
+
+   Confirm with `ffprobe -show_entries stream=color_space,color_range` on both files before trusting any hash comparison between them.
+
+6. Also check A/V sync: video and audio stream durations within 0.1s:
 
    ```bash
    ffprobe -v error -show_entries stream=codec_type,duration -of csv output/verify_test.mp4
    ```
 
-6. **Clean up**: delete every test render from `output/` (and any custom export dir), remove /tmp hash dumps, restore any settings you changed, kill the Flask instance if you started it. Never touch files in `input/`.
+7. **Clean up**: delete every test render from `output/` (and any custom export dir), remove /tmp hash dumps, restore any settings you changed, kill the Flask instance if you started it. Never touch files in `input/`.

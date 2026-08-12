@@ -21,6 +21,27 @@
       "dirty": true
     }
   ],
-  "track2Clips": [],
+  "track2Clips": [
+    {
+      "id": "88b07011-2e9f-49df-ab52-509aaf369f54",
+      "sourceName": "008_1320_nara.mp4",
+      "sourceDir": "input",
+      "sourceDurationSec": 6.041667,
+      "sourceWidth": 2206,
+      "sourceHeight": 946,
+      "fps": 24,
+      "inSec": 0.5,
+      "outSec": 5.75,
+      "headHoldSec": 0,
+      "tailHoldSec": 0,
+      "roundHoldSec": 0,
+      "reversed": false,
+      "speed": 1,
+      "crop": null,
+      "cropKeyframes": [],
+      "dirty": false,
+      "displayName": "Reconstructed01"
+    }
+  ],
   "selectedId": "90f3ac15-4ba6-4dd8-a21d-c2a16d038bfa"
 }

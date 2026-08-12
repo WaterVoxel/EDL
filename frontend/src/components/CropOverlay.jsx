@@ -1,7 +1,7 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback } from 'react'
 import { useMedia } from '../context/MediaContext'
 import { clampCropOrigin, resizeCropBox } from '../cropMath'
-import { sampleCropOrigin, addKeyframe } from '../cropAnimation'
+import { sampleCropOrigin, addKeyframe, maxKeyframeOrigin } from '../cropAnimation'
 
 const STAGE_PADDING_PX = 12 // matches the stage's p-3
 
@@ -21,6 +21,12 @@ const STAGE_PADDING_PX = 12 // matches the stage's p-3
 export default function CropOverlay({ selectedClip, setClips, stageRef, animateEnabled = false, freeEnabled = false }) {
   const { activePreview, videoRef, currentTime } = useMedia()
   const [box, setBox] = useState(null) // {left, top, width, height}, relative to the stage
+  // The keyframed box is positioned imperatively from a rAF loop reading
+  // video.currentTime — see the animation effect below.
+  const boxElRef = useRef(null)
+  // True while a pointer drag owns the box's position, so the rAF loop
+  // doesn't fight the cursor for it.
+  const draggingRef = useRef(false)
 
   const isActiveClip = !!selectedClip && activePreview?.name === selectedClip.sourceName
 
@@ -77,14 +83,6 @@ export default function CropOverlay({ selectedClip, setClips, stageRef, animateE
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recompute, selectedClip?.id, activePreview?.name])
 
-  if (!selectedClip?.crop || !isActiveClip || !box) return null
-
-  const { crop, sourceWidth, sourceHeight } = selectedClip
-  if (!sourceWidth || !sourceHeight) return null
-
-  const { left: videoLeft, top: videoTop, width: videoW, height: videoH } = box
-  const scale = videoW / sourceWidth
-
   // Single source of truth for the on-preview position:
   //  • Animate ON and this clip has ≥1 keyframe → the box follows the
   //    interpolated keyframe curve at the current playhead (t = source
@@ -94,31 +92,110 @@ export default function CropOverlay({ selectedClip, setClips, stageRef, animateE
   //    exactly (it never snaps to a distant keyframe) and the position is
   //    remembered precisely where you set it.
   //  • otherwise → the static crop.x/y, dragging moves that.
-  const kfs = selectedClip.cropKeyframes || []
-  const localT = Math.max(0, currentTime - selectedClip.inSec)
-  const animating = animateEnabled && kfs.length >= 1
-  const sampled = animating ? sampleCropOrigin(kfs, localT) : null
-  const displayX = sampled ? sampled.x : crop.x
-  const displayY = sampled ? sampled.y : crop.y
+  //
+  // `currentTime` (MediaContext) comes from the <video>'s `timeupdate`
+  // event, which browsers fire only ~4x/second — far too coarse to animate
+  // from, and the reason a keyframed pan used to visibly judder while the
+  // playhead itself glided (the playhead is driven imperatively at frame
+  // rate; see Timeline.positionPlayhead). It's kept ONLY as the paused /
+  // first-paint value; during playback the effect below takes over and
+  // repositions the box every animation frame off video.currentTime
+  // directly. Hooks must run before the early returns below.
+  const crop = selectedClip?.crop
+  const kfs = selectedClip?.cropKeyframes || []
+  const animating = animateEnabled && kfs.length >= 1 && !!crop
+  const stateT = Math.max(0, currentTime - (selectedClip?.inSec || 0))
+  const stateSampled = animating ? sampleCropOrigin(kfs, stateT) : null
+  const displayX = stateSampled ? stateSampled.x : (crop?.x || 0)
+  const displayY = stateSampled ? stateSampled.y : (crop?.y || 0)
+
+  // Per-frame imperative repositioning of the keyframed box. Mirrors the
+  // playback engine's own approach (compositor-only style writes, no React
+  // re-render per frame), so the box moves in lockstep with the frames the
+  // <video> is actually presenting. Only mounts while animating; the static
+  // path stays purely declarative. Reading video.currentTime is what keeps
+  // this frame-locked to the decoder rather than to wall-clock time.
+  const animDeps = animating ? JSON.stringify(kfs) : null
+  useEffect(() => {
+    if (!animating || !box) return
+    const video = videoRef?.current
+    if (!video) return
+    const kfList = kfs
+    const inSec = selectedClip.inSec || 0
+    const sx = box.width / (selectedClip.sourceWidth || 1)
+    let raf = null
+    const tick = () => {
+      const el = boxElRef.current
+      if (el && !draggingRef.current) {
+        const s = sampleCropOrigin(kfList, Math.max(0, video.currentTime - inSec))
+        if (s) {
+          // Written unconditionally, never memoized against the last
+          // sample: React re-renders at timeupdate's ~4Hz and will put the
+          // stale `displayX` back into style.left, so the loop has to
+          // reassert every frame to stay authoritative — skipping
+          // "unchanged" samples would let that stale value sit visible and
+          // bring the judder straight back. Assigning an identical string
+          // doesn't invalidate layout, so this is cheap.
+          el.style.left = `${box.left + s.x * sx}px`
+          el.style.top = `${box.top + s.y * sx}px`
+        }
+      }
+      raf = requestAnimationFrame(tick)
+    }
+    tick() // position before the first paint after mount, don't wait a frame
+    return () => { if (raf) cancelAnimationFrame(raf) }
+    // animDeps (a value-snapshot of the keyframes) re-syncs the loop when
+    // keyframes are added/removed/dragged; kfs itself is a fresh array
+    // identity on every render and would thrash the effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [animating, box, videoRef, selectedClip?.id, selectedClip?.inSec, selectedClip?.sourceWidth, animDeps])
+
+  if (!crop || !isActiveClip || !box) return null
+
+  const { sourceWidth, sourceHeight } = selectedClip
+  if (!sourceWidth || !sourceHeight) return null
+
+  const { left: videoLeft, top: videoTop, width: videoW, height: videoH } = box
+  const scale = videoW / sourceWidth
 
   function handlePointerDown(e) {
     e.stopPropagation()
     e.preventDefault()
     const startX = e.clientX
     const startY = e.clientY
-    const startCropX = displayX
-    const startCropY = displayY
+    // Freeze the keyframe time for the WHOLE drag, read from the live
+    // video clock (not the ~4Hz `currentTime` state, which can be a
+    // quarter-second stale — that offset used to land the keyframe at a
+    // different moment than the frame on screen). Frozen so every move
+    // event overwrites ONE keyframe: sampling per-move while the clock
+    // advances would smear a trail of keyframes across the timeline.
+    const dragT = animating
+      ? Math.max(0, (videoRef?.current?.currentTime ?? currentTime) - (selectedClip.inSec || 0))
+      : 0
+    const base = animating ? sampleCropOrigin(kfs, dragT) : { x: crop.x, y: crop.y }
+    const startCropX = base ? base.x : crop.x
+    const startCropY = base ? base.y : crop.y
+    draggingRef.current = true
 
     function onMove(ev) {
       const dx = (ev.clientX - startX) / scale
       const dy = (ev.clientY - startY) / scale
       const next = clampCropOrigin(startCropX + dx, startCropY + dy, { w: crop.w, h: crop.h }, sourceWidth, sourceHeight)
       if (animating) {
-        // Write a keyframe at the current playhead (addKeyframe overwrites
+        // Position the box straight from the pointer rather than waiting to
+        // read it back through the keyframe curve — exact cursor tracking
+        // even if the clock moves mid-drag (the rAF loop is suspended via
+        // draggingRef for the duration).
+        const el = boxElRef.current
+        if (el) {
+          el.style.left = `${videoLeft + next.x * scale}px`
+          el.style.top = `${videoTop + next.y * scale}px`
+        }
+        // Write a keyframe at the frozen drag time (addKeyframe overwrites
         // an existing one within epsilon), so dragging edits exactly the
-        // moment shown — and the box below reads back this same value.
+        // moment that was on screen when the drag began.
         setClips(prev => prev.map(c => c.id === selectedClip.id
-          ? { ...c, cropKeyframes: addKeyframe(c.cropKeyframes || [], localT, next.x, next.y), dirty: true }
+          ? { ...c, cropKeyframes: addKeyframe(c.cropKeyframes || [], dragT, next.x, next.y), dirty: true }
           : c
         ))
         return
@@ -128,6 +205,7 @@ export default function CropOverlay({ selectedClip, setClips, stageRef, animateE
       ))
     }
     function onUp() {
+      draggingRef.current = false
       document.removeEventListener('pointermove', onMove)
       document.removeEventListener('pointerup', onUp)
     }
@@ -146,6 +224,16 @@ export default function CropOverlay({ selectedClip, setClips, stageRef, animateE
     e.preventDefault()
     const anchorX = displayX
     const anchorY = displayY
+    // One box size is shared by every keyframe, so the size the user drags
+    // here has to remain legal at the FURTHEST keyframe too, not just at
+    // the one under the playhead. Clamping against the max origin is what
+    // keeps a resize from silently invalidating a pan that render_timeline
+    // then rejects outright (app.py checks every keyframe's x+w / y+h).
+    const limit = animating
+      ? maxKeyframeOrigin(kfs, { x: crop.x, y: crop.y })
+      : { x: anchorX, y: anchorY }
+    const clampAnchorX = Math.max(anchorX, limit.x)
+    const clampAnchorY = Math.max(anchorY, limit.y)
 
     function onMove(ev) {
       // Pointer position in source pixels, relative to the video's top-left.
@@ -153,7 +241,16 @@ export default function CropOverlay({ selectedClip, setClips, stageRef, animateE
       // so the difference divided by scale is the source-pixel coordinate.
       const px = (ev.clientX - videoRectLeft()) / scale
       const py = (ev.clientY - videoRectTop()) / scale
-      const next = resizeCropBox(crop.w, crop.h, anchorX, anchorY, px, py, sourceWidth, sourceHeight)
+      // Grow toward the pointer measured from the visible anchor, but cap
+      // the result against the furthest keyframe's anchor.
+      const grown = resizeCropBox(crop.w, crop.h, anchorX, anchorY, px, py, sourceWidth, sourceHeight)
+      const capped = resizeCropBox(
+        crop.w, crop.h,
+        clampAnchorX, clampAnchorY,
+        clampAnchorX + grown.w, clampAnchorY + grown.h,
+        sourceWidth, sourceHeight,
+      )
+      const next = { w: Math.min(grown.w, capped.w), h: Math.min(grown.h, capped.h) }
       setClips(prev => prev.map(c =>
         c.id === selectedClip.id ? { ...c, crop: { ...c.crop, w: next.w, h: next.h }, dirty: true } : c
       ))
@@ -186,6 +283,7 @@ export default function CropOverlay({ selectedClip, setClips, stageRef, animateE
         style={{ left: videoLeft, top: videoTop, width: videoW, height: videoH }}
       />
       <div
+        ref={boxElRef}
         className={`absolute border-2 bg-emerald-400/10 cursor-move touch-none ${animating ? 'border-amber-400' : 'border-emerald-400'}`}
         style={{
           left: videoLeft + displayX * scale,

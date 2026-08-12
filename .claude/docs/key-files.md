@@ -20,6 +20,8 @@ Where to look for what. Paths relative to the repo root.
 | `frontend/src/clipMath.js` | `clipSpeed`/`clipMainSec`/`clipTotalSec`/pixel math, `roundUpAmount` (+`ROUND_EPSILON`), `sanitizeHoldPlacement` (hold placement invariant), `nextSplitName`, `clipColor`/`CLIP_PALETTE` (literal Tailwind classes). |
 | `frontend/src/cropMath.js` | `CROP_PRESETS` (480p/720p × 6 aspect ratios), `findPreset`/`presetKey`, `cropBoxSize` (fit preset AR into source without upscaling, even-pixel snap), `centeredCropOrigin`, `clampCropOrigin`. Pure functions, used by `CropForm` and `CropOverlay`. |
 | `frontend/src/analyzeMath.js` | `analyzeAgainstV1` (clone V1 cuts onto V2 file), `reconstructFromV1` (strip V1's edit artifacts back out of V2's own round-tripped clip(s), in place). Pure functions. |
+| `frontend/src/overlayMatch.js` | `matchOverlays(v1, v2, opts)` (pair V2 clips onto V1 clips by order; classify each as a composite or a warned/silent skip; `opts.fullFrameSameSize` is what the A/B render toggle opts into), `overlayForV1Clip`, `hasOverlays`, the `SKIP_*` reason constants. Decides the whole V2-as-overlay feature; import-clean, so node-testable. |
+| `frontend/src/cropAnimation.js` | Crop keyframe math: `sampleCropOrigin` (piecewise-linear interpolation at a source-relative `t` — used by both `CropOverlay` and `OverlayPreview`), `addKeyframe`, `maxKeyframeOrigin`, `retimeKeyframesForTrim`. |
 | `frontend/src/timecode.js` | `formatTimecode` (HH:MM:SS:FF), `parseTimecode` (seconds or colon forms). |
 | `frontend/src/fileList.js` | localStorage favorites (`nara-favorites-<dir>`), `sortFiles`, `filterFiles`. |
 | `frontend/src/hooks/useTimelinePlayback.js` | rAF playback engine: `resolveTimelinePos` (timeline pos → clip + source time, handling holds/reverse/speed), transport API, `displayClips` override for V2-on-top preview. |
@@ -30,7 +32,7 @@ Where to look for what. Paths relative to the repo root.
 
 | File | What lives there |
 |---|---|
-| `components/Timeline/Timeline.jsx` | Both lanes, gutter buttons + per-track eye toggles, keyboard shortcuts, drag-reorder for BOTH tracks (`handleDrop`/`handleDrop2`), hold-segment delete for BOTH tracks (`onDeletePart` wired to real handlers on both the V1 and V2 `TimelineClip` maps), playhead math (`GUTTER_PX`, `GAP`, `PPS`), Analize/Reconstruct/Render V2 buttons, V2 drop zone. `focusedTrack`/`selectedId2`/`selectedPart2` are props from App.jsx (not local state) so the shared toolbar there can read them. |
+| `components/Timeline/Timeline.jsx` | Both lanes, gutter buttons + per-track eye toggles, keyboard shortcuts, drag-reorder for BOTH tracks (`handleDrop`/`handleDrop2`), hold-segment delete for BOTH tracks (`onDeletePart` wired to real handlers on both the V1 and V2 `TimelineClip` maps), playhead math (`GUTTER_PX`, `GAP`, `PPS`), Analize/Reconstruct/Render V2 buttons + the A / A/B render-mode switch beside Render V2, V2 drop zone. `focusedTrack`/`selectedId2`/`selectedPart2`/`v1Visible`/`v2Visible`/`v2RenderMode` are props from App.jsx (not local state) so the shared toolbar and preview stage there can read them. |
 | `components/Timeline/TimelineClip.jsx` | Clip rendering (head/main/tail/round segments), edge-drag trim (speed-aware), per-part selection, hover × deletes. |
 | `components/Timeline/TransportBar.jsx` | Play/stop, frame stepping, first/last, loop, editable timecode with TC/frames toggle. |
 | `components/Timeline/EdlTable.jsx` | SMPTE-style EDL table (EVT/REEL/SRC/REC/HOLD/STATUS). |
@@ -42,6 +44,7 @@ Where to look for what. Paths relative to the repo root.
 | `components/AboutDialog.jsx` | The in-app product manual (opens from the NARA title). |
 | Toolbar forms | `HoldFrameForm` (Head/Tail), `TrimForm`, `CropForm` (preset dropdown), `DuplicateButton`, `ReverseForm`, `SpeedForm` (`allowedSpeeds`, `MIN_EFFECTIVE_FPS=12`), `RaiseButton`, `SpliceButton`. |
 | `components/CropOverlay.jsx` | Draggable crop-box overlay on the preview `<video>` — positions itself against the video element's own rendered rect (`getBoundingClientRect`), scaled from native to on-screen pixels. |
+| `components/OverlayPreview.jsx` | Live composite of a V2 overlay clip: a SECOND `<video>` layered over the preview, sized to the crop box and moved along its keyframe curve from a rAF loop, following the main video's clock. One instance per resolved overlay, mounted under `CropOverlay` in App.jsx's preview stage. |
 
 ## Config / other
 

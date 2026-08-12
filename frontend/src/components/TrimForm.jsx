@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import NumericStepper from './NumericStepper'
+import { retimeKeyframesForTrim } from '../cropAnimation'
 
 // Formats/parses a source-time value in whichever unit the shared
 // timecode/frames toggle (TransportBar) is currently set to, so Trim's
@@ -35,15 +36,34 @@ export default function TrimForm({ selectedClip, setClips, displayMode = 'timeco
     if (Number.isNaN(newIn) || Number.isNaN(newOut)) return
     const clampedIn = Math.max(0, Math.min(newIn, selectedClip.sourceDurationSec - 0.1))
     const clampedOut = Math.min(selectedClip.sourceDurationSec, Math.max(newOut, clampedIn + 0.1))
+    // Crop keyframes are indexed from inSec, so a trim has to rebase them —
+    // see cropAnimation.retimeKeyframesForTrim (an out-of-range keyframe
+    // makes Render fail validation outright).
     setClips(prev => prev.map(c =>
-      c.id === selectedClip.id ? { ...c, inSec: clampedIn, outSec: clampedOut, dirty: true } : c
+      c.id === selectedClip.id
+        ? {
+            ...c,
+            inSec: clampedIn,
+            outSec: clampedOut,
+            cropKeyframes: retimeKeyframesForTrim(c.cropKeyframes, c.inSec, clampedIn, clampedOut),
+            dirty: true,
+          }
+        : c
     ))
   }
 
   function reset() {
     if (!selectedClip) return
     setClips(prev => prev.map(c =>
-      c.id === selectedClip.id ? { ...c, inSec: 0, outSec: c.sourceDurationSec, dirty: true } : c
+      c.id === selectedClip.id
+        ? {
+            ...c,
+            inSec: 0,
+            outSec: c.sourceDurationSec,
+            cropKeyframes: retimeKeyframesForTrim(c.cropKeyframes, c.inSec, 0, c.sourceDurationSec),
+            dirty: true,
+          }
+        : c
     ))
   }
 

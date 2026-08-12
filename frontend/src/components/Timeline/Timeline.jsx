@@ -8,7 +8,7 @@ import { useMedia } from '../../context/MediaContext'
 import { probe } from '../../api'
 import { useTimelinePlayback } from '../../hooks/useTimelinePlayback'
 import { clipTotalSec, clipTotalPx, clipHeadPx, clipMainPx, sanitizeHoldPlacement, timelinePosToPx } from '../../clipMath'
-import { addKeyframe, removeNearestKeyframe, sampleCropOrigin, clipTFromTimelinePos } from '../../cropAnimation'
+import { addKeyframe, removeNearestKeyframe, sampleCropOrigin, clipTFromTimelinePos, retimeKeyframesForTrim } from '../../cropAnimation'
 
 const PPS = 60
 const TRACK_PAD = 8
@@ -35,15 +35,19 @@ export default function Timeline({
   track2Clips = [], setTrack2Clips, selectedId2 = null, selectedPart2 = 'main', onSelectItem2,
   focusedTrack = 1, onFocusTrack, onAddToV2, onAnalyze, onReconstruct, onRenderV2,
   timeDisplayMode, onToggleTimeDisplayMode, animateEnabled = false,
+  v1Visible = true, onToggleV1, v2Visible = true, onToggleV2, hasOverlay = false,
+  v2RenderMode = 'A', onSetV2RenderMode,
 }) {
   const selectItem = onSelectItem || ((id) => onSelectId(id))
   const selectItem2 = onSelectItem2 || (() => {})
   const [v2DragOver, setV2DragOver] = useState(false)
   // Per-track visibility — independent of each other. Muting a track only
   // greys out its content (it stays on the timeline and stays editable);
-  // it also determines what the shared video preview decodes below.
-  const [v1Visible, setV1Visible] = useState(true)
-  const [v2Visible, setV2Visible] = useState(true)
+  // it also determines what the shared video preview decodes below. Lifted
+  // to App.jsx, like focusedTrack, because the preview stage lives there and
+  // the composited overlay layer has to honor the same eye toggles.
+  const toggleV1 = onToggleV1 || (() => {})
+  const toggleV2 = onToggleV2 || (() => {})
   // focusedTrack/selectedId2/selectedPart2 are lifted to App.jsx (not local
   // state here) so the shared toolbar row, which lives in App.jsx, can
   // redirect to whichever track is focused.
@@ -72,7 +76,12 @@ export default function Timeline({
   // decodes and shows at that position is separate: V2 sits "on top" of
   // V1, so whichever of the two is visible and topmost wins, exactly like
   // video track compositing in an NLE.
-  const displayClips = (v2Visible && track2Clips.length > 0)
+  //
+  // The exception is an OVERLAY (a V2 clip smaller than V1 — see
+  // overlayMatch.js). There V2 doesn't replace the frame, it's a region
+  // composited onto it, so the shared <video> must keep decoding V1 and the
+  // V2 picture is drawn over it by OverlayPreview in App.jsx.
+  const displayClips = (v2Visible && track2Clips.length > 0 && !hasOverlay)
     ? track2Clips
     : (v1Visible ? clips : [])
 
@@ -175,13 +184,27 @@ export default function Timeline({
     }
   }
 
+  // Trimming rebases any crop keyframes — their `t` is relative to inSec,
+  // so without this a trim slides the pan onto different frames and can
+  // leave keyframes past the body's end, which fails render validation.
+  // See cropAnimation.retimeKeyframesForTrim.
+  function trimClip(c, inSec, outSec) {
+    return {
+      ...c,
+      inSec,
+      outSec,
+      cropKeyframes: retimeKeyframesForTrim(c.cropKeyframes, c.inSec, inSec, outSec),
+      dirty: true,
+    }
+  }
+
   function handleTrim(id, inSec, outSec) {
-    setClips(prev => prev.map(c => c.id === id ? { ...c, inSec, outSec, dirty: true } : c))
+    setClips(prev => prev.map(c => c.id === id ? trimClip(c, inSec, outSec) : c))
   }
 
   function handleTrim2(id, inSec, outSec) {
     if (!setTrack2Clips) return
-    setTrack2Clips(prev => prev.map(c => c.id === id ? { ...c, inSec, outSec, dirty: true } : c))
+    setTrack2Clips(prev => prev.map(c => c.id === id ? trimClip(c, inSec, outSec) : c))
   }
 
   function handleDelete(id) {
@@ -417,11 +440,41 @@ export default function Timeline({
           {track2Clips.length > 0 && (
             <button
               onClick={onRenderV2}
-              title="Render the V2 track to a file"
+              title={v2RenderMode === 'AB'
+                ? 'Render V2 composited over V1 as one clip'
+                : 'Render the V2 track to a file'}
               className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] rounded border border-teal-700 text-teal-400 hover:bg-teal-900/40"
             >
               Render V2
             </button>
+          )}
+          {/* What "Render V2" produces: A = the V2 track alone (default),
+              A/B = V2 composited on top of V1 as a single clip. A segmented
+              switch rather than a checkbox, since the two are alternatives
+              and the active one names the output. */}
+          {track2Clips.length > 0 && (
+            <div
+              className="flex items-stretch rounded overflow-hidden border border-teal-700 text-[9px] leading-none"
+              role="group"
+              aria-label="Render V2 output mode"
+            >
+              <button
+                onClick={() => onSetV2RenderMode?.('A')}
+                aria-pressed={v2RenderMode !== 'AB'}
+                title="A — render only the V2 track, as its own file"
+                className={`px-1.5 py-0.5 ${v2RenderMode !== 'AB' ? 'bg-teal-700 text-white' : 'text-teal-400 hover:bg-teal-900/40'}`}
+              >
+                A
+              </button>
+              <button
+                onClick={() => onSetV2RenderMode?.('AB')}
+                aria-pressed={v2RenderMode === 'AB'}
+                title="A/B — render V2 on top of V1, composited into one clip"
+                className={`px-1.5 py-0.5 border-l border-teal-700 ${v2RenderMode === 'AB' ? 'bg-teal-700 text-white' : 'text-teal-400 hover:bg-teal-900/40'}`}
+              >
+                A/B
+              </button>
+            </div>
           )}
         </div>
       </div>
@@ -455,7 +508,7 @@ export default function Timeline({
                     className="hover:text-neutral-200"
                   >V2</button>
                   <button
-                    onClick={() => setV2Visible(v => !v)}
+                    onClick={toggleV2}
                     title={v2Visible ? 'Hide V2 content' : 'Show V2 content'}
                     className={v2Visible ? 'text-current hover:text-white' : 'text-neutral-600 hover:text-neutral-400'}
                   ><EyeIcon off={!v2Visible} /></button>
@@ -518,7 +571,7 @@ export default function Timeline({
                   className="hover:text-neutral-200"
                 >V1</button>
                 <button
-                  onClick={() => setV1Visible(v => !v)}
+                  onClick={toggleV1}
                   title={v1Visible ? 'Hide V1 content' : 'Show V1 content'}
                   className={v1Visible ? 'text-current hover:text-white' : 'text-neutral-600 hover:text-neutral-400'}
                 ><EyeIcon off={!v1Visible} /></button>

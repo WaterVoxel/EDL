@@ -21,8 +21,8 @@ export default function MediaLibrary({ files, trackTags = {}, onAddToTimeline, o
   const listRef = useRef(null)
   const [favorites, setFavorites] = useState(() => loadFavorites('input'))
   const [query, setQuery] = useState('')
-  const [sortBy, setSortBy] = useState('name')
-  const [sortDir, setSortDir] = useState('asc')
+  const [sortBy, setSortBy] = useState('date')
+  const [sortDir, setSortDir] = useState('desc')
   // Which track view is active: 'all' (everything), 'v1', or 'v2' (only
   // files sticky-tagged for that track — see fileList.filterByTrack).
   const [trackFilter, setTrackFilter] = useState('all')

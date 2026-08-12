@@ -527,12 +527,58 @@ def render_timeline():
         if not os.path.exists(p):
             return jsonify({"error": f"input file not found: {p}"}), 404
 
+    # Per-clip overlay sources (the V2 animated-overlay feature) become
+    # ADDITIONAL ffmpeg inputs appended after every clip's own input, so a
+    # clip's index i still maps to its own "-i" — build_timeline_filter's
+    # existing [{i}:v] contract is untouched, and the overlay references its
+    # own separate index. Resolved/probed with the same rules as clip inputs.
+    overlay_paths = []
+    overlay_specs_raw = []
+    for i, c in enumerate(clips):
+        raw_ov = c.get("overlay")
+        if not raw_ov:
+            overlay_specs_raw.append(None)
+            continue
+        try:
+            ov_path = fu.safe_path(
+                raw_ov["input"],
+                get_output_dir() if raw_ov.get("dir") == "output" else fu.INPUT_DIR,
+            )
+        except (fu.PathError, KeyError) as e:
+            return jsonify({"error": f"clip {i} overlay: {e}"}), 400
+        if not os.path.exists(ov_path):
+            return jsonify({"error": f"clip {i} overlay: input file not found: {ov_path}"}), 404
+        # Each overlay gets its OWN "-i" even if two clips reference the same
+        # file: a filter graph cannot consume one input pad twice (it would
+        # need an explicit split), and the same file overlaid onto two clips
+        # needs two independently time-shifted chains. Clip inputs already
+        # work exactly this way — a duplicated clip appears twice in in_paths.
+        overlay_specs_raw.append({
+            "raw": raw_ov,
+            "path": ov_path,
+            "index": len(clips) + len(overlay_paths),
+        })
+        overlay_paths.append(ov_path)
+
     infos = []
     for p in in_paths:
         try:
             infos.append(fu.get_video_info(p))
         except RuntimeError as e:
             return jsonify({"error": f"probe failed for {p}", "detail": str(e)}), 500
+
+    # Probe every overlay source too — its real dimensions are what the
+    # exact-size-match check below is enforced against, never the client's
+    # claim (same "server never trusts client-supplied resolution" rule the
+    # clip inputs follow).
+    overlay_infos = {}
+    for entry in overlay_specs_raw:
+        if not entry or entry["path"] in overlay_infos:
+            continue
+        try:
+            overlay_infos[entry["path"]] = fu.get_video_info(entry["path"])
+        except RuntimeError as e:
+            return jsonify({"error": f"probe failed for overlay {entry['path']}", "detail": str(e)}), 500
 
     # Server always derives fps/has_audio/resolution itself — never trusts
     # client-supplied values — same principle /api/hold_frame already
@@ -630,6 +676,100 @@ def render_timeline():
                 parsed.append({"t": max(0.0, min(max_t, kt)), "x": kx, "y": ky})
             crop_keyframes = parsed
 
+        # V2 animated overlay: a region cropped out of THIS clip, processed
+        # externally, composited back at the same (optionally animated)
+        # position. Its placement rect and keyframes come from the V1 clip's
+        # own crop box, so the same bounds rules apply — but note this is the
+        # OPPOSITE geometry from a crop: the overlay is drawn ONTO the full
+        # frame, so the rect must fit inside the source, and the overlay
+        # file's own size must equal the rect exactly.
+        overlay = None
+        entry = overlay_specs_raw[i]
+        if entry:
+            raw_ov = entry["raw"]
+            ov_info = overlay_infos[entry["path"]]
+            try:
+                ov_x = int(raw_ov["x"])
+                ov_y = int(raw_ov["y"])
+            except (KeyError, ValueError, TypeError):
+                return jsonify({"error": f"clip {i} overlay: x/y must be integers"}), 400
+            ov_w = ov_info["width"]
+            ov_h = ov_info["height"]
+            if not ov_w or not ov_h:
+                return jsonify({"error": f"clip {i} overlay: could not determine overlay resolution"}), 400
+            # Exact-size match is required, never a resample: a mismatched
+            # overlay would have to be scaled to fit, baking a soft,
+            # misaligned region into an otherwise lossless render.
+            exp_w = raw_ov.get("w")
+            exp_h = raw_ov.get("h")
+            if exp_w is not None and exp_h is not None:
+                try:
+                    exp_w = int(exp_w)
+                    exp_h = int(exp_h)
+                except (ValueError, TypeError):
+                    return jsonify({"error": f"clip {i} overlay: w/h must be integers"}), 400
+                if exp_w != ov_w or exp_h != ov_h:
+                    return jsonify({
+                        "error": f"clip {i} overlay: file is {ov_w}x{ov_h} but the crop box it must fill "
+                                 f"is {exp_w}x{exp_h} — an overlay must match the box exactly"
+                    }), 400
+            # unlike `crop` (which silently clamps an out-of-range offset),
+            # `overlay` silently CLIPS the pasted picture — verified: x beyond
+            # the right edge loses the overflow with exit 0 and no warning at
+            # any loglevel. So the rect has to be bounds-checked here or part
+            # of the processed region just vanishes with no diagnostic.
+            if ov_x < 0 or ov_y < 0 or ov_x + ov_w > info["width"] or ov_y + ov_h > info["height"]:
+                return jsonify({
+                    "error": f"clip {i} overlay: placement {ov_w}x{ov_h}+{ov_x}+{ov_y} "
+                             f"lies outside source resolution {info['width']}x{info['height']}"
+                }), 400
+
+            ov_max_t = out_sec - in_sec
+            ov_kfs = None
+            raw_ov_kfs = raw_ov.get("keyframes")
+            if raw_ov_kfs:
+                if not isinstance(raw_ov_kfs, list):
+                    return jsonify({"error": f"clip {i} overlay: keyframes must be a list"}), 400
+                parsed_ov = []
+                for j, kf in enumerate(raw_ov_kfs):
+                    try:
+                        kt = float(kf["t"])
+                        kx = int(kf["x"])
+                        ky = int(kf["y"])
+                    except (KeyError, ValueError, TypeError):
+                        return jsonify({"error": f"clip {i} overlay keyframe {j}: t/x/y must be numeric (t float, x/y int)"}), 400
+                    if kt < -1e-6 or kt > ov_max_t + 1e-6:
+                        return jsonify({"error": f"clip {i} overlay keyframe {j}: t={kt} lies outside the clip's main body [0, {ov_max_t:.3f}]"}), 400
+                    if kx < 0 or ky < 0 or kx + ov_w > info["width"] or ky + ov_h > info["height"]:
+                        return jsonify({"error": f"clip {i} overlay keyframe {j}: placement ({kx},{ky}) with size {ov_w}x{ov_h} lies outside source {info['width']}x{info['height']}"}), 400
+                    parsed_ov.append({"t": max(0.0, min(ov_max_t, kt)), "x": kx, "y": ky})
+                ov_kfs = parsed_ov
+
+            # The overlay clip's own trim window, clamped to its video stream
+            # (same reason clip trims are: a container can outlast its video).
+            ov_video_dur = ov_info.get("video_duration") or ov_info["duration"]
+            try:
+                ov_in_sec = float(raw_ov.get("inSec") or 0)
+                ov_out_sec = float(raw_ov["outSec"]) if raw_ov.get("outSec") is not None else ov_video_dur
+            except (ValueError, TypeError):
+                return jsonify({"error": f"clip {i} overlay: inSec/outSec must be numeric"}), 400
+            ov_out_sec = min(ov_out_sec, ov_video_dur)
+            if ov_out_sec <= ov_in_sec:
+                return jsonify({"error": f"clip {i} overlay: invalid trim window for duration {ov_video_dur}s"}), 400
+
+            overlay = {
+                # Assigned when the input was collected above — appended after
+                # every clip input, one per overlay (never deduplicated).
+                "input_index": entry["index"],
+                "w": ov_w,
+                "h": ov_h,
+                "x": ov_x,
+                "y": ov_y,
+                "keyframes": ov_kfs,
+                "in_sec": ov_in_sec,
+                "out_sec": ov_out_sec,
+            }
+
         clip_specs.append({
             "inSec": in_sec,
             "outSec": out_sec,
@@ -642,11 +782,15 @@ def render_timeline():
             "video_duration": info.get("video_duration") or info["duration"],
             "crop": crop,
             "crop_keyframes": crop_keyframes,
+            "overlay": overlay,
         })
 
     # A cropped clip's own frame size is the crop box, not the source's —
     # the common target resolution (every clip gets scaled/padded to this)
-    # must be derived from post-crop dimensions.
+    # must be derived from post-crop dimensions. Overlay sources are
+    # deliberately NOT considered here: an overlay is composited INTO an
+    # existing frame, so it never changes that frame's size (and being
+    # smaller than V1 is the whole premise of the feature).
     def effective_wh(info, spec):
         if spec.get("crop"):
             return spec["crop"]["w"], spec["crop"]["h"]
@@ -692,8 +836,10 @@ def render_timeline():
 
     filt = fu.build_timeline_filter(clip_specs, target_w, target_h, target_fps, no_audio=no_audio)
 
+    # Overlay sources come after every clip input, matching the input_index
+    # each overlay spec was assigned above.
     input_args = []
-    for p in in_paths:
+    for p in in_paths + overlay_paths:
         input_args += ["-i", p]
     filter_args = ["-filter_complex", filt, "-map", "[outv]"]
     if not no_audio:

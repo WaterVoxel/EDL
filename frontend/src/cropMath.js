@@ -39,10 +39,16 @@ export function presetKey(preset) {
 // frame. Only scaled DOWN (preserving aspect ratio), and only when the
 // preset is larger than the source in some dimension, so cropping never
 // exceeds what the source actually has. Snapped to even dimensions
-// (libx264 yuv420p requires even width/height).
+// (libx264 yuv420p requires even width/height) — except square (1:1)
+// presets, which snap to a multiple of SQUARE_CROP_STEP so a downscaled
+// 1:1 box still lands on a valid free-scale resolution.
 export function cropBoxSize(preset, sourceW, sourceH) {
   if (!preset || !sourceW || !sourceH) return null
   const scale = Math.min(1, sourceW / preset.w, sourceH / preset.h)
+  if (preset.w === preset.h) {
+    const n = Math.max(SQUARE_CROP_STEP, Math.floor((preset.w * scale) / SQUARE_CROP_STEP) * SQUARE_CROP_STEP)
+    return { w: n, h: n }
+  }
   const w = Math.max(2, Math.floor((preset.w * scale) / 2) * 2)
   const h = Math.max(2, Math.floor((preset.h * scale) / 2) * 2)
   return { w, h }
@@ -60,15 +66,22 @@ export function centeredCropOrigin(box, sourceW, sourceH) {
 // Smallest crop box side, in source pixels (even, for libx264 yuv420p).
 export const MIN_CROP_SIZE = 16
 
+// Square (1:1) crops are constrained to resolutions divisible by 32 (a
+// common AI-model input grid — see AboutDialog) rather than the general
+// even-pixel snap, so a square free-scale drag always lands on a valid size.
+export const SQUARE_CROP_STEP = 32
+
 // Aspect-locked resize from the bottom-right corner. The top-left corner
 // (anchorX, anchorY) stays pinned; the box grows/shrinks toward the pointer
 // (pointerX/pointerY, in source pixels) while keeping its current w:h ratio,
 // so the preset's aspect is preserved. A single scale factor drives both
 // sides — the ratio can't drift — chosen from whichever axis the pointer
 // pushed further, then clamped: never below MIN_CROP_SIZE, never past the
-// source edge from the anchor. Result is even-snapped.
+// source edge from the anchor. Result is even-snapped — except for square
+// (1:1) boxes, which snap to the nearest multiple of SQUARE_CROP_STEP.
 export function resizeCropBox(w, h, anchorX, anchorY, pointerX, pointerY, sourceW, sourceH) {
   if (!w || !h) return { w, h }
+  const isSquare = w === h
   const sx = (pointerX - anchorX) / w
   const sy = (pointerY - anchorY) / h
   let scale = Math.max(sx, sy)
@@ -76,6 +89,12 @@ export function resizeCropBox(w, h, anchorX, anchorY, pointerX, pointerY, source
   scale = Math.max(scale, MIN_CROP_SIZE / w, MIN_CROP_SIZE / h)
   // Ceiling: the box must stay inside the frame measured from the anchor.
   scale = Math.min(scale, (sourceW - anchorX) / w, (sourceH - anchorY) / h)
+  if (isSquare) {
+    const maxSide = Math.min(sourceW - anchorX, sourceH - anchorY)
+    const maxStep = Math.max(SQUARE_CROP_STEP, Math.floor(maxSide / SQUARE_CROP_STEP) * SQUARE_CROP_STEP)
+    const n = Math.min(maxStep, Math.max(SQUARE_CROP_STEP, Math.round((w * scale) / SQUARE_CROP_STEP) * SQUARE_CROP_STEP))
+    return { w: n, h: n }
+  }
   const nw = Math.max(MIN_CROP_SIZE, Math.round((w * scale) / 2) * 2)
   const nh = Math.max(MIN_CROP_SIZE, Math.round((h * scale) / 2) * 2)
   return { w: nw, h: nh }

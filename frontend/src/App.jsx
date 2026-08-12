@@ -14,6 +14,7 @@ import ReverseForm from './components/ReverseForm'
 import SpeedForm from './components/SpeedForm'
 import CropForm from './components/CropForm'
 import CropOverlay from './components/CropOverlay'
+import OverlayPreview from './components/OverlayPreview'
 import RaiseButton from './components/RaiseButton'
 import SpliceButton from './components/SpliceButton'
 import DuplicateButton from './components/DuplicateButton'
@@ -27,6 +28,7 @@ import Timeline from './components/Timeline/Timeline'
 import { clipBaseSec, roundUpAmount } from './clipMath'
 import { loadTrackTags, tagTrack } from './fileList'
 import { analyzeAgainstV1, reconstructFromV1 } from './analyzeMath'
+import { matchOverlays } from './overlayMatch'
 
 const MIN_RIGHT_PANEL = 260
 const MAX_RIGHT_PANEL = 720
@@ -64,6 +66,13 @@ function AppInner() {
   // kept local there) specifically so this toolbar row, which lives here
   // in App.jsx, can redirect to whichever track is focused.
   const [focusedTrack, setFocusedTrack] = useState(1)
+  // Per-track eye toggles, also lifted from Timeline.jsx: they decide what
+  // the shared preview decodes, and with V2-as-overlay they additionally
+  // gate the composited PiP layer on the preview stage below.
+  const [v1Visible, setV1Visible] = useState(true)
+  const [v2Visible, setV2Visible] = useState(true)
+  const toggleV1Visible = useCallback(() => setV1Visible(v => !v), [])
+  const toggleV2Visible = useCallback(() => setV2Visible(v => !v), [])
 
   const selectItem = useCallback((id, part = 'main') => {
     setSelectedId(id)
@@ -79,7 +88,7 @@ function AppInner() {
   // TransportBar) so Trim and Splice, which live as separate sibling
   // components, can format/parse positions the same way the transport clock
   // does when the user toggles it.
-  const [timeDisplayMode, setTimeDisplayMode] = useState('frames')
+  const [timeDisplayMode, setTimeDisplayMode] = useState('timecode')
   const toggleTimeDisplayMode = useCallback(() => {
     setTimeDisplayMode(m => m === 'timecode' ? 'frames' : 'timecode')
   }, [])
@@ -169,6 +178,28 @@ function AppInner() {
   // round-up/dirty warnings below so they survive across renders.
   const [analyzeLog, setAnalyzeLog] = useState([])
 
+  // V2-as-overlay detection: a V2 clip whose resolution differs from its
+  // positionally-paired V1 clip is treated as a cropped region to composite
+  // back on top, at the V1 clip's crop box, following its crop keyframes.
+  // Derived (not state) — it depends on the crop/keyframes of V1's clips,
+  // which the user can change at any moment, so there's nothing to
+  // invalidate. See overlayMatch.js for the matching rules.
+  const overlayMatch = matchOverlays(timelineClips, track2Clips)
+  const overlays = overlayMatch.overlays
+  const hasOverlay = overlays.length > 0
+
+  // "Render V2" mode, toggled by the A / A/B switch beside that button:
+  //   'A'  → render the V2 track on its own, to its own file (the original
+  //          behavior, and the default).
+  //   'AB' → composite V2 over V1 and render the two as one clip.
+  // In A/B a V2 clip that matches V1's resolution covers the frame entirely,
+  // which is exactly what the user is asking for here — so this pass opts
+  // into `fullFrameSameSize`, unlike the always-on derivation above (where a
+  // same-size V2 is ordinary replacement, not a composite).
+  const [v2RenderMode, setV2RenderMode] = useState('A')
+  const abMatch = matchOverlays(timelineClips, track2Clips, { fullFrameSameSize: true })
+  const abOverlays = abMatch.overlays
+
   const logMessages = (() => {
     const msgs = []
     for (const c of timelineClips) {
@@ -178,6 +209,19 @@ function AppInner() {
       if (amount > 0) {
         msgs.push({ kind: 'warn', text: `⚠ "${c.displayName || c.sourceName}" duration is not rounded up (${base.toFixed(1)}s) — use Raise to round to ${(base + amount).toFixed(0)}s` })
       }
+    }
+    // Overlay near-misses (a size that doesn't match the crop box, a missing
+    // crop box) are surfaced here rather than as an alert: they're derived
+    // continuously, so an alert would fire on every keystroke of a resize.
+    for (const text of overlayMatch.warnings) {
+      msgs.push({ kind: 'warn', text: `⚠ ${text}` })
+    }
+    if (hasOverlay) {
+      msgs.push({
+        kind: 'info',
+        text: `▣ ${overlays.length} V2 ${overlays.length === 1 ? 'clip is' : 'clips are'} composited over V1 `
+          + `(${overlays.map(o => `${o.w}×${o.h}`).join(', ')}) — set the V2 toggle to A/B and click Render V2 to burn ${overlays.length === 1 ? 'it' : 'them'} in`,
+      })
     }
     if (hasDirty) {
       msgs.push({ kind: 'info', text: '● Unrendered edits — click Render to apply' })
@@ -270,8 +314,9 @@ function AppInner() {
     }))
   }
 
-  // Which clip list a pending render dialog targets: 'v1' (main timeline)
-  // or 'v2' (the Analyze scratch track).
+  // Which clip list a pending render dialog targets: 'v1' (main timeline),
+  // 'v2' (the Analyze scratch track), or 'composite' (V1 with V2's cropped
+  // regions animated back on top — see overlayMatch.js).
   const [renderTarget, setRenderTarget] = useState('v1')
 
   function handleRenderClick() {
@@ -282,24 +327,66 @@ function AppInner() {
 
   function handleRenderV2Click() {
     if (track2Clips.length === 0) return
+    if (v2RenderMode === 'AB') {
+      // A/B: V2 over V1 as one clip. Needs V1 clips to composite onto and at
+      // least one pair that actually resolves — otherwise say why instead of
+      // silently rendering a plain V1.
+      if (timelineClips.length === 0) {
+        alert('A/B renders V2 over V1, so V1 needs clips too. Add clips to V1, or switch the toggle to A to render V2 on its own.')
+        return
+      }
+      if (abOverlays.length === 0) {
+        alert(
+          'Nothing to composite in A/B mode:\n\n'
+          + (abMatch.warnings.length
+            ? abMatch.warnings.join('\n\n')
+            : 'no V2 clip pairs with a V1 clip. V2 clips pair with V1 clips by order.')
+          + '\n\nSwitch the toggle to A to render V2 on its own.'
+        )
+        return
+      }
+      setRenderTarget('composite')
+      setShowRenderDialog(true)
+      return
+    }
     setRenderTarget('v2')
     setShowRenderDialog(true)
   }
 
-  function clipsToPayload(list) {
-    return list.map(c => ({
-      input: c.sourceName,
-      dir: c.sourceDir || 'input',
-      inSec: c.inSec,
-      outSec: c.outSec,
-      headHoldSec: c.headHoldSec || 0,
-      tailHoldSec: c.tailHoldSec || 0,
-      roundHoldSec: c.roundHoldSec || 0,
-      reversed: !!c.reversed,
-      speed: c.speed && c.speed > 0 ? c.speed : 1,
-      crop: c.crop || null,
-      cropKeyframes: c.cropKeyframes || [],
-    }))
+  // `overlays` (optional, from overlayMatch.matchOverlays) attaches a V2
+  // clip to the V1 clip it composites onto. The V1 clip's own crop is
+  // deliberately dropped in that case: the crop box defined WHERE the region
+  // came from, and in a composite it becomes the overlay's placement rect
+  // (sent as overlay.x/y/w/h + keyframes) rather than a crop of V1 — the
+  // whole point is to put the processed region back onto the full frame.
+  function clipsToPayload(list, overlays = []) {
+    return list.map(c => {
+      const ov = overlays.find(o => o.v1Id === c.id) || null
+      return {
+        input: c.sourceName,
+        dir: c.sourceDir || 'input',
+        inSec: c.inSec,
+        outSec: c.outSec,
+        headHoldSec: c.headHoldSec || 0,
+        tailHoldSec: c.tailHoldSec || 0,
+        roundHoldSec: c.roundHoldSec || 0,
+        reversed: !!c.reversed,
+        speed: c.speed && c.speed > 0 ? c.speed : 1,
+        crop: ov ? null : (c.crop || null),
+        cropKeyframes: ov ? [] : (c.cropKeyframes || []),
+        overlay: ov ? {
+          input: ov.v2Clip.sourceName,
+          dir: ov.v2Clip.sourceDir || 'input',
+          inSec: ov.v2Clip.inSec,
+          outSec: ov.v2Clip.outSec,
+          x: ov.x,
+          y: ov.y,
+          w: ov.w,
+          h: ov.h,
+          keyframes: ov.keyframes,
+        } : null,
+      }
+    })
   }
 
   async function handleRenderConfirm(outputName, noAudio = false) {
@@ -307,8 +394,13 @@ function AppInner() {
     setRendering(true)
     try {
       const isV2 = renderTarget === 'v2'
+      const isComposite = renderTarget === 'composite'
       const sourceClips = isV2 ? track2Clips : timelineClips
-      const payload = clipsToPayload(sourceClips)
+      // Only a composite render attaches overlays; a plain V1 render still
+      // renders V1 exactly as before (crop and all), so both are reachable.
+      // A composite always comes from the A/B toggle, so it uses the
+      // full-frame-aware match (abOverlays), not the always-on one.
+      const payload = clipsToPayload(sourceClips, isComposite ? abOverlays : [])
       const result = await renderTimeline(payload, outputName, noAudio)
       if (result.error) { alert('Render failed: ' + result.error + (result.detail ? '\n' + result.detail : '')); return }
       if (!isV2) {
@@ -664,6 +756,18 @@ function AppInner() {
           </div>
           <div ref={previewStageRef} data-tour="previewStage" className="relative flex-1 min-h-[50vh] flex items-center justify-center bg-black p-3">
             <PreviewPlayer />
+            {/* Composited V2 regions, under the crop outline so the outline
+                stays visible while dragging the box that positions them.
+                One layer per overlay; each shows only while the shared
+                <video> is decoding its own V1 source. */}
+            {overlays.map(ov => (
+              <OverlayPreview
+                key={ov.v2Id}
+                overlay={ov}
+                stageRef={previewStageRef}
+                visible={v2Visible}
+              />
+            ))}
             <CropOverlay selectedClip={activeSelectedClip} setClips={setActiveClips} stageRef={previewStageRef} animateEnabled={animateEnabled} freeEnabled={freeEnabled} />
           </div>
 
@@ -754,6 +858,13 @@ function AppInner() {
                   timeDisplayMode={timeDisplayMode}
                   onToggleTimeDisplayMode={toggleTimeDisplayMode}
                   animateEnabled={animateEnabled}
+                  v1Visible={v1Visible}
+                  onToggleV1={toggleV1Visible}
+                  v2Visible={v2Visible}
+                  onToggleV2={toggleV2Visible}
+                  hasOverlay={hasOverlay}
+                  v2RenderMode={v2RenderMode}
+                  onSetV2RenderMode={setV2RenderMode}
                 />
               </div>
             )}
@@ -808,7 +919,9 @@ function AppInner() {
             const base = sourceClips[0]?.sourceName || 'render.mp4'
             const dot = base.lastIndexOf('.')
             const stem = dot > 0 ? base.slice(0, dot) : base
-            return renderTarget === 'v2' ? `${stem}-analyzed.mp4` : `${stem}.mp4`
+            if (renderTarget === 'v2') return `${stem}-analyzed.mp4`
+            if (renderTarget === 'composite') return `${stem}-composite.mp4`
+            return `${stem}.mp4`
           })()}
           showNoAudioOption={renderTarget === 'v2'}
           onConfirm={handleRenderConfirm}
