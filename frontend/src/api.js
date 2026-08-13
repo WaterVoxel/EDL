@@ -18,7 +18,8 @@ export const upload = (file) => {
 export const clearInput = () => fetch('/api/clear_input', { method: 'POST' }).then(r => r.json())
 export const deleteInputFile = (name) => fetch(`/api/files/${encodeURIComponent(name)}`, { method: 'DELETE' }).then(r => r.json())
 export const clearOutput = () => fetch('/api/clear_output', { method: 'POST' }).then(r => r.json())
-export const renderTimeline = (clips, output, noAudio = false) => postJSON('/api/render_timeline', { clips, output, noAudio })
+export const renderTimeline = (clips, output, noAudio = false, audioBed = null) =>
+  postJSON('/api/render_timeline', { clips, output, noAudio, audioBed })
 export const reformat = (input, dir, resolution, ratio, output) => postJSON('/api/reformat', { input, dir, resolution, ratio, output })
 export const listProjects = () => fetch('/api/projects').then(r => r.json())
 export const saveProject = (name, project) => postJSON('/api/projects', { name, project })

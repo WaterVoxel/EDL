@@ -48,6 +48,80 @@ export function clipTotalPx(clip, pps) {
   return clipTotalSec(clip) * pps
 }
 
+// The width TimelineClip actually RENDERS for a clip. A clip shorter than
+// MIN_CLIP_PX/pps is drawn at that floor so it stays visible and clickable,
+// which makes the V1 lane wider than duration*pps — so anything that has to
+// sit under V1 has to honor the same floor or it drifts right of the picture.
+export const MIN_CLIP_PX = 24
+
+export function clipRenderedPx(clip, pps) {
+  return Math.max(clipTotalPx(clip, pps), MIN_CLIP_PX)
+}
+
+// Map a timeline position to an X offset inside a lane laid out exactly like
+// V1's: per-clip RENDERED widths separated by `gapPx` (the flex `gap-0.5`
+// between clips). This is the one definition of "under the video on V1" — the
+// A1 bed measures every edge with it, so the bed's boundaries land on the same
+// pixel as the V1 frame playing at that instant. Head/tail holds need no
+// special case: they're already inside clipTotalSec, so the span a hold
+// occupies on V1 is the same span it occupies here.
+//
+// Deliberately separate from timelinePosToPx, which drives the playhead and
+// ignores the MIN_CLIP_PX floor. Don't merge them without re-verifying the
+// playhead — it's calibrated against the current behavior.
+export function sequencePosToPx(clips, pos, pps, gapPx = GAP_PX) {
+  let px = 0
+  let remaining = pos
+  for (let i = 0; i < clips.length; i++) {
+    const dur = clipTotalSec(clips[i])
+    const width = clipRenderedPx(clips[i], pps)
+    if (remaining <= dur) {
+      // Scale within the clip by its rendered width, not by pps: a floored
+      // clip's interior has to spread across the box actually drawn.
+      return px + (dur > 0 ? (remaining / dur) * width : 0)
+    }
+    remaining -= dur
+    px += width + gapPx
+  }
+  // Ran past the end — the lane's full width, minus the trailing gap that the
+  // loop added after the last clip.
+  return px > 0 ? px - gapPx : 0
+}
+
+// Where V1's PICTURE starts on the timeline: the first clip's head hold, which
+// freezes a frame before the clip proper begins. The A1 bed is delayed by this
+// so it starts on the first real frame — change or remove the hold and the bed
+// moves with it. Mirrors bed_offset_sec in build_timeline_filter (which
+// frame-quantizes it; a few ms of UI/render difference is not visible at 60px/s).
+// Only clip 0 may carry a head hold (sanitizeHoldPlacement enforces it).
+export function sequenceVideoStartSec(clips) {
+  return clips.length > 0 ? (clips[0].headHoldSec || 0) : 0
+}
+
+// Where each V1 clip starts and ends in that same lane coordinate space, plus
+// its head/tail hold spans. What the A1 bed draws its clip-boundary dividers
+// and hold markers from, so the link to V1 is visible and not just implied.
+export function sequenceClipBounds(clips, pps, gapPx = GAP_PX) {
+  const bounds = []
+  let px = 0
+  for (const clip of clips) {
+    const width = clipRenderedPx(clip, pps)
+    const dur = clipTotalSec(clip)
+    // Holds are drawn at their true pps width by TimelineClip (only the OUTER
+    // box is floored), so scale them the same way the interior is scaled.
+    const scale = dur > 0 ? width / (dur * pps) : 1
+    bounds.push({
+      id: clip.id,
+      left: px,
+      width,
+      headPx: (clip.headHoldSec || 0) * pps * scale,
+      tailPx: ((clip.tailHoldSec || 0) + (clip.roundHoldSec || 0)) * pps * scale,
+    })
+    px += width + gapPx
+  }
+  return bounds
+}
+
 // Pixel X of the playhead for a given timeline position, in the timeline's
 // own coordinate system (gutter + per-clip widths + inter-clip gaps). Pure
 // so the playback engine can drive the playhead imperatively every frame

@@ -26,7 +26,7 @@ import ProjectLibrary from './components/ProjectLibrary'
 import AboutDialog from './components/AboutDialog'
 import Timeline from './components/Timeline/Timeline'
 import { clipBaseSec, roundUpAmount } from './clipMath'
-import { loadTrackTags, tagTrack } from './fileList'
+import { loadTrackTags, tagTrack, isAudioFile } from './fileList'
 import { analyzeAgainstV1, reconstructFromV1 } from './analyzeMath'
 import { matchOverlays } from './overlayMatch'
 
@@ -73,6 +73,22 @@ function AppInner() {
   const [v2Visible, setV2Visible] = useState(true)
   const toggleV1Visible = useCallback(() => setV1Visible(v => !v), [])
   const toggleV2Visible = useCallback(() => setV2Visible(v => !v), [])
+
+  // A1 — the "smart" audio track: ONE audio bed locked under the whole V1
+  // sequence. It is deliberately NOT a clip list and NOT part of
+  // focusedTrack/activeClips: it owns no timing of its own (it always starts
+  // at 0 and the render pads or cuts it to V1's length), so there is nothing
+  // for the clip toolbar to trim, reorder, or select. Shape:
+  // null | { name, dir, durationSec }.
+  const [audioBed, setAudioBed] = useState(null)
+  // Eye = show the bar on the timeline. It does not affect the render — the
+  // bed is either loaded or it isn't. a1Muted silences the bed in the PREVIEW
+  // only; it has no UI control (the gutter is just A1 + the eye), so it stays
+  // false unless something sets it — kept because the player and the bar both
+  // already honor it, and a mute control can return without re-plumbing.
+  const [a1Visible, setA1Visible] = useState(true)
+  const [a1Muted] = useState(false)
+  const toggleA1Visible = useCallback(() => setA1Visible(v => !v), [])
 
   const selectItem = useCallback((id, part = 'main') => {
     setSelectedId(id)
@@ -224,7 +240,7 @@ function AppInner() {
       })
     }
     if (hasDirty) {
-      msgs.push({ kind: 'info', text: '● Unrendered edits — click Render to apply' })
+      msgs.push({ kind: 'info', text: '● Unrendered edits — click Render V1 to apply' })
     }
     return [...analyzeLog, ...msgs]
   })()
@@ -239,6 +255,24 @@ function AppInner() {
   function handleUpload() { refresh() }
 
   async function handleAddToTimeline(name) {
+    // An audio file has no video stream, so it can never be a V1 clip — it
+    // routes to A1 as the bed instead. Gated on V1 already having a clip: the
+    // bed's length is DERIVED from the V1 sequence on every render (padded or
+    // cut to it), so a bed with no V1 has no length to take and nothing to
+    // lock to. Extension-based rather than probe-based on purpose — this is
+    // the same decision the bin's own A1 filter and the drop zone's `accept`
+    // make, and it avoids a probe round-trip just to reject the file.
+    if (isAudioFile(name)) {
+      if (timelineClips.length === 0) {
+        setAnalyzeLog(prev => [
+          { kind: 'warn', text: `⚠ "${name}" is audio — add a video to V1 first, then it can run underneath as the A1 bed` },
+          ...prev,
+        ])
+        return
+      }
+      await addBedByName(name)
+      return
+    }
     const info = await probe(name, 'input')
     if (info.error) { alert('Could not probe file: ' + info.error); return }
     // Sticky-tag this source as a V1 file for the Media Bin filter.
@@ -401,7 +435,13 @@ function AppInner() {
       // A composite always comes from the A/B toggle, so it uses the
       // full-frame-aware match (abOverlays), not the always-on one.
       const payload = clipsToPayload(sourceClips, isComposite ? abOverlays : [])
-      const result = await renderTimeline(payload, outputName, noAudio)
+      // The bed is locked to V1, so it only rides along on renders that
+      // CONTAIN the V1 sequence: a plain V1 render and an A/B composite. Render
+      // V2 in mode A renders the V2 track by itself, where a V1-length bed has
+      // no meaning. noAudio also excludes it — the backend rejects that
+      // combination outright, so don't send it.
+      const bed = (isV2 || noAudio || !audioBed) ? null : { input: audioBed.name, dir: audioBed.dir }
+      const result = await renderTimeline(payload, outputName, noAudio, bed)
       if (result.error) { alert('Render failed: ' + result.error + (result.detail ? '\n' + result.detail : '')); return }
       if (!isV2) {
         setTimelineClips(prev => prev.map(c => ({ ...c, dirty: false })))
@@ -443,6 +483,7 @@ function AppInner() {
   const [showLibrary, setShowLibrary] = useState(false)
   const [showAbout, setShowAbout] = useState(false)
   const [saveStatus, setSaveStatus] = useState('')
+  const savingRef = useRef(false)
 
   async function handleAddToV2(file) {
     const result = await upload(file)
@@ -472,6 +513,47 @@ function AppInner() {
       dirty: true,
     }])
     refresh()
+  }
+
+  // A1 accepts exactly one file and replaces whatever was there — a bed is a
+  // single decision, not a lane to assemble. A file with no audio stream is
+  // refused here rather than at render time, where it would surface as an
+  // ffmpeg filtergraph error long after the user forgot what they dropped.
+  // Shared tail of both routes onto A1: a file already sitting in input/ (the
+  // bin's + button) and a freshly uploaded one (the A1 drop zone). Probes for
+  // a real audio stream before accepting — the extension can lie, and a bed
+  // with no audio stream would fail the render with a filtergraph error.
+  async function addBedByName(name) {
+    const info = await probe(name, 'input')
+    if (info.error) { alert('Could not probe file: ' + info.error); return false }
+    if (!info.has_audio) {
+      setAnalyzeLog(prev => [
+        { kind: 'warn', text: `⚠ "${name}" has no audio stream — nothing to use as a bed` },
+        ...prev,
+      ])
+      return false
+    }
+    setTrackTags(prev => tagTrack(name, 'a1', prev))
+    setAudioBed({
+      name,
+      dir: 'input',
+      // The container duration, not video_duration: an audio-only file has no
+      // video stream, and for a file that does have one it's the audio that
+      // matters here.
+      durationSec: info.duration,
+    })
+    return true
+  }
+
+  async function handleAddToA1(file) {
+    const result = await upload(file)
+    if (result.error) { alert('Upload failed: ' + result.error); return }
+    await addBedByName(result.name)
+    refresh()
+  }
+
+  function handleRemoveBed() {
+    setAudioBed(null)
   }
 
   function handleAnalyze() {
@@ -505,8 +587,11 @@ function AppInner() {
     }
   }
 
+  // version 3 adds audioBed. Nothing reads `version` — it's a marker for
+  // humans reading a .nara — and a version-2 file still loads unchanged
+  // (handleLibraryOpen defaults a missing audioBed to null).
   function buildProject() {
-    return { version: 2, clips: timelineClips, track2Clips, selectedId }
+    return { version: 3, clips: timelineClips, track2Clips, audioBed, selectedId }
   }
 
   async function handleSave() {
@@ -539,9 +624,47 @@ function AppInner() {
     setTimeout(() => setSaveStatus(''), 3000)
   }
 
+  // Cmd/Ctrl+S → Save, same as the Save button (including its prompt for a
+  // name on a never-saved project).
+  //
+  // Lives here rather than in Timeline.jsx's shortcut block because the
+  // Timeline UNMOUNTS whenever the AGENT or Actions tab is active — a
+  // shortcut registered there would silently stop working on two of the
+  // three tabs. Save is an app-level action, so it listens at the app level.
+  //
+  // Three details this has to get right:
+  //   • preventDefault runs FIRST and unconditionally, before any of the
+  //     bail-outs. Cmd+S is the browser's own "Save Page As"; letting it
+  //     through on a no-op (nothing to save, a dialog open) would dump an
+  //     HTML file picker on the user.
+  //   • Unlike the Timeline shortcuts it deliberately still fires from
+  //     INPUT/TEXTAREA. A modified key can't collide with typing, and every
+  //     editor saves from a text field.
+  //   • `savingRef` (not `saveStatus`) guards re-entry: handleSave is async
+  //     and opens a blocking prompt() when unnamed, so a held or double
+  //     Cmd+S would otherwise queue duplicate prompts and POSTs.
+  const saveRef = useRef(null)
+  saveRef.current = handleSave
+  useEffect(() => {
+    function onKeyDown(e) {
+      if (!((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'S'))) return
+      e.preventDefault()
+      if (e.repeat || savingRef.current) return
+      // Match the Save button's own disabled/blocked conditions exactly, so
+      // the shortcut is never a second path to something the button won't do.
+      if (timelineClips.length === 0) return
+      if (showRenderDialog || showLibrary || showAbout) return
+      savingRef.current = true
+      Promise.resolve(saveRef.current?.()).finally(() => { savingRef.current = false })
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [timelineClips.length, showRenderDialog, showLibrary, showAbout])
+
   function handleLibraryOpen(name, project) {
     resetTimeline(project.clips)
     setTrack2Clips(project.track2Clips || [])
+    setAudioBed(project.audioBed || null)
     setSelectedId(project.selectedId || null)
     setProjectName(name)
     setShowLibrary(false)
@@ -655,7 +778,7 @@ function AppInner() {
           <button
             onClick={handleSave}
             disabled={timelineClips.length === 0}
-            title="Save project to the library"
+            title="Save project to the library (Cmd/Ctrl+S)"
             className="px-2.5 py-1 text-[10px] rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 hover:border-neutral-500 disabled:opacity-40"
           >Save</button>
           <button
@@ -745,13 +868,8 @@ function AppInner() {
                 freeEnabled={freeEnabled}
                 onToggleFree={() => setFreeEnabled(v => !v)}
               />
-              <button
-                onClick={handleRenderClick}
-                disabled={rendering || timelineClips.length === 0}
-                className="px-2.5 py-1 text-[10px] font-medium rounded bg-emerald-600 text-white hover:bg-emerald-500 disabled:bg-neutral-700 disabled:text-neutral-500"
-              >
-                {rendering ? 'Rendering…' : '▶ Render'}
-              </button>
+              {/* The Render button used to sit here; it now lives in the
+                  Timeline's own button row as "Render V1", beside Render V2. */}
             </div>
           </div>
           <div ref={previewStageRef} data-tour="previewStage" className="relative flex-1 min-h-[50vh] flex items-center justify-center bg-black p-3">
@@ -855,6 +973,8 @@ function AppInner() {
                   onAnalyze={handleAnalyze}
                   onReconstruct={handleReconstruct}
                   onRenderV2={handleRenderV2Click}
+                  onRender={handleRenderClick}
+                  rendering={rendering}
                   timeDisplayMode={timeDisplayMode}
                   onToggleTimeDisplayMode={toggleTimeDisplayMode}
                   animateEnabled={animateEnabled}
@@ -865,6 +985,12 @@ function AppInner() {
                   hasOverlay={hasOverlay}
                   v2RenderMode={v2RenderMode}
                   onSetV2RenderMode={setV2RenderMode}
+                  audioBed={audioBed}
+                  onAddToA1={handleAddToA1}
+                  onRemoveBed={handleRemoveBed}
+                  a1Visible={a1Visible}
+                  onToggleA1={toggleA1Visible}
+                  a1Muted={a1Muted}
                 />
               </div>
             )}

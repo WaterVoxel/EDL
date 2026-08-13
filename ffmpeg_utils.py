@@ -12,6 +12,23 @@ FFPROBE = "/opt/homebrew/bin/ffprobe"
 
 ALLOWED_EXTENSIONS = (".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm")
 
+# Audio-only files are accepted for one purpose: the A1 audio bed (see
+# build_timeline_filter's audio_bed). ALLOWED_EXTENSIONS stays video-only on
+# purpose — anywhere a VIDEO is required (a timeline clip, an overlay source)
+# still gates on it, so an audio file can never be mistaken for a clip.
+# MEDIA_EXTENSIONS is the wider "may live in input/ or the export dir" set,
+# used by the listing/upload/delete/rename routes.
+AUDIO_EXTENSIONS = (".wav", ".mp3", ".m4a", ".aac", ".flac", ".aiff")
+MEDIA_EXTENSIONS = ALLOWED_EXTENSIONS + AUDIO_EXTENSIONS
+
+# Fixed playback gain applied to the A1 bed before it is mixed under V1's own
+# audio. amix normalize=0 is an exact unity-gain SUM (v1[i] + bed[i]), so a
+# full-scale bed would clip the mix outright; a bed also belongs UNDER the
+# dialogue by design. With no per-clip volume control in the UI, the gain
+# lives here. The preview <audio> element uses the same value so what the
+# user hears matches what renders.
+BED_GAIN = 0.35
+
 REVERSE_WARN_THRESHOLD_BYTES = 2 * 1024**3
 
 PREVIEW_CACHE_DIR = os.path.join(PROJECT_ROOT, ".preview_cache")
@@ -614,7 +631,8 @@ def keyframe_ladder(keyframes, coord, in_sec):
 
 
 def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
-                           sample_rate=44100, channel_layout="stereo", no_audio=False):
+                           sample_rate=44100, channel_layout="stereo", no_audio=False,
+                           audio_bed=None):
     """Build one filter_complex string that renders an entire timeline (a
     sequence of trimmed clips, each optionally extended by a frozen-frame
     hold at its lead and/or trail edge, and optionally played backwards)
@@ -631,6 +649,51 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
     input stream to complex filtergraph input"). The caller must also drop
     -map "[outa]" from its own args when no_audio=True — mapping a label
     this function never declares is also a hard ffmpeg error.
+
+    audio_bed is the A1 audio bed: an ffmpeg INPUT INDEX (an int, not a
+    path — the caller owns -i ordering, same contract overlay's input_index
+    follows) for a file whose audio is mixed UNDER the whole rendered
+    sequence. It owns no timing of its own: it starts where V1's PICTURE
+    starts, is padded with silence if shorter than the sequence and cut if
+    longer, and is SUMMED with the clips' own audio rather than replacing it.
+    The bed is a purely audio-side addition — it cannot change a single video
+    frame (hand-verified by framemd5 with and without one).
+
+    "Where V1's picture starts" means the bed is delayed by the first clip's
+    head hold (adelay, frame-quantized to lead_frames/fps like the hold's own
+    silence). A hold freezes the first frame BEFORE the clip proper begins, so
+    a bed starting at 0 would play music over that frozen frame and land out
+    of step with the cut; delaying it keeps the bed's downbeat on the first
+    real frame, and changing or removing the hold moves the bed with it. The
+    delay uses adelay (prepends silence) rather than an asetpts shift, so
+    apad/atrim below still measure from 0 and the render ends flush: a 1s hold
+    yields 1s of leading silence and 1s less bed heard, never a longer output.
+
+    Bed parameters, each measured rather than assumed:
+      * amix normalize=0 is an exact unity-gain sum (verified
+        mixed[i] == v1[i] + bed[i] to 7.45e-09 over 485100 samples).
+        normalize=1 would instead duck the clips' own dialogue by 6 dB, so
+        the bed is attenuated by BED_GAIN on its own branch and the mix
+        leaves V1's level alone.
+      * duration=first is what makes the bed length-agnostic: it pads a
+        short bed AND cuts a long one. With duration=longest a 20s bed on a
+        5.5s sequence produced audio,20.010000 vs video,5.500000.
+      * apad+atrim on the bed branch are strictly REDUNDANT given
+        duration=first (byte-identical PCM either way). They are kept
+        because they make the bed's intended length explicit in the graph
+        and independently checkable, and because they are the same idiom
+        the per-clip audio normalization above already uses.
+      * aformat comes BEFORE apad. Resampling after padding shifted the
+        tail by 14 samples — a determinism problem, not a correctness one.
+      * Do NOT add aresample=async=1 here. It may insert or drop samples,
+        which makes a render non-reproducible and breaks hash verification.
+      * The bed's target length is the sum of the per-clip expected_sec
+        values computed below — the frame-quantized truth the audio branch
+        is already padded/cut to — never a wall-clock duration. The two
+        drift by up to 0.076s under mixed fps + slow-mo (exactly 0 for
+        uniform fps).
+    no_audio=True with a bed is a contradiction (there is no [aseq] to mix
+    into) and raises ValueError rather than silently dropping one of them.
 
     clip_specs[i] is a dict: {inSec, outSec, fps, has_audio, lead_hold_sec,
     trail_hold_sec, reversed, video_duration, crop}. lead_hold_sec should only be
@@ -651,6 +714,22 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
     appended — these 1-3 pieces are concatenated into one per-clip
     segment, normalized to the common target resolution/fps, and finally
     every clip's normalized segment is concatenated into [outv][outa].
+
+    A hold's silence is what OFFSETS that clip's own audio: the anullsrc
+    piece is concatenated ahead of the main audio in the same order the
+    freeze is prepended to the video, so a head hold pushes the clip's
+    dialogue later by exactly the hold's length and the two tracks stay
+    frame-aligned. That means the silence must be quantized to the SAME
+    frame grid the freeze is — round(H*fps) frames, i.e. lead_frames/fps
+    seconds, not the raw requested lead_hold. The freeze emits a whole
+    number of frames by construction (loop=round(H*fps)-1), so with a hold
+    that isn't a frame multiple (e.g. 0.5s at 24fps = 12 frames = 0.5s, but
+    0.51s = 12 frames = 0.5s) the raw value would make the audio longer
+    than the picture it's padding and shift every following clip's audio
+    late by the difference. Using lead_frames/fps makes the offset exactly
+    the freeze's own duration, and it also makes the per-clip apad/atrim to
+    expected_sec (which is computed from lead_frames/trail_frames) a no-op
+    rather than a silent truncation of real dialogue.
 
     When reversed is true, the main segment plays backwards (reverse/
     areverse), and — since after reversal the frame that plays *first* is
@@ -703,9 +782,20 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
     the overlay never touches is BIT-EXACT against the same render without
     it.
     """
+    if no_audio and audio_bed is not None:
+        raise ValueError("audio_bed cannot be used with no_audio=True: there is no audio graph to mix into")
+
     chains = []
     norm_v_labels = []
     norm_a_labels = []
+    # Per-clip frame-quantized durations; their sum is the bed's exact target
+    # length (see the audio_bed notes in the docstring).
+    expected_secs = []
+    # How far into the sequence the first clip's VIDEO actually starts — i.e.
+    # its head hold, frame-quantized. The bed is delayed by exactly this so it
+    # starts on the first real frame rather than on the frozen one. Set in the
+    # loop below from clip 0 (the only clip a head hold may live on).
+    bed_offset_sec = 0.0
     for i, spec in enumerate(clip_specs):
         in_sec = spec["inSec"]
         out_sec = spec["outSec"]
@@ -818,6 +908,9 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
         # fills the stretched span by repeating source frames.
         expected_sec = (lead_frames + trail_frames) / fps + (n_main / fps) / speed
         n_norm_frames = max(int(round(expected_sec * target_fps)), 1)
+        expected_secs.append(expected_sec)
+        if i == 0:
+            bed_offset_sec = lead_frames / fps
 
         # v_src feeds up to three consumers (lead hold, main body, trail
         # hold). ffmpeg auto-splits a raw INPUT pad like [0:v] across multiple
@@ -849,7 +942,8 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
             v_pieces.append(f"[vlead{i}]")
             if not no_audio:
                 chains.append(
-                    f"anullsrc=channel_layout={channel_layout}:sample_rate={sample_rate}:duration={lead_hold}[alead{i}]"
+                    f"anullsrc=channel_layout={channel_layout}:sample_rate={sample_rate}:"
+                    f"duration={lead_frames / fps}[alead{i}]"
                 )
                 a_pieces.append(f"[alead{i}]")
 
@@ -890,7 +984,8 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
             v_pieces.append(f"[vtrail{i}]")
             if not no_audio:
                 chains.append(
-                    f"anullsrc=channel_layout={channel_layout}:sample_rate={sample_rate}:duration={trail_hold}[atrail{i}]"
+                    f"anullsrc=channel_layout={channel_layout}:sample_rate={sample_rate}:"
+                    f"duration={trail_frames / fps}[atrail{i}]"
                 )
                 a_pieces.append(f"[atrail{i}]")
 
@@ -923,7 +1018,37 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
         chains.append(f"{''.join(norm_v_labels)}concat=n={len(clip_specs)}:v=1:a=0[outv]")
     else:
         interleaved = "".join(f"{v}{a}" for v, a in zip(norm_v_labels, norm_a_labels))
-        chains.append(f"{interleaved}concat=n={len(clip_specs)}:v=1:a=1[outv][outa]")
+        if audio_bed is None:
+            chains.append(f"{interleaved}concat=n={len(clip_specs)}:v=1:a=1[outv][outa]")
+        else:
+            # The clips' own concatenated audio becomes an intermediate
+            # ([aseq]) so the bed can be summed into it; [outa] is still the
+            # label the caller maps, so nothing downstream changes.
+            total_sec = sum(expected_secs)
+            chains.append(f"{interleaved}concat=n={len(clip_specs)}:v=1:a=1[outv][aseq]")
+            # The bed starts where V1's PICTURE starts: adelay by the first
+            # clip's head hold so a hold pushes the bed forward with the video
+            # instead of playing over the frozen frame. adelay prepends silence
+            # rather than shifting PTS, so the padded length below is measured
+            # from 0 and the bed still ends flush with the sequence — a 1s hold
+            # means 1s of leading silence and 1s less bed heard, never a render
+            # that runs 1s long.
+            bed_src = f"[{audio_bed}:a]"
+            if bed_offset_sec > 0:
+                delay_ms = round(bed_offset_sec * 1000)
+                # all=1 delays every channel by the one value (without it
+                # adelay only shifts the channels it was given delays for, so a
+                # stereo bed would come out with one channel early).
+                chains.append(f"{bed_src}adelay=delays={delay_ms}:all=1[abdel]")
+                bed_src = "[abdel]"
+            chains.append(
+                f"{bed_src}aformat=sample_rates={sample_rate}:channel_layouts={channel_layout},"
+                f"apad=whole_dur={total_sec},atrim=end={total_sec},asetpts=PTS-STARTPTS,"
+                f"volume={BED_GAIN}[abed]"
+            )
+            chains.append(
+                "[aseq][abed]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[outa]"
+            )
     return ";".join(chains)
 
 

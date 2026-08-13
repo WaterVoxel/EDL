@@ -63,7 +63,7 @@ def _list_dir(base):
     files = []
     for name in sorted(os.listdir(base)):
         p = os.path.join(base, name)
-        if os.path.isfile(p) and name.lower().endswith(fu.ALLOWED_EXTENSIONS):
+        if os.path.isfile(p) and name.lower().endswith(fu.MEDIA_EXTENSIONS):
             files.append({"name": name, "size": os.path.getsize(p), "modified": os.path.getmtime(p)})
     return files
 
@@ -103,7 +103,7 @@ def upload():
     if not f or f.filename == "":
         return jsonify({"error": "no file"}), 400
     name = secure_filename(f.filename)
-    if not name.lower().endswith(fu.ALLOWED_EXTENSIONS):
+    if not name.lower().endswith(fu.MEDIA_EXTENSIONS):
         return jsonify({"error": f"unsupported file type: {name}"}), 400
     dest = os.path.join(fu.INPUT_DIR, name)
     if os.path.exists(dest):
@@ -119,7 +119,7 @@ def clear_input():
     removed = []
     for name in os.listdir(fu.INPUT_DIR):
         p = os.path.join(fu.INPUT_DIR, name)
-        if os.path.isfile(p) and name.lower().endswith(fu.ALLOWED_EXTENSIONS):
+        if os.path.isfile(p) and name.lower().endswith(fu.MEDIA_EXTENSIONS):
             os.remove(p)
             removed.append(name)
     return jsonify({"removed": removed})
@@ -129,12 +129,13 @@ def clear_input():
 def delete_input_file(name):
     # Single-file counterpart to clear_input: removes one source file from
     # input/. safe_path guards against path traversal; only allowed media
-    # extensions are deletable (same filter clear_input uses).
+    # extensions are deletable (same filter clear_input uses) — MEDIA_
+    # EXTENSIONS, so audio beds are deletable through the same UI as videos.
     try:
         path = fu.safe_path(name, fu.INPUT_DIR)
     except fu.PathError as e:
         return jsonify({"error": str(e)}), 400
-    if not name.lower().endswith(fu.ALLOWED_EXTENSIONS):
+    if not name.lower().endswith(fu.MEDIA_EXTENSIONS):
         return jsonify({"error": "not a media file"}), 400
     if not os.path.isfile(path):
         return jsonify({"error": "file not found"}), 404
@@ -306,7 +307,7 @@ def rename_output():
     old_ext = os.path.splitext(old)[1]
     if not os.path.splitext(new)[1] and old_ext:
         new += old_ext
-    if not new.lower().endswith(fu.ALLOWED_EXTENSIONS):
+    if not new.lower().endswith(fu.MEDIA_EXTENSIONS):
         return jsonify({"error": "new name must be a media file"}), 400
     try:
         new_path = fu.safe_path(new, out_dir)
@@ -363,7 +364,7 @@ def clear_output():
     removed = []
     for name in os.listdir(export_dir):
         p = os.path.join(export_dir, name)
-        if os.path.isfile(p) and name.lower().endswith(fu.ALLOWED_EXTENSIONS):
+        if os.path.isfile(p) and name.lower().endswith(fu.MEDIA_EXTENSIONS):
             os.remove(p)
             removed.append(name)
     return jsonify({"removed": removed})
@@ -579,6 +580,39 @@ def render_timeline():
             overlay_infos[entry["path"]] = fu.get_video_info(entry["path"])
         except RuntimeError as e:
             return jsonify({"error": f"probe failed for overlay {entry['path']}", "detail": str(e)}), 500
+
+    # The A1 audio bed: one more "-i", appended after every clip input AND
+    # every overlay input, mixed under the whole sequence. Its index is only
+    # stable once the overlay loop above has finished (that loop grows
+    # overlay_paths as it goes), which is why this block sits here.
+    bed_paths = []
+    bed_index = None
+    bed_info = None
+    raw_bed = data.get("audioBed")
+    if raw_bed:
+        try:
+            bed_name = raw_bed["input"]
+            bed_path = fu.safe_path(
+                bed_name,
+                get_output_dir() if raw_bed.get("dir") == "output" else fu.INPUT_DIR,
+            )
+        except (fu.PathError, KeyError) as e:
+            return jsonify({"error": f"audio bed: {e}"}), 400
+        if not bed_name.lower().endswith(fu.MEDIA_EXTENSIONS):
+            return jsonify({"error": f"audio bed: unsupported file type: {bed_name}"}), 400
+        if not os.path.exists(bed_path):
+            return jsonify({"error": f"audio bed: file not found: {bed_path}"}), 404
+        try:
+            bed_info = fu.get_video_info(bed_path)
+        except RuntimeError as e:
+            return jsonify({"error": f"probe failed for audio bed {bed_path}", "detail": str(e)}), 500
+        # A bed with no audio stream would make the graph reference a [N:a]
+        # pad that doesn't exist — ffmpeg exits 234 with a filtergraph
+        # binding error, which is a 500 the user can do nothing with.
+        if not bed_info["has_audio"]:
+            return jsonify({"error": f"audio bed: {bed_name} has no audio stream"}), 400
+        bed_index = len(in_paths) + len(overlay_paths)
+        bed_paths.append(bed_path)
 
     # Server always derives fps/has_audio/resolution itself — never trusts
     # client-supplied values — same principle /api/hold_frame already
@@ -796,6 +830,16 @@ def render_timeline():
             return spec["crop"]["w"], spec["crop"]["h"]
         return info["width"], info["height"]
 
+    # An audio-only file has width/height None, and max() over a None would
+    # raise an uncaught TypeError — a bare 500 that says nothing. Audio
+    # belongs on A1, not V1; say so by name.
+    for c, info in zip(clips, infos):
+        if not info.get("width") or not info.get("height"):
+            return jsonify({
+                "error": f"{c.get('input')} has no video stream — "
+                         "audio files belong on the A1 track, not V1"
+            }), 400
+
     effective_dims = [effective_wh(info, spec) for info, spec in zip(infos, clip_specs)]
     target_w = max(w for w, h in effective_dims)
     target_h = max(h for w, h in effective_dims)
@@ -811,7 +855,12 @@ def render_timeline():
     # flip to False here too, or audio_args()/render_size_capped would try
     # to attach -c:a aac to a stream that was never mapped.
     no_audio = bool(data.get("noAudio"))
-    audio_infos = [i for i in infos if i["has_audio"]]
+    if no_audio and bed_index is not None:
+        return jsonify({"error": "cannot mix an audio bed into a render with audio disabled"}), 400
+    # The bed counts as an audio source for the encoder's own settings: with a
+    # bed under an entirely silent V1, it is the ONLY real audio in the render,
+    # and leaving it out here would degenerate audio_sample_rate to 0.
+    audio_infos = [i for i in infos + ([bed_info] if bed_info else []) if i["has_audio"]]
     combined_info = {
         "has_audio": not no_audio,
         "audio_bit_rate": max((i["audio_bit_rate"] or 0 for i in audio_infos), default=0),
@@ -834,12 +883,15 @@ def render_timeline():
     out_name = candidate
     out_path = os.path.join(export_dir, out_name)
 
-    filt = fu.build_timeline_filter(clip_specs, target_w, target_h, target_fps, no_audio=no_audio)
+    filt = fu.build_timeline_filter(
+        clip_specs, target_w, target_h, target_fps, no_audio=no_audio, audio_bed=bed_index
+    )
 
     # Overlay sources come after every clip input, matching the input_index
-    # each overlay spec was assigned above.
+    # each overlay spec was assigned above; the audio bed comes last, matching
+    # bed_index.
     input_args = []
-    for p in in_paths + overlay_paths:
+    for p in in_paths + overlay_paths + bed_paths:
         input_args += ["-i", p]
     filter_args = ["-filter_complex", filt, "-map", "[outv]"]
     if not no_audio:

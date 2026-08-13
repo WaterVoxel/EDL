@@ -10,6 +10,7 @@ const TRACK_FILTERS = [
   { key: 'all', label: 'All' },
   { key: 'v1', label: 'V1' },
   { key: 'v2', label: 'V2' },
+  { key: 'a1', label: 'A1' },
 ]
 
 export default function MediaLibrary({ files, trackTags = {}, onAddToTimeline, onCleared, onDeleted, onUpload, children }) {
@@ -23,7 +24,7 @@ export default function MediaLibrary({ files, trackTags = {}, onAddToTimeline, o
   const [query, setQuery] = useState('')
   const [sortBy, setSortBy] = useState('date')
   const [sortDir, setSortDir] = useState('desc')
-  // Which track view is active: 'all' (everything), 'v1', or 'v2' (only
+  // Which track view is active: 'all' (everything), or 'v1'/'v2'/'a1' (only
   // files sticky-tagged for that track — see fileList.filterByTrack).
   const [trackFilter, setTrackFilter] = useState('all')
   const [selectedName, setSelectedName] = useState(null)

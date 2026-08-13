@@ -49,6 +49,17 @@ export function filterFiles(files, query) {
   return files.filter(f => f.name.toLowerCase().includes(q))
 }
 
+// Mirrors ffmpeg_utils.AUDIO_EXTENSIONS — keep the two in sync. Used to route
+// the Media Bin's "add to timeline" by file type: an audio file has no video
+// stream, so it can only ever be a bed on A1, never a V1 clip.
+export const AUDIO_EXTENSIONS = ['.wav', '.mp3', '.m4a', '.aac', '.flac', '.aiff']
+
+export function isAudioFile(name) {
+  if (!name) return false
+  const lower = name.toLowerCase()
+  return AUDIO_EXTENSIONS.some(ext => lower.endsWith(ext))
+}
+
 // Track tags mark which timeline track(s) a source file has been placed on.
 // A file in input/ is not inherently V1 or V2 — the tag is STAMPED the first
 // time the file enters a track (V1 via the bin's +/drag → handleAddToTimeline;

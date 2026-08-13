@@ -1,5 +1,7 @@
 import { useRef, useEffect, useCallback, useState } from 'react'
 import TimelineClip from './TimelineClip'
+import AudioBedBar from './AudioBedBar'
+import AudioBedPlayer from './AudioBedPlayer'
 import Playhead from './Playhead'
 import Ruler from './Ruler'
 import EdlTable from './EdlTable'
@@ -7,7 +9,7 @@ import TransportBar from './TransportBar'
 import { useMedia } from '../../context/MediaContext'
 import { probe } from '../../api'
 import { useTimelinePlayback } from '../../hooks/useTimelinePlayback'
-import { clipTotalSec, clipTotalPx, clipHeadPx, clipMainPx, sanitizeHoldPlacement, timelinePosToPx } from '../../clipMath'
+import { clipTotalSec, clipTotalPx, clipHeadPx, clipMainPx, sanitizeHoldPlacement, timelinePosToPx, sequenceVideoStartSec } from '../../clipMath'
 import { addKeyframe, removeNearestKeyframe, sampleCropOrigin, clipTFromTimelinePos, retimeKeyframesForTrim } from '../../cropAnimation'
 
 const PPS = 60
@@ -34,13 +36,17 @@ export default function Timeline({
   clips, setClips, selectedId, selectedPart = 'main', onSelectId, onSelectItem, onUndo, canUndo,
   track2Clips = [], setTrack2Clips, selectedId2 = null, selectedPart2 = 'main', onSelectItem2,
   focusedTrack = 1, onFocusTrack, onAddToV2, onAnalyze, onReconstruct, onRenderV2,
+  onRender, rendering = false,
   timeDisplayMode, onToggleTimeDisplayMode, animateEnabled = false,
   v1Visible = true, onToggleV1, v2Visible = true, onToggleV2, hasOverlay = false,
   v2RenderMode = 'A', onSetV2RenderMode,
+  audioBed = null, onAddToA1, onRemoveBed, a1Visible = true, onToggleA1,
+  a1Muted = false,
 }) {
   const selectItem = onSelectItem || ((id) => onSelectId(id))
   const selectItem2 = onSelectItem2 || (() => {})
   const [v2DragOver, setV2DragOver] = useState(false)
+  const [a1DragOver, setA1DragOver] = useState(false)
   // Per-track visibility — independent of each other. Muting a track only
   // greys out its content (it stays on the timeline and stays editable);
   // it also determines what the shared video preview decodes below. Lifted
@@ -48,6 +54,10 @@ export default function Timeline({
   // the composited overlay layer has to honor the same eye toggles.
   const toggleV1 = onToggleV1 || (() => {})
   const toggleV2 = onToggleV2 || (() => {})
+  // A1's eye hides the bar. It does not change the render — a loaded bed
+  // always renders. a1Muted still silences the bed in the PREVIEW only, but
+  // there is no gutter control for it: it's set from App.jsx, not here.
+  const toggleA1 = onToggleA1 || (() => {})
   // focusedTrack/selectedId2/selectedPart2 are lifted to App.jsx (not local
   // state here) so the shared toolbar row, which lives in App.jsx, can
   // redirect to whichever track is focused.
@@ -67,6 +77,11 @@ export default function Timeline({
   function handleV2Files(files) {
     const file = files[0]
     if (file && onAddToV2) onAddToV2(file)
+  }
+
+  function handleA1Files(files) {
+    const file = files[0]
+    if (file && onAddToA1) onAddToA1(file)
   }
 
   const selectedClip = clips.find(c => c.id === selectedId)
@@ -120,6 +135,12 @@ export default function Timeline({
   }, [clips])
 
   const transport = useTimelinePlayback(clips, videoRef, handlePlaybackSelectClip, displayClips, positionPlayhead)
+
+  // V1's own timeline length — what the A1 bed is padded/cut to. The same sum
+  // the ruler and the playhead use, so the bed bar lines up with them; the
+  // render recomputes it on a frame grid, which can differ by a few ms under
+  // mixed fps (see build_timeline_filter's expected_secs).
+  const sequenceSec = transport.totalDuration
 
   // Keep the playhead pixel position in sync whenever the clip layout or the
   // (throttled) position state changes — covers seeks, edits, and the paused
@@ -419,6 +440,20 @@ export default function Timeline({
           />
         </div>
         <div className="flex items-center gap-1.5 justify-self-end">
+          {/* The primary render. Lives here rather than in the Preview header
+              so every render action sits in one row, and it reads left-to-right
+              as V1 then V2. Styled like Render V2 (outline, not a filled
+              button) since they're the same kind of action, in indigo because
+              that's V1's color everywhere else. Always present but disabled
+              with no clips — it's the main action, so it shouldn't vanish. */}
+          <button
+            onClick={onRender}
+            disabled={rendering || clips.length === 0}
+            title="Apply every V1 edit decision in one lossless pass and write the result to the export folder"
+            className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] rounded border border-indigo-600 text-indigo-400 hover:bg-indigo-900/40 disabled:border-neutral-700 disabled:text-neutral-600 disabled:hover:bg-transparent"
+          >
+            {rendering ? 'Rendering…' : 'Render V1'}
+          </button>
           {clips.length > 0 && track2Clips.length > 0 && (
             <button
               onClick={onReconstruct}
@@ -694,8 +729,81 @@ export default function Timeline({
               )
             })()}
             </div>
+
+            {/* A1 — the audio bed. Lives INSIDE timelineRef so the absolutely
+                positioned playhead spans it and click-to-seek covers it with
+                no extra math, exactly like V1 and V2. It has no gutter focus
+                button (a plain <span>, like the ANIM label above): the bed
+                isn't clip-shaped, so there's nothing for the clip toolbar or
+                the Delete key to act on. */}
+            <div className="border-t border-neutral-800">
+              <div className="flex items-stretch">
+                <div className="shrink-0 w-12 flex items-center justify-center gap-1 text-[9px] font-mono bg-neutral-800 text-emerald-500/80">
+                  <span title="A1 — audio bed, locked to the V1 sequence">A1</span>
+                  <button
+                    onClick={toggleA1}
+                    title={a1Visible ? 'Hide A1 content' : 'Show A1 content'}
+                    className={a1Visible ? 'text-current hover:text-emerald-300' : 'text-neutral-600 hover:text-neutral-400'}
+                  ><EyeIcon off={!a1Visible} /></button>
+                </div>
+                <div className="flex-1 relative">
+                  {!audioBed ? (
+                    <label
+                      onDragOver={e => { e.preventDefault(); setA1DragOver(true) }}
+                      onDragEnter={e => { e.preventDefault(); setA1DragOver(true) }}
+                      onDragLeave={() => setA1DragOver(false)}
+                      onDrop={e => { e.preventDefault(); setA1DragOver(false); handleA1Files(e.dataTransfer.files) }}
+                      className={`flex w-full items-center justify-center gap-1.5 px-3 h-8 text-[10px] cursor-pointer transition-colors ${a1DragOver ? 'bg-emerald-950/40 text-emerald-300' : 'bg-neutral-950/50 text-neutral-600 hover:text-neutral-400'}`}
+                    >
+                      <span>Drop music or voice-over to run under V1</span>
+                      <input
+                        type="file"
+                        accept=".wav,.mp3,.m4a,.aac,.flac,.aiff,audio/*"
+                        className="hidden"
+                        onChange={e => { handleA1Files(e.target.files); e.target.value = '' }}
+                      />
+                    </label>
+                  ) : (
+                    <div
+                      onClick={handleTimelineClick}
+                      className={`flex items-stretch bg-neutral-950 px-2 py-1 h-8 cursor-pointer transition-all ${!a1Visible ? 'opacity-35 grayscale pointer-events-none' : ''}`}
+                    >
+                      {/* `clips` + `gapPx` are what LINK the bed to V1: the bar
+                          lays itself out in V1's own coordinate space (per-clip
+                          rendered widths and the 2px flex gaps between them)
+                          rather than as one continuous sequenceSec*PPS span,
+                          and it starts at V1's picture start rather than at 0 —
+                          so a head hold pushes the bed forward with the video,
+                          exactly as the render's adelay does. */}
+                      <AudioBedBar
+                        bed={audioBed}
+                        clips={clips}
+                        sequenceSec={sequenceSec}
+                        pps={PPS}
+                        gapPx={GAP}
+                        muted={a1Muted}
+                        onRemove={onRemoveBed}
+                      />
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
           </div>
         </div>
+      )}
+
+      {/* Bed audio for the preview. Mounted here (not in App.jsx's preview
+          stage) because `transport` lives in this component — which does mean
+          the bed goes quiet on the AGENT/Reformat/Actions tabs, where the
+          Timeline unmounts. Acceptable for a best-effort preview. */}
+      {audioBed && clips.length > 0 && (
+        <AudioBedPlayer
+          bed={audioBed}
+          transport={transport}
+          muted={a1Muted}
+          startSec={sequenceVideoStartSec(clips)}
+        />
       )}
 
       <EdlTable clips={clips} selectedId={selectedId} onSelect={handleSelect} onDelete={handleDelete} />
