@@ -191,7 +191,7 @@ UNDER_50MB_MIN_AUDIO_BITRATE = 96_000
 #
 # Every other entry in EXPORT_QUALITIES is a fixed, hand-tuned recipe. "custom"
 # is the one whose flags come from data: a settings dict edited in the FFmpeg
-# Export Settings window (gear icon), persisted in .export_settings.json and in
+# Custom Settings window (gear icon), persisted in .export_settings.json and in
 # the .nara project, and validated by normalize_export_settings() below before
 # it ever reaches an ffmpeg argv. It is otherwise the same shape of mode as
 # under50mb*: two-pass ABR under a hard byte cap, enforced by measurement.

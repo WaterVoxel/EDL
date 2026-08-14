@@ -7,9 +7,9 @@ ever re-encoding a pixel unless you explicitly ask it to, and exactly
 what happens to your data at each step of a render.
 
 It assumes you already know what the app does from a user's
-perspective (see README.txt for that, or click the app's title for the
-in-app About dialog). This is the "how" document, written for someone
-reading or modifying the code.
+perspective (see README.txt for that, or click the document icon in
+the top bar for the in-app About dialog). This is the "how" document,
+written for someone reading or modifying the code.
 
 
 CONTENTS
@@ -17,15 +17,18 @@ CONTENTS
  1. What this app actually is
  2. System topology (two servers, no shell, no auth)
  3. The core idea: edits are decisions, not media operations
- 4. THE LOSSLESS PIPELINE (encode_args)
+ 4. EXPORT QUALITY MODES: lossless, size-capped, and custom
  5. THE RENDER FILTER GRAPH (build_timeline_filter), step by step
  6. Frame-accurate math: epsilons, frame budgets, and why they matter
  7. The clip data model
- 8. Two-track timeline: V1, V2, Analyze, Reconstruct
- 9. Preview transcoding is fully isolated from the lossless path
-10. The Agentic Assistant Editor and its security model
-11. Backend API reference
-12. Known sharp edges
+ 8. Three tracks: V1, V2, A1 -- Analyze, Reconstruct, overlay, bed
+ 9. The A1 stem render (audio alone, timed to the picture)
+10. Reformat: the one-shot resize outside the timeline
+11. Preview transcoding is fully isolated from the lossless path
+12. The Agentic Assistant Editor and its security model
+13. What persists on disk
+14. Backend API reference
+15. Known sharp edges
 
 
 1. WHAT THIS APP ACTUALLY IS
@@ -46,6 +49,14 @@ identical to the corresponding pixel in your source -- verified by
 comparing raw frame hashes, not by eye and not by a similarity score
 like PSNR.
 
+Three of the six export modes deliberately break that promise, and say
+so: the size-capped modes (Under 50MB, Under 50MB HEVC, and Custom)
+trade bit-exactness for a hard, VERIFIED byte ceiling, because
+"lossless AND always under N megabytes" is unsatisfiable for arbitrary
+footage -- entropy depends on content. Those modes still render the
+timeline in one pass over the same filter graph; only the encoder
+settings differ, and they run that pass twice (see section 4).
+
 
 2. SYSTEM TOPOLOGY
 --------------------
@@ -53,13 +64,21 @@ like PSNR.
 Two processes run side by side:
 
     Flask backend      127.0.0.1:5001   app.py
-    Vite dev server    127.0.0.1:5173   frontend/ (React UI)
+    Vite dev server    localhost:5173   frontend/ (React UI)
 
 The Vite dev server proxies /api, /input, /output, and /preview
 requests straight through to Flask (see frontend/vite.config.js), so
 the browser only ever talks to one origin and no CORS handling exists
 anywhere in the code. The React UI is 100% dependent on Flask being up
 -- every fetch 404s otherwise.
+
+One practical note for anything that talks to the dev server from a
+script rather than a browser: Vite is left at its default host, which
+on this machine binds IPv6 localhost ONLY. "curl
+http://127.0.0.1:5173/" is refused while "curl http://[::1]:5173/"
+works. Browsers resolve localhost themselves and are unaffected;
+curl-based checks have to use the bracketed IPv6 form. Flask is on
+IPv4 127.0.0.1:5001 as written.
 
 Flask also serves a second, much older UI directly at
 http://127.0.0.1:5001/ (templates/index.html + static/app.js, plain
@@ -76,9 +95,9 @@ Every trim, hold, reverse, speed change, or crop you make in the UI is
 stored as plain data on a JavaScript object -- nothing touches a file
 on disk. The timeline is not a working copy of your media; it is a
 list of decisions about how to eventually build one. Nothing is
-written to output/ until you click Render, at which point the ENTIRE
-decision list is sent to the backend in one HTTP request and rendered
-in one ffmpeg process.
+written to the export folder until you click Render, at which point the
+ENTIRE decision list is sent to the backend in one HTTP request and
+rendered in one ffmpeg process.
 
 This matters technically for two reasons:
 
@@ -99,21 +118,42 @@ reversed flag, and speed, per clip, in SMPTE-style timecode. You can
 export this list as a CMX-style .edl text file, or export/import the
 whole timeline as a .nara JSON file to resume editing later.
 
+Two things on the timeline are SEQUENCE-level decisions rather than
+per-clip ones, and travel in the render request beside the clip list
+instead of inside it: the A1 audio bed (section 8) and the A1 Room
+Tone toggle (section 5). "Render without audio" is a third, chosen per
+render in the render dialog rather than stored at all.
 
-4. THE LOSSLESS PIPELINE (encode_args, in ffmpeg_utils.py)
+
+4. EXPORT QUALITY MODES: LOSSLESS, SIZE-CAPPED, AND CUSTOM
 --------------------------------------------------------------
 
-This is the single most important function in the codebase for the
-app's core claim. It picks the ffmpeg encoder flags for whichever of
-three quality modes is active, and the choice made for the default
+encode_args() (ffmpeg_utils.py) is the single most important function
+in the codebase for the app's core claim. It picks the ffmpeg encoder
+flags for the active quality mode, and the choice made for the default
 mode is deliberately unusual and hand-verified rather than copied from
 common advice.
 
-Three modes:
+Six modes (EXPORT_QUALITIES), chosen globally in Export Settings and
+stored in .export_settings.json:
 
-    lossless (default)   -qp 0            bit-exact, largest files
-    match                ABR at source bitrate, capped 1.5x   ~same size
-    high                  CRF 18            visually lossless, smallest
+    lossless (default)  -qp 0             bit-exact, largest files
+    match               ABR at source bitrate, 1.5x cap  ~same size
+    high                CRF 18            visually lossless, smaller
+    under50mb           two-pass libx264  hard 50MB cap, verified
+    under50mb_hevc      two-pass libx265  same cap, better + slower
+    custom              two-pass, your own flags and your own cap
+
+The first three ARE an encode_args() list: one ffmpeg invocation, one
+pass. The last three cannot be expressed that way at all -- they need
+two full ffmpeg invocations plus a measure-and-retry loop -- so they
+are named in MULTIPASS_QUALITIES and every render route checks that
+membership before falling through to the single-pass path. All six
+render routes hand the same input/filter args to one dispatcher,
+app.multipass_export_render(), which routes to render_size_capped()
+(the two fixed 50MB modes) or render_custom_two_pass() (Custom) and
+raises RuntimeError on failure so each route's existing error handling
+reports it unchanged.
 
 LOSSLESS MODE: WHY -qp 0 AND NOT -crf 0
 
@@ -165,16 +205,116 @@ HIGH MODE
 CRF 18 -- visually lossless to the eye, usually noticeably smaller
 than the source, no bit-exactness guarantee.
 
-AUDIO -- IDENTICAL IN ALL THREE MODES
+THE SIZE-CAPPED MODES (under50mb, under50mb_hevc)
+
+render_size_capped() renders the same filter graph twice and then
+weighs the result:
+
+  1. target_bitrate_for_size() splits the byte budget into a video
+     and an audio bitrate: budget = 50MiB * 8 * 0.92 bits (the 0.92
+     absorbs container/muxing overhead), audio held at the source's own
+     rate with a 96 kbps floor, video taking whatever is left. If that
+     would starve video below MIN_VIDEO_BITRATE (100 kbps), video
+     claims its floor first and audio is squeezed down to as low as
+     32 kbps -- video is the dimension being asked to look as good as
+     possible, so it gets first claim.
+  2. Pass 1 encodes video only, with its output thrown away
+     (-f null /dev/null), purely to write a per-frame complexity map.
+  3. Pass 2 re-encodes against that map and muxes the real file.
+  4. The finished file is MEASURED with os.path.getsize. If it still
+     exceeds the cap, the bitrate is shrunk 15% (0.85 ** attempt) and
+     both passes run again, up to 4 attempts.
+
+Two-pass is a deliberate choice over the alternatives: CRF has no size
+guarantee at all (it targets a quality level, and size follows from
+content), and single-pass ABR cannot see the whole file's complexity in
+advance, so its real output routinely drifts several percent off
+target. Two-pass plus measurement is what lets this mode claim a hard
+cap rather than an estimate.
+
+Codec differences here are measured, not assumed. libx264 uses
+-pass N -passlogfile <prefix>. libx265 has no such options at all;
+two-pass is expressed as -x265-params "pass=N:stats=<file>" -- but it
+DOES honour the same top-level -maxrate/-bufsize flags (confirmed via
+the encoded stream's own reported CPB properties), so those need no
+codec branch. The stats/log files each encoder leaves behind have
+different suffixes (_PASSLOG_SUFFIXES) and are cleaned up in a finally
+block. HEVC output is not in BROWSER_SAFE_VIDEO_CODECS, so previewing
+an HEVC export in-app automatically goes through the transcode path in
+section 11 -- it is a delivery format, not a working one.
+
+THE CUSTOM MODE
+
+Custom is the same shape of mode with every value taken from data
+instead of hardcoded. The settings live in the "custom" block of
+.export_settings.json, are edited in the FFmpeg Custom Settings window
+(the gear in the top bar), and are validated by
+normalize_export_settings() before they can reach an ffmpeg argv:
+
+    target_mib     the hard cap                    (default 50.0)
+    safety         fraction of the budget used     (default 0.90)
+    codec          libx265 | libx264               (default libx265)
+    preset         ultrafast .. veryslow           (default slow)
+    profile        per-codec allowlist             (default main10)
+    pix_fmt        p010le | yuv420p10le | yuv420p  (default
+                                                    yuv420p10le)
+    maxrate_mult   x bitrate                       (default 0.95)
+    bufsize_mult   x bitrate                       (default 1.5)
+    extra_args     free-text raw ffmpeg flags      (default empty)
+
+The bitrate formula is exactly as specified for this mode:
+
+    kbps = (target_bytes * 8 * safety) / duration_s / 1000
+
+Note what that deliberately does NOT do, in contrast to
+target_bitrate_for_size() above: it hands the WHOLE byte budget to
+video and reserves nothing for audio. The AAC track is muxed on top,
+which is what the safety headroom is there to absorb, and the
+measure-and-retry loop (identical to the one above) is what actually
+enforces the cap. Two consequences worth knowing: with the default
+0.90 headroom and a maxrate BELOW the average bitrate (0.95x), VBV
+holds the real file at roughly 0.84-0.86 of the cap rather than right
+against it; and on a long render with high-bitrate source audio, audio
+can eat enough of the budget that the first attempt overshoots and a
+retry is needed -- each retry re-encodes both passes, so it costs real
+time. Lower the headroom for those rather than expecting the formula
+to account for audio.
+
+The extra-args field is validated STRUCTURALLY, not by blocking
+characters: the string is shlex.split into an argv list, the first
+token must look like a flag, a whole "ffmpeg ..." command is rejected,
+anything in _EXTRA_ARG_CONFLICTS is rejected with the reason why
+(-i, -pass, -vf/-filter_complex, -b:v, -maxrate, -c:v, -preset, -y and
+friends -- each either owned by the two-pass machinery, computed from
+the target size, or already covered by a field in the window), and any
+token that looks like a path must resolve inside input/ or the export
+directory. There is no character blocklist for the same reason as in
+section 12: subprocess.run always receives an argv list, never a shell
+string. Output-only flags such as -movflags or -tag:v hvc1 are safe to
+put here -- measured: the null muxer in pass 1 silently ignores them,
+so the same argv can ride in both passes.
+
+Named PRESETS (bundles of all nine fields, {name, settings}) are saved
+in the same file, capped at 200, unique case-insensitively (macOS
+filesystem semantics), and are copied into every .nara project so a
+project travels with its delivery settings. "Preset" therefore means
+two different things in this feature and the wire format keeps them
+apart: ffmpeg's -preset speed knob is custom_options.encoder_presets,
+the saved bundles are presets.
+
+AUDIO
 
 Audio is lossy (AAC) by nature regardless of mode, so there is no
 "lossless audio" mode to offer. What the app does instead is refuse to
 let the encoder degrade audio any further than the source already was:
 bitrate is set to whichever is higher of the source's own audio
-bitrate or a 192 kbps floor, and sample rate / channel count are
-copied from the source rather than left at ffmpeg's defaults (which
-would silently resample/downmix). This is the one place lossy is
-unavoidable, so the code's job is damage control, not perfection.
+bitrate or a floor, and sample rate / channel count are copied from the
+source rather than left at ffmpeg's defaults (which would silently
+resample/downmix). The floor is 192 kbps in the three single-pass
+modes; the size-capped modes use a lower one (96 kbps) and may squeeze
+below it, because there the audio bitrate is competing with video for a
+fixed byte budget. This is the one place lossy is unavoidable, so the
+code's job is damage control, not perfection.
 
 VERIFICATION METHODOLOGY
 
@@ -191,25 +331,58 @@ or encode_args changes.
 
 /api/render_timeline takes the whole clip list and calls
 build_timeline_filter() once to produce a single ffmpeg -filter_complex
-string. Every clip's crop, holds, trim, reversal, and speed change are
-expressed as one continuous chain of filters feeding into one shared
-concat node -- the entire timeline renders in one ffmpeg process, one
-encode pass, no intermediate files.
+string. Every clip's overlay, crop, holds, trim, reversal, and speed
+change are expressed as one continuous chain of filters feeding into
+one shared concat node -- the entire timeline renders in one ffmpeg
+process, one encode pass, no intermediate files. (For the three
+size-capped modes that one graph is run twice, unchanged, by the
+two-pass machinery in section 4.)
 
 Per clip, in this exact order:
 
-    STEP 0  crop            (if a crop box was set)
-    STEP 1  lead hold       (if this is the first clip)
-    STEP 2  trim -> reverse -> speed stretch   (the main body)
-    STEP 3  trail hold      (if this is the last clip)
-    STEP 4  concat the above 1-3 pieces into one clip segment
-    STEP 5  scale/pad/fps-normalize to the timeline's common canvas
-    STEP 6  hard-cap the frame count (see section 6)
+    STEP 0  overlay composite  (if a V2 region is placed back on)
+    STEP 1  crop               (if a crop box was set; animatable)
+    STEP 2  split              (if that filtered source feeds more
+                                than one chain below)
+    STEP 3  lead hold          (if this is the first clip)
+    STEP 4  trim -> reverse -> speed stretch   (the main body)
+    STEP 5  trail hold         (if this is the last clip)
+    STEP 6  concat the above pieces into one clip segment
+    STEP 7  scale/pad/fps-normalize to the timeline's common canvas
+    STEP 8  hard-cap the frame count (see section 6)
 
 Then all clips' normalized segments are concatenated once more into
-the final [outv][outa] output.
+the final output labels.
 
-STEP 0 -- CROP COMES FIRST, BEFORE ANYTHING ELSE
+STEP 0 -- OVERLAY COMES FIRST, BEFORE THE CROP
+
+An overlay is a region that was cropped OUT of this clip, processed by
+some external tool, and is being placed back exactly where it came
+from, following the same animated path (see section 8 for the feature;
+this is just its position in the graph). Its input is time-aligned to
+the clip's own trim window with setpts=PTS-STARTPTS+in_sec/TB, because
+the processed region starts at frame 0 of its own file but belongs at
+in_sec on the source's clock.
+
+A clip may carry BOTH an overlay and a crop, and the order is
+load-bearing: compositing first and cropping second is the only order
+that works, because cropping first would throw away the very pixels
+the overlay is meant to be placed back onto. In practice the app never
+sends both for the same clip -- clipsToPayload nulls an overlaid
+clip's crop, since the whole point is the full original frame with the
+processed region on top -- but the graph supports it and the ordering
+is what makes that safe.
+
+eof_action=pass and repeatlast=0 mean a shorter overlay simply stops
+compositing (the background continues untouched) instead of freezing
+its last frame over the rest of the clip, and never truncates the
+render to the overlay's length. Hand-verified: with an overlay
+covering source t=1..4 of a 5s background, frames outside that window
+come back pixel-clean, the output keeps its full 150-frame length, and
+the region the overlay never touches is BIT-EXACT against the same
+render without it.
+
+STEP 1 -- CROP, BEFORE THE TRIM AND THE HOLD SAMPLING
 
     [0:v]crop=W:H:X:Y[vsrc0]
 
@@ -222,7 +395,26 @@ once for the main body), doubling the chance of the two drifting out
 of sync. Cropping once, upstream of everything, guarantees the hold
 freeze and the main footage are always cropped identically.
 
-STEP 1 & 3 -- HOLD (FROZEN FRAME) MECHANICS
+The crop box can be ANIMATED: a clip may carry a list of keyframes,
+each an (t, x, y) position in SOURCE time, and the box then pans
+linearly between them. That is expressed as a piecewise-linear
+if(lt(t,...)) expression built by one module-level generator
+(keyframe_ladder), which serves the animated crop and the animated
+overlay position both. Because both filters sit here -- upstream of
+trim, reverse and speed -- their `t` is always source time, and holds,
+reversal, slow motion and concat all inherit correct behavior with no
+animation-specific handling anywhere downstream. This is the single
+biggest reason the ordering in this section is fixed.
+
+STEP 2 -- SPLIT WHEN ONE FILTERED SOURCE FEEDS SEVERAL CHAINS
+
+A raw input pad ([0:v]) can be read by several filters and ffmpeg
+auto-splits it, but a FILTER-PRODUCED label cannot be consumed twice.
+Once a clip has an overlay or a crop, its per-clip source is
+filter-produced, so if the lead hold, the main body and the trail hold
+all need it, an explicit split=N is inserted first.
+
+STEP 3 & 5 -- HOLD (FROZEN FRAME) MECHANICS
 
 A hold is built as: isolate exactly one source frame with trim, reset
 its timestamp to zero, then use ffmpeg's loop filter to repeat that
@@ -235,9 +427,8 @@ loop's size=1 means its buffer holds exactly one frame; N is
 round(hold_seconds * fps) - 1, because trim's own output already
 counts as the first occurrence of that frame, so only N additional
 repeats are needed to reach the target frame count. The hold's audio
-is pure digital silence for the hold's exact duration (anullsrc) --
-there is no "real" audio for a frame that never actually played, so
-silence is the only accurate representation, not an approximation.
+is a gap of the hold's exact duration -- pure digital silence by
+default, or room tone if A1 Room Tone is on (see below).
 
 WHICH TIMESTAMP A HOLD FREEZES ON FLIPS UNDER REVERSAL
 
@@ -252,7 +443,7 @@ frozen frame and the first frame of playback. The trail hold mirrors
 this in the opposite direction. This swap is driven by a single
 ternary keyed on the clip's reversed flag.
 
-STEP 2 -- TRIM, THEN REVERSE, THEN SPEED (in that fixed order)
+STEP 4 -- TRIM, THEN REVERSE, THEN SPEED (in that fixed order)
 
     [vsrc0]trim=start=IN:end=OUT,setpts=PTS-STARTPTS,reverse,
            setpts=(1/speed)*PTS[vmain0]
@@ -270,7 +461,7 @@ Speed itself is a pure PTS stretch: setpts=(1/speed)*PTS with speed in
 (0, 1] multiplies every frame's presentation timestamp by a factor
 greater than or equal to 1, holding each frame on screen longer. NO
 interpolation happens and NO frames are generated -- when the
-downstream fps-normalization step (Step 5) resamples this stretched,
+downstream fps-normalization step (Step 7) resamples this stretched,
 now-sparser timeline back onto a constant frame rate, it fills the gap
 by repeating existing frames, not by inventing new ones.
 
@@ -283,7 +474,7 @@ speed) below 12 fps, since below that threshold slow motion stops
 reading as smooth and starts reading as a stutter -- this is a
 perceptual-quality guard enforced server-side, not a filter limitation.
 
-STEP 4 -- CONCAT THE PER-CLIP PIECES
+STEP 6 -- CONCAT THE PER-CLIP PIECES
 
 Whichever of [lead hold, main body, trail hold] actually exist for
 this clip (1 to 3 pieces) are concatenated into one per-clip segment.
@@ -291,7 +482,17 @@ If there's only one piece, concat is skipped entirely (ffmpeg's concat
 filter requires at least 2 inputs, so calling it with 1 would be
 invalid).
 
-STEP 5 -- NORMALIZE EVERY CLIP TO ONE SHARED CANVAS
+A hold's silence is what OFFSETS that clip's own audio: the gap piece
+is concatenated ahead of the main audio in the same order the freeze is
+prepended to the video, so a head hold pushes the clip's dialogue later
+by exactly the hold and the two tracks stay frame-aligned. That makes
+the gap's LENGTH load-bearing -- it is quantized to lead_frames/fps
+(the freeze's own frame count), never the raw requested hold, because a
+hold that isn't a frame multiple would otherwise run the audio late
+against the picture and lose the overflow off the tail to the per-clip
+atrim.
+
+STEP 7 -- NORMALIZE EVERY CLIP TO ONE SHARED CANVAS
 
     scale=W:H:force_original_aspect_ratio=decrease,
     pad=W:H:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=FPS
@@ -304,14 +505,106 @@ padded with black) to exactly fill that canvas, then resampled to the
 shared frame rate -- all of which ffmpeg's concat filter requires
 every input to already agree on. The target width/height/fps
 themselves are computed as the MAXIMUM across every clip in the
-timeline (using each clip's post-crop size if it was cropped), so nothing
-in the timeline is ever downscaled to match a smaller neighbor -- only
-smaller clips get scaled up to match the biggest one.
+timeline (using each clip's post-crop size if it was cropped), so
+nothing in the timeline is ever downscaled to match a smaller
+neighbor -- only smaller clips get scaled up to match the biggest
+one. Overlays deliberately do not influence that target: the frame
+size is V1's.
 
-STEP 6 -- THE HARD FRAME-COUNT CAP
+STEP 8 -- THE HARD FRAME-COUNT CAP
 
 Covered in detail in the next section, because it's the kind of bug
 you can't see until you go looking for it with exact frame hashes.
+
+THE THREE TERMINAL FORMS OF THE GRAPH
+
+The graph ends in one of exactly three ways, and [outa] is the
+contract every one of them honors, so the caller's -map "[outa]" never
+has to change:
+
+  - no_audio=True -- clips are concatenated with a=0 and the graph
+    declares [outv] ONLY. Adding -an instead is NOT a substitute and
+    was measured: -an disables an INPUT stream, and these audio chains
+    reference [i:a] directly, so ffmpeg fails with "Cannot decode a
+    disabled input stream". The caller must also drop -map "[outa]",
+    since mapping a label the graph never declared is a hard error.
+  - no bed -- straight to [outv][outa], the ordinary case.
+  - with an A1 bed -- clips concat to [outv][aseq], the bed's own
+    branch builds [abed], and the two are summed into [outa].
+
+no_audio combined with a bed (or with the room tone fill) is
+structurally impossible and raises ValueError -> 400; the frontend
+drops both whenever "Render without audio" is checked, so the two
+never reach the builder together.
+
+THE A1 BED BRANCH
+
+The bed (section 8 for what it is) is a purely audio-side addition: it
+cannot change a single video frame, hand-verified by framemd5 across
+no-bed / short / long / exact-length beds. Its branch is
+adelay=delays=<ms>:all=1 -> aformat -> apad=whole_dur=N ->
+atrim=end=N -> asetpts -> volume=BED_GAIN, mixed with
+amix=inputs=2:duration=first:dropout_transition=0:normalize=0.
+
+Every parameter there is measured rather than assumed:
+
+  - normalize=0 makes amix an exact unity-gain SUM (verified to within
+    ~1e-8 over 485100 samples), so V1's own dialogue keeps its level.
+    normalize=1 would duck it 6 dB, which is why the bed is attenuated
+    on its own branch (BED_GAIN = 0.35) instead.
+  - duration=first is what makes the bed length-agnostic: it pads a
+    short bed AND cuts a long one. With duration=longest, a 20s bed on
+    a 5.5s sequence produced a 20.01s audio track against 5.5s of
+    video.
+  - aformat must come BEFORE apad. Resampling after padding shifted
+    the tail by 14 samples -- a determinism problem, not an audible
+    one, but it breaks hash verification.
+  - aresample=async=1 must NEVER be added here. It may insert or drop
+    samples, which would make renders non-reproducible.
+  - N is sum(expected_secs) -- the frame-quantized per-clip truth, not
+    a wall-clock duration. The two drift by up to 0.076s under mixed
+    fps plus slow motion (exactly 0 at uniform fps).
+  - all=1 on adelay is required: without it, adelay shifts only the
+    channels it was given delays for, so a stereo bed comes out with
+    one channel early.
+
+The delay is the first clip's head hold, frame-quantized exactly like
+the hold's own gap. A hold freezes a frame BEFORE the clip proper
+begins, so a bed starting at 0 would play music over that frozen frame
+and land out of step with the cut. Because adelay PREPENDS silence
+rather than shifting PTS, the downstream apad/atrim still measure from
+0: a 1s hold means 1s of leading silence and 1s less bed heard, never
+a render that runs 1s long. Past the head the bed is padded flat across
+the sequence and never sees a per-clip transform, so it is
+TIMELINE-LOCKED -- it plays straight through mid-sequence holds,
+reverse and slow motion. Both frontend mirrors follow the same rule:
+AudioBedPlayer slaves a hidden <audio> to the transport clock minus
+that offset (parked paused at 0 while the offset is negative), and
+AudioBedBar measures its geometry against V1's actual per-clip pixels.
+
+ROOM TONE IN THE GAPS (the A1 Room Tone toggle)
+
+By default every gap the graph creates is anullsrc -- pure digital
+silence. With the toggle on, the HOLD gaps are filled with room tone
+from a fixed asset instead (frontend/assets/Audio_NOISE.wav; the path
+is server-side, the request sends only a boolean). Two rules, both about
+room tone never being audible alongside real audio:
+
+  - Hold gaps only. A slowed segment's gap and a silent source's body
+    are gaps too, but each runs as long as the picture it carries, so
+    filling them would make the tone a bed under moving video rather
+    than a patch over a frozen frame. Those stay silent.
+  - With an A1 bed loaded, the TRAIL gap drops back to silence as
+    well, because the bed is summed over the sequence's end. The head
+    gap needs no such guard -- the bed is delayed past it by
+    construction.
+
+One generator (gap_chain) emits every gap, so silence and room tone
+can never disagree about a gap's LENGTH, only about its contents. The
+asset is ~3s and 48k stereo, so each gap aloops it, atrims to the
+exact quantized gap length, and aformats to the graph's rate/layout
+last. Switching the toggle cannot move a single sample of real
+dialogue or change one video frame.
 
 
 6. FRAME-ACCURATE MATH: EPSILONS, FRAME BUDGETS, AND WHY THEY MATTER
@@ -339,7 +632,7 @@ direction the float error happened to go.
 THE HARD FRAME-COUNT CAP (why every per-clip chain ends in a trim)
 
 The whole filter_complex graph runs on an internal microsecond
-timebase. The fps= normalization filter (Step 5, previous section)
+timebase. The fps= normalization filter (Step 7, previous section)
 can, on rare boundary cases, emit ONE extra duplicate frame at the end
 of a clip's segment -- an end timestamp that lands exactly on a frame
 tick can round up instead of down. Left alone, that single spurious
@@ -359,6 +652,12 @@ produce one. The clip's audio track is padded or cut to match that
 same exact duration, so video and audio segment lengths are always
 forced identical -- a mismatch there is what would otherwise cause
 progressive audio/video drift down the timeline.
+
+That per-clip triple -- (lead_frames, trail_frames, expected_sec) --
+is computed by ONE function, clip_timing(), extracted from
+build_timeline_filter precisely so the A1 stem render (section 9) can
+derive its length from the same arithmetic rather than a parallel
+implementation that could drift from it.
 
 OUT-OF-BOUNDS HOLD SAMPLING (the container-vs-video-duration trap)
 
@@ -406,6 +705,9 @@ this exact shape:
     speed              slow-motion multiplier in (0, 1]; 1 = normal
     crop               { key, w, h, x, y } in source-pixel coordinates,
                        or null
+    cropKeyframes      [] or a list of { t, x, y } positions in SOURCE
+                       time; when non-empty the crop box pans linearly
+                       between them (section 5, Step 1)
     dirty              true if this clip has unrendered changes
     displayName        optional UI label override (used by Splice,
                        Analyze, Reconstruct so a derived clip's label
@@ -423,18 +725,55 @@ length on the timeline is (outSec - inSec) / speed -- slowing a clip
 to 0.5x DOUBLES its footprint on the timeline, which is why the
 timeline visually stretches a clip when you slow it down.
 
+WHAT GOES ON THE WIRE IS NOT THIS OBJECT
 
-8. TWO-TRACK TIMELINE: V1, V2, ANALYZE, RECONSTRUCT
-------------------------------------------------------
+clipsToPayload() converts clips into the render request, and the two
+shapes differ deliberately:
+
+  - Only the timing/decision keys are sent. fps, resolution and audio
+    presence are NOT -- the server re-probes every file itself
+    (section 15).
+  - An overlaid clip is sent with crop and cropKeyframes NULLED, and
+    an `overlay` object attached instead ({input, dir, inSec, outSec,
+    x, y, w, h, keyframes}) -- see section 8.
+  - audioBed, fillNoise and noAudio ride BESIDE the clip list, not
+    inside it: they are sequence-level, not per-clip.
+
+
+8. THREE TRACKS: V1, V2, A1 -- ANALYZE, RECONSTRUCT, OVERLAY, BED
+--------------------------------------------------------------------
 
 V1 is the timeline of record: it drives the playhead, the transport
 controls, the ruler, and the undo history. V2 is a scratch reference
 lane, deliberately kept OUTSIDE the undo history, because its usual
 job is to hold a single freshly-dropped file until Analyze reshapes it
 -- it's meant to be rebuilt from a rule, not hand-edited step by step.
-When both tracks have content, V2 composites "on top" of V1 for
-preview purposes only, the way a video track sits on top of another in
+"Outside undo" means only that Cmd/Ctrl+Z never reaches it: V2 is
+otherwise a fully editable clip list, with Trim/Hold/Reverse/Speed/
+Crop/Duplicate/Splice/Raise, drag-to-reorder and per-hold-segment
+delete all working exactly as they do on V1. One shared toolbar serves
+both, redirected by `focusedTrack` (which track was last clicked) --
+the nine toolbar components never learn which track they are editing;
+App.jsx hands them whichever track's clips, setter and selection are
+current. When both tracks have content, V2 composites "on top" of V1
+for preview purposes, the way a video track sits on top of another in
 a conventional NLE; V1's own timing is unaffected either way.
+
+A1 is a third lane under V1 holding exactly ONE audio file -- the bed
+(music or voice-over). "Smart" means it owns no timing of its own: it
+is linked to V1, starting where V1's PICTURE starts, padded with
+silence if shorter than the sequence and cut if longer, so it cannot
+drift out of sync no matter how V1 is re-edited. It MIXES with V1's
+own audio rather than replacing it, attenuated by a fixed gain since
+there is no volume control. Section 5 covers the graph and every
+measured parameter. The bed is not clip-shaped -- no head/tail/round
+segments, no edge-drag trim, no reorder -- so it is deliberately not
+part of `focusedTrack`, and its gutter has an eye toggle but no focus
+or mute button. Audio files are accepted into the media bin for this
+one purpose (AUDIO_EXTENSIONS is separate from the video-only
+ALLOWED_EXTENSIONS that clips and overlay sources gate on), and a bed
+can only be added once V1 has a clip, because a bed with no V1 has no
+length to take.
 
 ANALYZE clones V1's entire cut structure -- the same IN/OUT points and
 the same hold durations, clip for clip -- onto whatever file was
@@ -494,17 +833,119 @@ footage comes back from outside the app:
               pretending to restore them.
 Requires clips on both V1 and V2.
 
-Either track can be rendered independently through the exact same
-lossless pipeline described in sections 4 and 5.
+V2 AS AN OVERLAY (the composite render)
+
+The round-trip above loses the crop, and the overlay feature is what
+recovers it: instead of REPLACING V1, a V2 clip can be composited back
+onto V1 at the crop box's animated position -- crop a moving region out
+of V1, run it through an external tool, drop the result on V2, and put
+it back exactly where it came from. Which V2 clips do that is decided
+entirely by frontend/src/overlayMatch.js, and its rules are
+deliberate:
+
+  - The TRIGGER is a resolution difference and nothing else. V2 not
+    equal in size to V1 means overlay; equal size means the
+    pre-existing full-frame replacement. No flag, no opt-in.
+  - The size must match the crop box EXACTLY or the pairing is refused
+    with a warning in the Actions log. Nothing is resampled: a 961x960
+    file next to a 960x960 box is an upstream mistake, and silently
+    scaling it would bake a soft, misaligned region into an otherwise
+    lossless render. (A warning, not an alert -- the match is derived
+    continuously, so an alert would fire on every keystroke of a
+    resize.)
+  - Pairing is POSITIONAL -- 1st V2 clip onto 1st V1 clip, 2nd onto
+    2nd -- each inheriting that V1 clip's own crop box and keyframes.
+  - The crop becomes a PLACEMENT RECT, not a crop: the overlaid V1
+    clip renders uncropped (section 7), because the point is the full
+    original frame with the processed region on top.
+
+There is exactly one way to reach a composite render: the A / A/B
+switch beside Render V2. In A (default) Render V2 renders the V2 track
+alone, as before. In A/B it renders V1 with the overlays attached, and
+is deliberately MORE permissive in one specific way: it passes
+fullFrameSameSize, so a V2 clip matching V1's resolution becomes a
+full-frame overlay at 0,0 rather than an ordinary track replacement --
+which is exactly what "put V2 on top of V1" means when the two are the
+same size. The exception is a CROPPED V1 clip: it renders at its crop
+box, so a source-sized V2 over it has two possible meanings and is
+refused with an explanation rather than guessed. The live overlay
+layers in the preview are purely visual (a second <video> element per
+overlay); nothing but an A/B render produces overlay specs.
+
+Either picture track can be rendered independently through the exact
+same pipeline described in sections 4 and 5.
 
 
-9. PREVIEW TRANSCODING IS FULLY ISOLATED FROM THE LOSSLESS PATH
+9. THE A1 STEM RENDER (AUDIO ALONE, TIMED TO THE PICTURE)
+-------------------------------------------------------------
+
+Render A1 (/api/render_a1) renders the A1 track BY ITSELF to a .wav
+that is exactly as long as the equivalent V1 render, so it drops into
+another tool already in sync. Codec is always pcm_s16le -- this is a
+stem to mix elsewhere, so it never uses the lossy export-quality
+codec, and there is no quality choice to make (hence no render
+dialog).
+
+It is deliberately built out of the V1 graph's own parts rather than as
+a parallel implementation: clip_timing() (section 6) supplies the
+length, and the bed chain is reproduced node for node from
+build_timeline_filter -- adelay -> aformat -> apad -> atrim -> asetpts
+-> volume, summed with the same amix settings -- then mixed against a
+gap layer of head/middle/tail pieces that follows the identical room
+tone rule (head hold always eligible, trail hold only when there is no
+bed).
+
+NO CLIP IS OPENED AS AN FFMPEG INPUT. The clips are probed for fps and
+video_duration and nothing else; only the bed and the room tone asset
+are opened. That is why an A1 render costs about a second on a
+timeline that takes minutes to render as video.
+
+Verified against the equivalent V1 render: identical sample count
+(3.500000s single clip; 7.000000s on a 3-clip mixed-fps timeline with
+a reversal, a 0.5x slow-down, a 0.51s head hold and a tail+round
+hold), head room tone BIT-IDENTICAL, body equal to
+V1(with bed) - V1(without bed) within 1 LSB, and with room tone only
+(no bed) both holds bit-identical to V1's. One measured imperfection:
+with a bed, the last 6 of 44100 tail samples differ by 1 LSB (about
+-90 dBFS) -- the resampler's end-of-stream flush landing in a shorter
+graph, not an alignment error.
+
+
+10. REFORMAT: THE ONE-SHOT RESIZE OUTSIDE THE TIMELINE
+----------------------------------------------------------
+
+/api/reformat scales ONE file down to fit inside a (resolution tier,
+aspect ratio) bounding box and writes a brand-new file. It is the one
+render in the app that has nothing to do with the timeline: it takes no
+clip list, needs no clips at all, and acts on whatever is selected in
+the Media Bin. Its UI is the Reformat tab of the center dock.
+
+    resolutions   480p, 720p, 1080p, 4K
+    ratios        16:9, 4:3, 1:1, 3:4, 9:16, 21:9, or "adaptive"
+
+CONTAIN-FIT, NEVER UPSCALED, NEVER LETTERBOXED: the output dimensions
+are whatever the proportional scale-down produces, so the source's own
+aspect ratio survives exactly and no black bars are added (unlike the
+timeline's own normalization step, which must pad because concat
+demands one canvas). "adaptive" is the special ratio that keeps the
+SOURCE's aspect ratio, sized to roughly that tier's pixel budget.
+
+It reads from input/ or the export directory and never modifies the
+source, always writes to the export directory (like render_timeline,
+never back into the media bin), auto-numbers the filename on
+collision, and honors the active export quality mode -- including the
+three two-pass ones, through the same multipass_export_render
+dispatcher.
+
+
+11. PREVIEW TRANSCODING IS FULLY ISOLATED FROM THE LOSSLESS PATH
 ---------------------------------------------------------------------
 
 Browsers cannot natively decode many of the codecs this app is
 specifically built to edit losslessly -- ProRes, DNxHD, 10-bit sources,
-and others. get_or_make_preview() solves this without ever touching
-the lossless render path:
+HEVC (including this app's own HEVC exports), and others.
+get_or_make_preview() solves this without ever touching the lossless
+render path:
 
   - If a source is already browser-safe (H.264/VP8/VP9/AV1 video with
     AAC/MP3/Opus/Vorbis/silent audio), its ORIGINAL file path is
@@ -524,8 +965,25 @@ of those operations always reads from the original source file. The
 only code path that ever touches .preview_cache/ is the /preview route
 itself.
 
+Which URL the UI uses is derived, not configured: the probe returns
+browser_playable (is the codec in BROWSER_SAFE_VIDEO_CODECS?) and the
+frontend swaps to /preview/<dir>/<name> when it is false. That is why
+the HEVC export modes needed no preview code of their own -- an HEVC
+render simply reports browser_playable=false and takes the existing
+path.
 
-10. THE AGENTIC ASSISTANT EDITOR AND ITS SECURITY MODEL
+FRAME GRABS COME FROM THE PREVIEW ELEMENT, NOT FROM A RENDER
+
+The two IMAGE buttons in the preview header (PNG download, clipboard
+copy) draw the frame the preview is parked on straight from the shared
+<video> element in the browser -- no backend round-trip, no ffmpeg.
+They crop the draw to the probed true width/height, mirroring the
+player's own clip-path, so a macroblock-padded bitstream's fringe stays
+out of the PNG. The crop box and overlay layers are separate DOM
+elements over the video, so they are deliberately NOT captured.
+
+
+12. THE AGENTIC ASSISTANT EDITOR AND ITS SECURITY MODEL
 -------------------------------------------------------------
 
 The chat panel turns a plain-English request into a proposed ffmpeg
@@ -550,7 +1008,9 @@ The validator (validate_ffmpeg_command) has two layers:
     inert data inside one argument, not shell syntax. This is why the
     code deliberately does NOT blocklist those characters: ffmpeg's
     own -filter_complex syntax legitimately uses them, and there is no
-    shell present for them to exploit in the first place.
+    shell present for them to exploit in the first place. (The Custom
+    export mode's extra-args field is validated on the same
+    principle -- see section 4.)
 
   - The first token must be literally "ffmpeg", and even then the
     real hardcoded binary path is substituted in regardless of what
@@ -573,24 +1033,67 @@ is now baked into new pixels and none of those settings, which
 referred to the old source, still mean anything.
 
 
-11. BACKEND API REFERENCE
+13. WHAT PERSISTS ON DISK
+-----------------------------
+
+There is no database and no migration system. Five things outlive a
+session, all of them plain JSON or plain files:
+
+    projects/<name>.nara            saved timelines
+    .export_settings.json           global export configuration
+    .preview_cache/                 disposable transcoded proxies
+    frontend/assets/Audio_NOISE.wav the room tone asset (read-only;
+                                     pcm_s16le, 48 kHz stereo, 3.003s)
+    localStorage                    per-bin favorites, sticky track tags
+
+A .nara project is { version: 4, clips, track2Clips, audioBed,
+selectedId, exportPresets }. Version 3 added audioBed, 4 added
+exportPresets. Nothing READS the version field -- it is a marker for
+humans, and older files load unchanged because every addition degrades
+to a sensible empty value (no bed, no presets). The
+backend treats the file as opaque JSON except for validating that
+clips is a list. Opening a project MERGES its export presets into the
+local set rather than replacing them, so opening someone else's
+project can't wipe your own saved settings; the project's copy wins a
+case-insensitive name clash.
+
+.export_settings.json holds { output_dir?, quality, custom, presets }.
+output_dir is ABSENT rather than empty when the default export folder
+is in use. Two different dialogs write to this one document -- the
+Export Bin's gear owns output_dir and quality, the top bar's gear owns
+custom and presets -- so POST /api/export_settings is a PARTIAL
+update: it touches only the keys actually present in the request body.
+Either dialog posting the whole document would wipe the other's field.
+
+localStorage is the only client-side persistence: favorites per bin
+(nara-favorites-<dir>) and sticky V1/V2/A1 track tags
+(nara-track-tags). Both are keyed by FILENAME, which is why renaming a
+file has to carry them over explicitly.
+
+
+14. BACKEND API REFERENCE
 ----------------------------
 
 Media serving
     GET  /                          legacy vanilla-JS UI
     GET  /input/<name>              raw file from input/
     GET  /output/<name>             raw file from the current export dir
-    GET  /preview/<in|out>/<name>   browser-playable proxy (see section 9)
+    GET  /preview/<in|out>/<name>   browser-playable proxy (section 11)
 
 Listing / probing
     GET  /api/files                 list input/
     GET  /api/outputs               list the current export dir
-    GET  /api/probe/<name>          ffprobe details for one file
+    GET  /api/probe/<name>?dir=     ffprobe details for one file
+                                     (dir=input default, or output)
 
-Upload / clear
-    POST /api/upload                add a file to input/ (2 GB cap)
-    POST /api/clear_input           delete everything in input/
-    POST /api/clear_output          delete everything in the export dir
+Upload / delete
+    POST   /api/upload              add a file to input/ (2 GB cap)
+    POST   /api/clear_input         delete everything in input/
+    POST   /api/clear_output        delete everything in the export dir
+    DELETE /api/files/<name>        delete one source file
+    DELETE /api/outputs/<name>      delete one export
+    POST   /api/rename_file         rename in input/ or the export dir
+                                     (dir=input|output)
 
 Project library (.nara JSON files)
     GET    /api/projects            list saved projects
@@ -599,10 +1102,28 @@ Project library (.nara JSON files)
     DELETE /api/projects/<name>     delete one
 
 Export settings
-    GET  /api/export_settings       current output dir + quality mode
-    POST /api/export_settings       change either
+    GET  /api/export_settings       output_dir + default_output_dir +
+                                     quality + custom + presets +
+                                     custom_defaults + custom_options
+                                     (the dropdown vocabulary, so the
+                                     UI never hardcodes a list the
+                                     validator would reject)
+    POST /api/export_settings       PARTIAL update of any of
+                                     {output_dir, quality, custom,
+                                     presets}
     POST /api/browse_directory      native macOS folder picker
-    POST /api/reveal_file           reveal a file in Finder
+    POST /api/reveal_file           reveal a file in Finder (dir=)
+
+Renders
+    POST /api/render_timeline       render an entire clip list in one
+                                     ffmpeg pass (sections 4-6), with
+                                     optional audioBed / fillNoise /
+                                     noAudio
+    POST /api/render_a1             render the A1 track alone to a
+                                     .wav timed to the V1 sequence
+                                     (section 9)
+    POST /api/reformat              one-shot contain-fit resize of a
+                                     single file (section 10)
 
 One-shot editing operations (legacy-UI-facing; each writes one new file)
     POST /api/trim                  -ss/-to trim of one file
@@ -611,12 +1132,8 @@ One-shot editing operations (legacy-UI-facing; each writes one new file)
     POST /api/reverse               reverse one file (RAM-estimate
                                      warn/confirm flow above 2 GiB)
 
-The main render pipeline
-    POST /api/render_timeline       render an entire clip list in one
-                                     ffmpeg pass (sections 4-6 above)
-
 Chat / assistant
-    POST /api/chat                  propose an ffmpeg command (never runs it)
+    POST /api/chat                  propose a command, never run it
     POST /api/execute               run a user-approved command
 
 Every route follows the same error convention: {"error": ..., "detail":
@@ -626,13 +1143,15 @@ Every client-supplied filename is resolved through a traversal guard
 (safe_path) before it touches the filesystem.
 
 
-12. KNOWN SHARP EDGES
+15. KNOWN SHARP EDGES
 ------------------------
 
   - The server NEVER trusts client-supplied fps, audio presence, or
     resolution for a render -- it always re-probes the actual file
     itself. Only the edit decisions themselves (in/out points, hold
-    durations, reversed, speed, crop) come from the request.
+    durations, reversed, speed, crop, overlay geometry) come from the
+    request. Overlay dimensions in particular are checked against the
+    overlay file's own probe, not the client's claim.
 
   - A literal speed value of 0 is deliberately checked with an
     explicit "is None" test rather than Python's "or" pattern -- using
@@ -645,10 +1164,27 @@ Every client-supplied filename is resolved through a traversal guard
     the whole clip exceeds 2 GiB and the request didn't already say
     confirm: true. This is a deliberate soft-block, not a failure.
 
-  - Only /api/render_timeline respects a custom export directory
-    (get_output_dir()); the older single-shot routes (trim, splice,
-    hold_frame, reverse) still write to the default output/ directory
-    regardless of that setting.
+  - The custom export mode gives the WHOLE byte budget to video and
+    reserves nothing for audio (section 4). That is as specified, but
+    it means a long render with high-bitrate source audio can overshoot
+    its cap on the first attempt and pay for a full two-pass retry.
+    Lower the safety headroom for those.
+
+  - Room tone in the trail gap is silenced whenever a bed is loaded,
+    by gap POSITION rather than by measuring how far the bed actually
+    reaches. A bed shorter than the sequence therefore leaves its own
+    tail silent, and that tail is not room-tone-filled either.
+
+  - Which routes honor a custom export directory is not uniform.
+    Writing: render_timeline, render_a1 and reformat use
+    get_output_dir(); the older single-shot routes (trim, splice,
+    hold_frame, reverse) still write to the default output/ regardless.
+    Reading: /api/outputs, /output/<name> and both delete routes follow
+    get_output_dir(), but /api/probe?dir=output and /preview/out/<name>
+    resolve against the DEFAULT output/ only -- so with a custom export
+    directory set, a listed export can still fail to probe or to build
+    a preview proxy, which is exactly what the HEVC/10-bit export modes
+    need.
 
   - All machine-specific paths (ffmpeg/ffprobe binary locations, the
     Claude CLI path) are hardcoded for this specific development

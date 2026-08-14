@@ -456,7 +456,7 @@ def get_export_settings():
 def set_export_settings():
     """Partial update: only the keys actually present in the request body are
     touched. That matters now that two different dialogs post here — the FFmpeg
-    Export Settings window sends {custom, presets, quality} and must not clear
+    Custom Settings window sends {custom, presets, quality} and must not clear
     the export directory the other one owns."""
     data = request.get_json(force=True)
     settings = _load_export_settings()
