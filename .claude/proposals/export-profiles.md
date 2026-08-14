@@ -1,9 +1,33 @@
 # Proposal: named, saved export-settings profiles
 
-Status: **not implemented**. This is a design doc to pick up later — no
-application code has been touched for this feature. When ready to build
-it, read this file, then implement per the plan below (it's meant to be
-followed directly, not re-derived).
+Status: **superseded — do not implement this plan.** Named, saved export
+settings now ship, but built to a different spec: the FFmpeg Custom Settings
+window (top-bar gear, `FfmpegCustomSettings.jsx`). Read this file only for the
+reasoning it records (the JSON-vs-YAML-vs-XML argument still holds); the plan
+below no longer matches the code.
+
+What shipped instead, and why it diverged:
+
+- **What a profile contains.** This doc scopes a profile to `output_dir` +
+  `quality`. The delivered feature saves the full encode configuration of the
+  new `custom` quality mode (target size, safety headroom, codec, speed preset,
+  profile, pixel format, maxrate/bufsize multipliers, raw extra args) and does
+  **not** include `output_dir` — the request that drove the work was about
+  encoder settings, and folding a directory into the same bundle would make
+  "load a preset" quietly relocate someone's exports.
+- **Where they live.** Not one JSON file per profile in a new `profiles/`
+  directory: a `presets` list *inside* `.export_settings.json`, plus a copy
+  inside each `.nara` project (the user asked for project-scoped persistence).
+  Import/Export of a single settings file covers the "profile as a file on
+  disk" use case this doc wanted the directory for.
+- **Routes.** No four new CRUD routes and no `ProfileLibrary.jsx`: the existing
+  `GET`/`POST /api/export_settings` carries the list, with POST changed to a
+  *partial* update so the two dialogs writing to that document can't clobber
+  each other's keys.
+
+If per-profile `output_dir` (or a `quality`-only profile, for the five built-in
+modes) is still wanted, that is a genuine gap in what shipped — but design it
+as an extension of `presets`, not as the parallel system below.
 
 ## Problem
 

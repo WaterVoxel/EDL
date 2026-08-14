@@ -36,8 +36,8 @@ export default function AboutDialog({ onClose }) {
               which preserves every decoded pixel bit-exactly. This is verified frame-by-frame against
               source hashes — including on 10-bit sources, where the commonly-cited{' '}
               <span className="font-mono text-neutral-400">-crf 0</span> is <em>not</em> actually
-              lossless. Two alternatives live in Export Settings (⚙) for when file size matters more
-              than bit-exactness:
+              lossless. Five alternatives live in Export Settings (⚙, in the Export Bin header) for
+              when file size matters more than bit-exactness:
             </p>
             <div className="overflow-x-auto">
               <table className="w-full text-[10px] font-mono">
@@ -64,12 +64,44 @@ export default function AboutDialog({ onClose }) {
                     <td className="px-1.5 py-0.5 text-neutral-400">CRF 18</td>
                     <td className="px-1.5 py-0.5 text-neutral-400">usually smaller than source</td>
                   </tr>
+                  <tr className="border-b border-neutral-900">
+                    <td className="px-1.5 py-0.5 text-neutral-300">Under 50MB</td>
+                    <td className="px-1.5 py-0.5 text-neutral-400">two-pass ABR, H.264, preset slow</td>
+                    <td className="px-1.5 py-0.5 text-neutral-400">under 50MB, measured not estimated</td>
+                  </tr>
+                  <tr className="border-b border-neutral-900">
+                    <td className="px-1.5 py-0.5 text-neutral-300">Under 50MB (HEVC)</td>
+                    <td className="px-1.5 py-0.5 text-neutral-400">two-pass ABR, libx265 Main 10</td>
+                    <td className="px-1.5 py-0.5 text-neutral-400">same cap, better picture, far slower</td>
+                  </tr>
+                  <tr className="border-b border-neutral-900">
+                    <td className="px-1.5 py-0.5 text-neutral-300">Custom</td>
+                    <td className="px-1.5 py-0.5 text-neutral-400">two-pass ABR, your own flags</td>
+                    <td className="px-1.5 py-0.5 text-neutral-400">under your own cap</td>
+                  </tr>
                 </tbody>
               </table>
             </div>
             <p>
+              The size-capped modes are a real promise, not an estimate: they encode twice (the first
+              pass measures the picture's complexity, the second spends the byte budget against that
+              map), then <strong>weigh the finished file</strong> and re-encode 15% smaller if it
+              still overshot.
+            </p>
+            <p>
+              <strong>Custom</strong> is the same machinery with every knob exposed — target size,
+              safety headroom, codec, speed preset, profile, pixel format, rate-control multipliers
+              and raw ffmpeg flags — in <strong>FFmpeg Custom Settings</strong> (the gear button in
+              the top bar). Settings
+              there can be saved as named presets, exported and imported as files, and travel inside
+              the project file, so a delivery spec is set up once and reused. HEVC output isn't
+              browser-playable, so previewing it in-app transcodes on the fly; it's a delivery
+              format, not a working one.
+            </p>
+            <p>
               Audio is AAC in every mode, matched to — never worse than — the source's own bitrate
-              (192 kb/s floor), sample rate, and channel count.
+              (192 kb/s floor; the size-capped modes drop to a 96 kb/s floor so the cap can be met),
+              sample rate, and channel count.
             </p>
             <p>
               Several edits introduce <strong>zero new pixels</strong> in any mode, since they only

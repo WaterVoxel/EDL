@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { listFiles, listOutputs, probe, upload, renderTimeline, renderA1, saveProject } from './api'
+import { listFiles, listOutputs, probe, upload, renderTimeline, renderA1, saveProject, getExportSettings, setExportSettings } from './api'
 import { useUndoableState } from './hooks/useUndoableState'
 import { MediaProvider, useMedia } from './context/MediaContext'
 import { TourProvider, useTour } from './context/TourContext'
@@ -25,10 +25,12 @@ import ReformatPanel from './components/ReformatPanel'
 import LogPanel from './components/LogPanel'
 import ProjectLibrary from './components/ProjectLibrary'
 import AboutDialog from './components/AboutDialog'
+import FfmpegCustomSettings from './components/FfmpegCustomSettings'
 import Timeline from './components/Timeline/Timeline'
 import { clipBaseSec, roundUpAmount } from './clipMath'
 import { loadTrackTags, tagTrack, renameTrackTag, isAudioFile } from './fileList'
 import { analyzeAgainstV1, reconstructFromV1 } from './analyzeMath'
+import { mergeExportPresets } from './exportPresets'
 import { matchOverlays } from './overlayMatch'
 
 const MIN_RIGHT_PANEL = 260
@@ -59,6 +61,18 @@ function DocIcon() {
       <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
       <path d="M14 3v5h5" />
       <path d="M9 13h6M9 17h4" />
+    </svg>
+  )
+}
+
+// A ring with eight teeth rather than the usual one-path cog: at 13px the
+// detailed outline mushes into a blob, while spokes still read as a gear.
+function GearIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="3.2" />
+      <circle cx="12" cy="12" r="7.5" />
+      <path d="M12 4.5V1.5M12 19.5v3M4.5 12h-3M19.5 12h3M6.7 6.7 4.6 4.6M17.3 17.3l2.1 2.1M17.3 6.7l2.1-2.1M6.7 17.3l-2.1 2.1" />
     </svg>
   )
 }
@@ -211,8 +225,11 @@ function AppInner() {
     const stepId = tourSteps[tourStepIndex]?.id
     if (stepId === 'agentDock' && centerTab === 'timeline') setCenterTab('assistant')
     // 'editToolbar' joins 'timeline' here because the edit tools now render
-    // INSIDE the Timeline card, so that step's target is tab-gated too.
-    else if ((stepId === 'timeline' || stepId === 'editToolbar') && centerTab !== 'timeline') setCenterTab('timeline')
+    // INSIDE the Timeline card, so that step's target is tab-gated too — and
+    // 'renderBar' for the mirror-image reason: its slot element always exists,
+    // but Timeline only portals the bar into it while the Timeline tab is up,
+    // so on any other tab that step would spotlight an empty strip.
+    else if ((stepId === 'timeline' || stepId === 'editToolbar' || stepId === 'renderBar') && centerTab !== 'timeline') setCenterTab('timeline')
   }
 
   // Track 2 ("Analyze") is a scratch lane, not part of the undo history —
@@ -595,6 +612,23 @@ function AppInner() {
   const [saveStatus, setSaveStatus] = useState('')
   const savingRef = useRef(false)
 
+  // The FFmpeg Custom Settings window (top-bar gear) owns those settings; App
+  // mirrors just two facts from it: the saved presets, because buildProject
+  // writes them into the .nara file, and the active quality mode, because the
+  // gear lights up while the custom mode is what Render will use. The window
+  // reports both back through onSettingsChange, so this never goes stale
+  // without a refetch.
+  const [showFfmpegSettings, setShowFfmpegSettings] = useState(false)
+  const [exportPresets, setExportPresets] = useState([])
+  const [exportQuality, setExportQuality] = useState('lossless')
+
+  useEffect(() => {
+    getExportSettings().then(data => {
+      setExportPresets(data.presets || [])
+      setExportQuality(data.quality || 'lossless')
+    })
+  }, [])
+
   async function handleAddToV2(file) {
     const result = await upload(file)
     if (result.error) { alert('Upload failed: ' + result.error); return }
@@ -697,11 +731,12 @@ function AppInner() {
     }
   }
 
-  // version 3 adds audioBed. Nothing reads `version` — it's a marker for
-  // humans reading a .nara — and a version-2 file still loads unchanged
-  // (handleLibraryOpen defaults a missing audioBed to null).
+  // version 4 adds exportPresets (version 3 added audioBed). Nothing reads
+  // `version` — it's a marker for humans reading a .nara — and older files
+  // still load unchanged (handleLibraryOpen defaults a missing audioBed to
+  // null and a missing preset list to none).
   function buildProject() {
-    return { version: 3, clips: timelineClips, track2Clips, audioBed, selectedId }
+    return { version: 4, clips: timelineClips, track2Clips, audioBed, selectedId, exportPresets }
   }
 
   async function handleSave() {
@@ -763,13 +798,13 @@ function AppInner() {
       // Match the Save button's own disabled/blocked conditions exactly, so
       // the shortcut is never a second path to something the button won't do.
       if (timelineClips.length === 0) return
-      if (showRenderDialog || showLibrary || showAbout) return
+      if (showRenderDialog || showLibrary || showAbout || showFfmpegSettings) return
       savingRef.current = true
       Promise.resolve(saveRef.current?.()).finally(() => { savingRef.current = false })
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [timelineClips.length, showRenderDialog, showLibrary, showAbout])
+  }, [timelineClips.length, showRenderDialog, showLibrary, showAbout, showFfmpegSettings])
 
   function handleLibraryOpen(name, project) {
     resetTimeline(project.clips)
@@ -778,6 +813,23 @@ function AppInner() {
     setSelectedId(project.selectedId || null)
     setProjectName(name)
     setShowLibrary(false)
+    // The project's own export presets fold into the saved set (see
+    // mergeExportPresets — the project's copy wins a name collision, and a
+    // pre-version-4 project has none, so nothing happens). The POST is what
+    // makes them survive a reload; a hand-edited .nara whose presets the
+    // backend refuses is reported in the log rather than swallowed.
+    const merged = mergeExportPresets(exportPresets, project.exportPresets)
+    if (merged !== exportPresets) {
+      setExportPresets(merged)
+      setExportSettings({ presets: merged }).then(result => {
+        if (result.error) {
+          setAnalyzeLog(prev => [
+            { kind: 'warn', text: `⚠ Export presets in "${name}" were rejected: ${result.error}` },
+            ...prev,
+          ])
+        }
+      })
+    }
   }
 
   function handleExportProject() {
@@ -909,12 +961,11 @@ function AppInner() {
     <div className="flex flex-col h-screen bg-neutral-950 text-neutral-200">
       {/* Top toolbar */}
       <div className="flex items-center justify-between px-3 py-1.5 border-b border-neutral-800 bg-neutral-900 shrink-0">
-        <div data-tour="title" className="flex items-center gap-2">
-          <button
-            onClick={() => setShowAbout(true)}
-            title="About Nara Editor"
-            className="text-xs font-bold text-white tracking-tight hover:text-indigo-300"
-          >NARA EDITOR</button>
+        {/* Plain label, not a button: it used to open the About dialog, but a
+            title with no affordance is a hidden control — the document-icon
+            button on the right is now the only way in, and it looks like one. */}
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-bold text-white tracking-tight">NARA EDITOR</span>
           <span className="text-[9px] text-neutral-600 border border-neutral-700 rounded px-1 py-0.5">EDL mode</span>
         </div>
         <div data-tour="project" className="flex items-center gap-1.5">
@@ -968,6 +1019,19 @@ function AppInner() {
           >Export EDL</button>
           <div className="w-px h-4 bg-neutral-700" />
           <button onClick={() => location.reload()} className="px-2.5 py-1 text-[10px] rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 hover:border-neutral-500">New</button>
+          {/* Encoder settings, not project settings — but it sits with the
+              icon buttons because it's icon-only, and beside Export/Import
+              because it decides what those exports are made of. Lit while the
+              custom mode is the one Render will use. */}
+          <button
+            onClick={() => setShowFfmpegSettings(true)}
+            title={exportQuality === 'custom'
+              ? 'FFmpeg Custom Settings — custom two-pass encode is ACTIVE for exports'
+              : 'FFmpeg Custom Settings — size-capped two-pass HEVC/H.264 encode, with saved presets'}
+            className={`w-6 h-6 flex items-center justify-center rounded border ${exportQuality === 'custom' ? 'bg-emerald-600/20 text-emerald-400 border-emerald-500' : 'border-neutral-700 text-neutral-400 hover:text-emerald-300 hover:border-emerald-500'}`}
+          >
+            <GearIcon />
+          </button>
           <button
             onClick={startTour}
             disabled={tourActive}
@@ -976,10 +1040,11 @@ function AppInner() {
           >
             <BulbIcon />
           </button>
-          {/* Second way into the About dialog, beside the tour: the NARA title
-              already opens it, but nothing about a title looks clickable, so
-              the manual now has a visible affordance next to the tour it
-              complements — the bulb walks the UI, this one explains the app. */}
+          {/* The only way into the About dialog, beside the tour: the NARA
+              title used to open it too, but nothing about a title looks
+              clickable, so the manual keeps just this visible affordance next
+              to the tour it complements — the bulb walks the UI, this one
+              explains the app. */}
           <button
             onClick={() => setShowAbout(true)}
             title="About Nara Editor — the in-app manual (pipeline, crop presets, EDL, V2, assistant)"
@@ -1090,6 +1155,7 @@ function AppInner() {
               would otherwise show as an empty strip. */}
           <div
             ref={setTimelineBarSlot}
+            data-tour="renderBar"
             className={centerTab === 'timeline' ? 'px-2.5 py-1.5 border-y border-neutral-800 bg-neutral-900' : ''}
           />
 
@@ -1197,6 +1263,16 @@ function AppInner() {
       </div>
 
       {showAbout && <AboutDialog onClose={() => setShowAbout(false)} />}
+
+      {showFfmpegSettings && (
+        <FfmpegCustomSettings
+          onClose={() => setShowFfmpegSettings(false)}
+          onSettingsChange={({ presets, quality }) => {
+            setExportPresets(presets)
+            if (quality) setExportQuality(quality)
+          }}
+        />
+      )}
 
       {showLibrary && (
         <ProjectLibrary

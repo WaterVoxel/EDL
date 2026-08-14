@@ -231,6 +231,100 @@ def get_export_quality():
     return quality if quality in fu.EXPORT_QUALITIES else "lossless"
 
 
+# A .nara project carries its presets with it, so this cap is really a limit on
+# how much export config one project file is allowed to accumulate.
+MAX_EXPORT_PRESETS = 200
+
+
+def get_custom_export_settings(strict=True):
+    """The "custom" quality mode's flags — the ones the FFmpeg Custom Settings
+    window edits — normalized and complete.
+
+    strict=True (renders) raises ValueError if the stored block is invalid, so a
+    hand-edited .export_settings.json surfaces as an error the user can read
+    rather than as a silent render at defaults they didn't choose. strict=False
+    (the GET route) falls back to defaults so the window can still open and be
+    used to repair the file."""
+    settings, error = fu.normalize_export_settings(_load_export_settings().get("custom") or {})
+    if error:
+        if strict:
+            raise ValueError(f"stored custom export settings are invalid: {error}")
+        return dict(fu.DEFAULT_EXPORT_SETTINGS)
+    return settings
+
+
+def _normalize_export_presets(raw):
+    """Validate the named-preset list. Returns (presets, error).
+
+    Each entry is {"name": str, "settings": <a normalize_export_settings dict>}.
+    Names are compared case-insensitively for uniqueness, matching macOS's own
+    default filesystem behavior (case-preserving but case-insensitive) so
+    "YouTube" and "youtube" can't become two indistinguishable rows in the
+    dropdown. The whole list is validated as a unit: a POST either replaces it
+    entirely or is rejected, which keeps the client's copy and the file's copy
+    from diverging halfway through a save."""
+    if not isinstance(raw, list):
+        return None, "presets must be a list"
+    if len(raw) > MAX_EXPORT_PRESETS:
+        return None, f"at most {MAX_EXPORT_PRESETS} presets"
+    presets = []
+    seen = set()
+    for entry in raw:
+        if not isinstance(entry, dict):
+            return None, "each preset must be an object"
+        name = (entry.get("name") or "").strip()
+        if not name:
+            return None, "every preset needs a name"
+        if len(name) > 80:
+            return None, "preset names must be 80 characters or fewer"
+        if name.lower() in seen:
+            return None, f"duplicate preset name: {name}"
+        seen.add(name.lower())
+        settings, error = fu.normalize_export_settings(entry.get("settings") or {})
+        if error:
+            return None, f"preset {name!r}: {error}"
+        presets.append({"name": name, "settings": settings})
+    return presets, None
+
+
+def get_export_presets():
+    """The saved named presets, or [] if the stored list is absent/invalid."""
+    presets, error = _normalize_export_presets(_load_export_settings().get("presets") or [])
+    return [] if error else presets
+
+
+def multipass_export_render(input_args, filter_args, source_info, out_path, duration_s,
+                            timeout=1800):
+    """Run whichever MULTI-pass render the current export mode calls for.
+
+    The three fu.MULTIPASS_QUALITIES modes can't be expressed as one args list
+    (each needs two ffmpeg passes plus a measure-and-retry loop), so every
+    editing route branches on `quality in fu.MULTIPASS_QUALITIES` and calls this
+    instead of fu.encode_args() + fu.run_ffmpeg(). Funnelling all six of those
+    routes (trim, splice, render_timeline, reformat, hold_frame, reverse)
+    through this one function is what makes a newly added mode work everywhere
+    at once rather than in whichever routes got updated.
+
+    Raises RuntimeError carrying ffmpeg's stderr, exactly like
+    fu.render_size_capped — every caller already maps that onto a 500. An
+    invalid stored settings block is re-raised as a RuntimeError too, so callers
+    need only the one except clause."""
+    quality = get_export_quality()
+    if quality == "custom":
+        try:
+            settings = get_custom_export_settings()
+        except ValueError as e:
+            raise RuntimeError(str(e))
+        try:
+            return fu.render_custom_two_pass(input_args, filter_args, source_info, out_path,
+                                             duration_s, settings, timeout=timeout)
+        except ValueError as e:
+            raise RuntimeError(str(e))
+    return fu.render_size_capped(input_args, filter_args, source_info, out_path, duration_s,
+                                 timeout=timeout,
+                                 codec="hevc" if quality == "under50mb_hevc" else "h264")
+
+
 def resolve_media_dir(which):
     """Map a request's `dir` field onto one of the two media folders: "input"
     is the Media Bin's sources, anything else (the default) the Export Bin.
@@ -337,35 +431,70 @@ def get_export_settings():
         "output_dir": settings.get("output_dir") or "",
         "default_output_dir": fu.OUTPUT_DIR,
         "quality": get_export_quality(),
+        # The "custom" mode's live flags, its saved named presets, and the
+        # vocabulary the window builds its dropdowns from — sent together so the
+        # dialog never hardcodes a codec/preset/profile list that could drift
+        # out of step with what normalize_export_settings will accept.
+        "custom": get_custom_export_settings(strict=False),
+        "presets": get_export_presets(),
+        "custom_defaults": fu.DEFAULT_EXPORT_SETTINGS,
+        "custom_options": {
+            "codecs": list(fu.EXPORT_CODECS),
+            # "encoder_presets", not "presets": in this feature "preset" means
+            # two different things (ffmpeg's -preset speed knob and a saved
+            # named settings bundle), and the wire format keeps them apart.
+            "encoder_presets": list(fu.EXPORT_PRESETS),
+            "profiles": {k: list(v) for k, v in fu.EXPORT_PROFILES.items()},
+            "pix_fmts": list(fu.EXPORT_PIX_FMTS),
+            "ten_bit_pix_fmts": list(fu.TEN_BIT_PIX_FMTS),
+            "ten_bit_profiles": list(fu.TEN_BIT_PROFILES),
+        },
     })
 
 
 @app.route("/api/export_settings", methods=["POST"])
 def set_export_settings():
+    """Partial update: only the keys actually present in the request body are
+    touched. That matters now that two different dialogs post here — the FFmpeg
+    Export Settings window sends {custom, presets, quality} and must not clear
+    the export directory the other one owns."""
     data = request.get_json(force=True)
     settings = _load_export_settings()
-    output_dir = (data.get("output_dir") or "").strip()
-    if output_dir:
-        if not os.path.isabs(output_dir):
-            return jsonify({"error": "output_dir must be an absolute path"}), 400
-        if not os.path.isdir(output_dir):
-            try:
-                os.makedirs(output_dir, exist_ok=True)
-            except OSError as e:
-                return jsonify({"error": f"cannot create directory: {e}"}), 400
-        settings["output_dir"] = output_dir
-    else:
-        settings.pop("output_dir", None)
+    if "output_dir" in data:
+        output_dir = (data.get("output_dir") or "").strip()
+        if output_dir:
+            if not os.path.isabs(output_dir):
+                return jsonify({"error": "output_dir must be an absolute path"}), 400
+            if not os.path.isdir(output_dir):
+                try:
+                    os.makedirs(output_dir, exist_ok=True)
+                except OSError as e:
+                    return jsonify({"error": f"cannot create directory: {e}"}), 400
+            settings["output_dir"] = output_dir
+        else:
+            settings.pop("output_dir", None)
     if "quality" in data:
         quality = data.get("quality") or "lossless"
         if quality not in fu.EXPORT_QUALITIES:
             return jsonify({"error": f"quality must be one of {', '.join(fu.EXPORT_QUALITIES)}"}), 400
         settings["quality"] = quality
+    if "custom" in data:
+        custom, error = fu.normalize_export_settings(data.get("custom") or {})
+        if error:
+            return jsonify({"error": error}), 400
+        settings["custom"] = custom
+    if "presets" in data:
+        presets, error = _normalize_export_presets(data.get("presets") or [])
+        if error:
+            return jsonify({"error": error}), 400
+        settings["presets"] = presets
     _save_export_settings(settings)
     return jsonify({
         "ok": True,
         "output_dir": settings.get("output_dir", ""),
         "quality": get_export_quality(),
+        "custom": get_custom_export_settings(strict=False),
+        "presets": get_export_presets(),
     })
 
 
@@ -404,8 +533,8 @@ def _parse_time_to_sec(value):
     """Parse a ffmpeg -ss/-to style time value: either a plain number of
     seconds ("12.5") or a "[HH:]MM:SS[.ms]" timecode ("00:00:05.000"), the
     two forms /api/trim's start/end fields actually accept (see the legacy
-    UI's own placeholder text). Only used to size the under50mb bitrate
-    budget — trimming itself is still done by ffmpeg's own -ss/-to."""
+    UI's own placeholder text). Only used to size a size-capped mode's
+    bitrate budget — trimming itself is still done by ffmpeg's own -ss/-to."""
     s = str(value).strip()
     if ":" not in s:
         return float(s)
@@ -445,14 +574,13 @@ def trim():
     input_args = ["-i", in_path, "-ss", str(start), "-to", str(end)]
 
     quality = get_export_quality()
-    if quality in ("under50mb", "under50mb_hevc"):
+    if quality in fu.MULTIPASS_QUALITIES:
         try:
             trim_duration = _parse_time_to_sec(end) - _parse_time_to_sec(start)
         except ValueError:
             return jsonify({"error": "start/end must be numeric seconds or a HH:MM:SS.ms timecode"}), 400
-        codec = "hevc" if quality == "under50mb_hevc" else "h264"
         try:
-            fu.render_size_capped(input_args, [], info, out_path, trim_duration, codec=codec)
+            multipass_export_render(input_args, [], info, out_path, trim_duration)
         except RuntimeError as e:
             return jsonify({"error": "ffmpeg failed", "detail": str(e)[-4000:]}), 500
         return jsonify({"output": out_name})
@@ -519,11 +647,10 @@ def splice():
     filter_args = ["-filter_complex", filt, "-map", "[outv]", "-map", "[outa]"]
 
     quality = get_export_quality()
-    if quality in ("under50mb", "under50mb_hevc"):
+    if quality in fu.MULTIPASS_QUALITIES:
         total_sec = sum(i["duration"] for i in infos)
-        codec = "hevc" if quality == "under50mb_hevc" else "h264"
         try:
-            fu.render_size_capped(input_args, filter_args, combined_info, out_path, total_sec, codec=codec)
+            multipass_export_render(input_args, filter_args, combined_info, out_path, total_sec)
         except RuntimeError as e:
             return jsonify({"error": "ffmpeg failed", "detail": str(e)[-4000:]}), 500
         return jsonify({"output": out_name})
@@ -896,8 +1023,8 @@ def render_timeline():
     # no_audio is requested build_timeline_filter never builds an audio
     # graph or an [outa] label at all (see its own docstring for why a
     # plain -an can't be bolted on afterward instead), so has_audio must
-    # flip to False here too, or audio_args()/render_size_capped would try
-    # to attach -c:a aac to a stream that was never mapped.
+    # flip to False here too, or audio_args()/either two-pass render would
+    # try to attach -c:a aac to a stream that was never mapped.
     no_audio = bool(data.get("noAudio"))
     if no_audio and bed_index is not None:
         return jsonify({"error": "cannot mix an audio bed into a render with audio disabled"}), 400
@@ -946,11 +1073,10 @@ def render_timeline():
         filter_args += ["-map", "[outa]"]
 
     quality = get_export_quality()
-    if quality in ("under50mb", "under50mb_hevc"):
+    if quality in fu.MULTIPASS_QUALITIES:
         total_sec = sum(_clip_total_sec(spec) for spec in clip_specs)
-        codec = "hevc" if quality == "under50mb_hevc" else "h264"
         try:
-            fu.render_size_capped(input_args, filter_args, combined_info, out_path, total_sec, codec=codec)
+            multipass_export_render(input_args, filter_args, combined_info, out_path, total_sec)
         except RuntimeError as e:
             return jsonify({"error": "ffmpeg failed", "detail": str(e)[-4000:]}), 500
         return jsonify({"output": out_name})
@@ -1186,10 +1312,9 @@ def reformat():
     filter_args = ["-vf", f"scale={out_w}:{out_h}"]
 
     quality = get_export_quality()
-    if quality in ("under50mb", "under50mb_hevc"):
-        codec = "hevc" if quality == "under50mb_hevc" else "h264"
+    if quality in fu.MULTIPASS_QUALITIES:
         try:
-            fu.render_size_capped(input_args, filter_args, info, out_path, info["duration"], codec=codec)
+            multipass_export_render(input_args, filter_args, info, out_path, info["duration"])
         except RuntimeError as e:
             return jsonify({"error": "ffmpeg failed", "detail": str(e)[-4000:]}), 500
         return jsonify({"output": out_name})
@@ -1246,14 +1371,13 @@ def hold_frame():
     filter_args = ["-filter_complex", filt, "-map", "[outv]", "-map", "[outa]"]
 
     quality = get_export_quality()
-    if quality in ("under50mb", "under50mb_hevc"):
+    if quality in fu.MULTIPASS_QUALITIES:
         # A hold ADDS duration (freezes on top of the existing timeline,
         # doesn't replace any of it), so the output is the original
         # duration plus the hold, not just the original alone.
         total_sec = info["duration"] + dur
-        codec = "hevc" if quality == "under50mb_hevc" else "h264"
         try:
-            fu.render_size_capped(input_args, filter_args, hold_info, out_path, total_sec, codec=codec)
+            multipass_export_render(input_args, filter_args, hold_info, out_path, total_sec)
         except RuntimeError as e:
             return jsonify({"error": "ffmpeg failed", "detail": str(e)[-4000:]}), 500
         return jsonify({"output": out_name})
@@ -1305,10 +1429,9 @@ def reverse():
     filter_args = ["-vf", "reverse", "-af", "areverse"]
 
     quality = get_export_quality()
-    if quality in ("under50mb", "under50mb_hevc"):
-        codec = "hevc" if quality == "under50mb_hevc" else "h264"
+    if quality in fu.MULTIPASS_QUALITIES:
         try:
-            fu.render_size_capped(input_args, filter_args, info, out_path, info["duration"], codec=codec)
+            multipass_export_render(input_args, filter_args, info, out_path, info["duration"])
         except RuntimeError as e:
             return jsonify({"error": "ffmpeg failed", "detail": str(e)[-4000:]}), 500
         return jsonify({"output": out_name})

@@ -7,6 +7,7 @@ const QUALITY_HINTS = {
   high: 'CRF 18, visually lossless — usually smaller than the source.',
   under50mb: 'Guarantees the file stays under 50MB (verified after encoding, not just estimated) — two-pass encoding spends every available bit on quality within that hard cap. Only reaches for this when the other modes would exceed 50MB.',
   under50mb_hevc: 'Same 50MB guarantee, but H.265/10-bit instead of H.264 — noticeably better quality at the same size, at the cost of a much slower two-pass encode. Not natively browser-playable, so in-app preview transcodes it to H.264 on the fly.',
+  custom: 'The same size-verified two-pass encode, but every flag is yours: cap, codec, preset, profile, pixel format, rate-control multipliers and raw extra args. Edit them in the FFmpeg Custom Settings window (the gear in the top bar), where they can also be saved as named presets.',
 }
 
 // The exact ffmpeg flags each quality mode passes, mirroring encode_args()
@@ -49,6 +50,16 @@ const FFMPEG_SETTINGS = {
     '-c:a aac  -b:a <computed, min 96kbps>  -ar <source rate>  -ac <source channels>',
     'Not browser-playable — in-app preview transcodes it to H.264 on the fly.',
   ],
+  // The only mode whose flags aren't fixed here, so this lists the shape and
+  // the panel prints the configured values underneath (see `custom` state).
+  custom: [
+    'Two-pass, size-verified, with every value taken from the FFmpeg Custom Settings window (gear, top bar):',
+    'Pass 1 — -c:v <codec> -b:v <computed> -maxrate <mult×> -bufsize <mult×> -preset <preset> [-profile:v <profile>] <extra args> -an -f null /dev/null',
+    'Pass 2 — the same flags plus the stats file and the audio track',
+    'bitrate = (target bytes × 8 × safety) ÷ duration ÷ 1000, with the whole budget given to video',
+    '-c:a aac  -b:a <source bitrate, min 96kbps>  -ar <source rate>  -ac <source channels>',
+    'Size is measured after encoding; bitrate shrinks 15% and retries (up to 4 attempts) if it overshoots.',
+  ],
 }
 
 export default function ExportSettings({ onClose }) {
@@ -59,12 +70,17 @@ export default function ExportSettings({ onClose }) {
   const [browsing, setBrowsing] = useState(false)
   const [error, setError] = useState(null)
   const [showFfmpegInfo, setShowFfmpegInfo] = useState(false)
+  // Read-only here: the custom mode's values are edited in the gear window.
+  // This panel only reports what they currently are, so picking "Custom" isn't
+  // a jump into the unknown.
+  const [custom, setCustom] = useState(null)
 
   useEffect(() => {
     getExportSettings().then(data => {
       setDir(data.output_dir || '')
       setDefaultDir(data.default_output_dir || '')
       setQuality(data.quality || 'lossless')
+      setCustom(data.custom || null)
     })
   }, [])
 
@@ -122,8 +138,16 @@ export default function ExportSettings({ onClose }) {
             <option value="high">High quality (visually lossless, smallest)</option>
             <option value="under50mb">Under 50MB (max quality within a hard size cap)</option>
             <option value="under50mb_hevc">Under 50MB (HEVC, higher quality, slower)</option>
+            <option value="custom">Custom (your own two-pass encode settings)</option>
           </select>
           <p className="text-[9px] text-neutral-500">{QUALITY_HINTS[quality]}</p>
+          {quality === 'custom' && custom && (
+            <p className="text-[9px] text-emerald-400 font-mono">
+              {custom.target_mib} MiB · {custom.codec} · {custom.preset} · {custom.profile} ·{' '}
+              {custom.pix_fmt} · safety {custom.safety} · maxrate {custom.maxrate_mult}× · bufsize{' '}
+              {custom.bufsize_mult}×{custom.extra_args ? ` · ${custom.extra_args}` : ''}
+            </p>
+          )}
           {showFfmpegInfo && (
             <ul className="mt-1 p-2 rounded bg-neutral-950 border border-neutral-700 text-[9px] text-neutral-400 font-mono flex flex-col gap-1 list-disc list-inside">
               {FFMPEG_SETTINGS[quality].map((line, i) => (

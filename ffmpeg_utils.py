@@ -157,7 +157,13 @@ def get_video_info(path):
 
 MIN_AUDIO_BITRATE = 192000
 
-EXPORT_QUALITIES = ("lossless", "match", "high", "under50mb", "under50mb_hevc")
+EXPORT_QUALITIES = ("lossless", "match", "high", "under50mb", "under50mb_hevc", "custom")
+
+# The modes that CANNOT be expressed as one encode_args() list because they
+# need two full ffmpeg passes plus a measure-and-retry loop. Every route that
+# renders checks membership here before falling through to the single-pass
+# encode_args() + run_ffmpeg() path (see app.multipass_export_render).
+MULTIPASS_QUALITIES = ("under50mb", "under50mb_hevc", "custom")
 
 # Hard size cap for the "under50mb" mode, and the safety margin subtracted
 # from it before any bitrate math — container/muxing overhead (moov atom,
@@ -179,6 +185,193 @@ MIN_VIDEO_BITRATE = 100_000
 # Only used when the byte budget is tight enough that matching the
 # source's own audio bitrate would leave too little for video.
 UNDER_50MB_MIN_AUDIO_BITRATE = 96_000
+
+
+# ---------- the "custom" mode's settings vocabulary ----------
+#
+# Every other entry in EXPORT_QUALITIES is a fixed, hand-tuned recipe. "custom"
+# is the one whose flags come from data: a settings dict edited in the FFmpeg
+# Export Settings window (gear icon), persisted in .export_settings.json and in
+# the .nara project, and validated by normalize_export_settings() below before
+# it ever reaches an ffmpeg argv. It is otherwise the same shape of mode as
+# under50mb*: two-pass ABR under a hard byte cap, enforced by measurement.
+
+# Software encoders only. This is a macOS/Apple Silicon target, so there is no
+# NVENC to offer; VideoToolbox's hardware h264/hevc encoders are excluded for a
+# stronger reason — they have no two-pass mode at all, which is precisely what
+# a size-capped export needs.
+EXPORT_CODECS = ("libx265", "libx264")
+
+EXPORT_PRESETS = ("ultrafast", "superfast", "veryfast", "faster", "fast",
+                  "medium", "slow", "slower", "veryslow")
+
+# These profile lists are ours, not ffmpeg's: both encoders take a free-form
+# string (verified — `ffmpeg -h encoder=libx265` documents -profile only as
+# "set the x265 profile", with no enum to read back), so an invalid value is
+# only caught when the encoder aborts mid-render. "auto" means omit -profile:v
+# entirely and let the encoder derive it from the pixel format, which is the
+# right answer for 8-bit libx265 (there is no "main8").
+EXPORT_PROFILES = {
+    "libx265": ("auto", "main", "main10", "main12"),
+    "libx264": ("auto", "baseline", "main", "high", "high10"),
+}
+
+# p010le is offered because it is the 10-bit format Apple's own pipelines use,
+# but neither software encoder actually accepts it: verified by hand that
+# `ffmpeg -h encoder=libx265` lists yuv420p10le and NOT p010le. Asking for it
+# still works — ffmpeg auto-inserts a conversion and the stream comes out
+# yuv420p10le ("Video: hevc ..., yuv420p10le(tv, progressive)", confirmed) — so
+# here it is an alias for yuv420p10le that costs one extra scale step. Kept as
+# an option only because it's the name users bring with them from Apple tools.
+EXPORT_PIX_FMTS = ("p010le", "yuv420p10le", "yuv420p")
+
+TEN_BIT_PIX_FMTS = ("p010le", "yuv420p10le")
+TEN_BIT_PROFILES = ("main10", "main12", "high10")
+
+# Defaults are the user-specified ones for this mode: HEVC 10-bit, two-pass,
+# preset slow, 0.90 safety headroom, maxrate 0.95x / bufsize 1.5x the computed
+# bitrate. target_mib matches the legacy under50mb cap so switching between
+# them is a codec/quality change, not a size change.
+DEFAULT_EXPORT_SETTINGS = {
+    "target_mib": 50.0,
+    "safety": 0.90,
+    "codec": "libx265",
+    "preset": "slow",
+    "profile": "main10",
+    "pix_fmt": "yuv420p10le",
+    "maxrate_mult": 0.95,
+    "bufsize_mult": 1.5,
+    "extra_args": "",
+}
+
+# Bounds for the numeric fields. Generous — these exist to reject nonsense
+# (a 0 MiB cap, a negative multiplier) that would otherwise surface as a
+# baffling ffmpeg error or an unkillable retry loop, not to express taste.
+_EXPORT_SETTING_BOUNDS = {
+    "target_mib": (0.1, 1_048_576.0),   # 100 KiB .. 1 TiB
+    "safety": (0.1, 1.0),
+    "maxrate_mult": (0.1, 10.0),
+    "bufsize_mult": (0.1, 20.0),
+}
+
+# Flags the Advanced extra args field must not contain, with the reason shown
+# to the user. Two kinds: flags this mode's own machinery owns (a second -b:v
+# would silently win over the computed one, and ffmpeg takes the LAST
+# occurrence, so a duplicate is a settings field that quietly stops working),
+# and flags that would break the render outright (-vf/-filter_complex replace
+# the timeline's whole filter graph — see _inject_pixel_format's docstring for
+# why a duplicate is destructive rather than additive).
+_EXTRA_ARG_CONFLICTS = {
+    "-i": "inputs come from the timeline",
+    "-pass": "owned by the two-pass machinery",
+    "-passlogfile": "owned by the two-pass machinery",
+    "-x265-params": "carries this mode's pass/stats settings",
+    "-x264-params": "conflicts with -pass/-passlogfile",
+    "-x264opts": "conflicts with -pass/-passlogfile",
+    "-vf": "would replace the timeline's filter graph",
+    "-filter": "would replace the timeline's filter graph",
+    "-filter:v": "would replace the timeline's filter graph",
+    "-filter:a": "would replace the timeline's filter graph",
+    "-filter_complex": "would replace the timeline's filter graph",
+    "-af": "would replace the timeline's audio filters",
+    "-f": "the output format follows the file extension",
+    "-c:v": 'use the "Codec" setting',
+    "-vcodec": 'use the "Codec" setting',
+    "-b:v": "computed from the target size",
+    "-maxrate": 'use the "maxrate x" setting',
+    "-bufsize": 'use the "bufsize x" setting',
+    "-preset": 'use the "Preset" setting',
+    "-profile:v": 'use the "Profile" setting',
+    "-pix_fmt": 'use the "Pixel format" setting',
+    "-y": "already passed by run_ffmpeg",
+    "-n": "would make every render prompt and hang",
+}
+
+
+def _coerce_float(raw, key):
+    """Float within _EXPORT_SETTING_BOUNDS[key], or (None, reason)."""
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None, f"{key} must be a number"
+    if value != value or value in (float("inf"), float("-inf")):
+        return None, f"{key} must be a finite number"
+    low, high = _EXPORT_SETTING_BOUNDS[key]
+    if not (low <= value <= high):
+        return None, f"{key} must be between {low} and {high}"
+    return value, None
+
+
+def normalize_export_settings(raw):
+    """Validate one "custom" settings dict. Returns (settings, error): on any
+    problem error is a message fit to show the user and settings is None,
+    otherwise settings is a COMPLETE dict (every DEFAULT_EXPORT_SETTINGS key
+    present) so no consumer needs .get() fallbacks.
+
+    Missing keys default rather than erroring, so a settings file written by an
+    older version of this window still loads. Unknown keys are dropped, not
+    rejected — the dict is round-tripped through the client and a .nara file,
+    and refusing to load a project because it carries an extra key would be a
+    worse failure than ignoring it.
+
+    Beyond per-field validation this enforces the one CROSS-field rule that
+    ffmpeg would otherwise only reveal mid-encode: bit depth has to agree
+    between profile and pixel format. libx265 given -profile:v main10 with
+    yuv420p input errors out with "profile main10 not compatible with input
+    depth"; the inverse (10-bit pixels under an 8-bit profile) silently loses
+    the extra two bits at best.
+    """
+    if not isinstance(raw, dict):
+        return None, "export settings must be an object"
+
+    settings = dict(DEFAULT_EXPORT_SETTINGS)
+    for key in ("target_mib", "safety", "maxrate_mult", "bufsize_mult"):
+        if key in raw:
+            value, error = _coerce_float(raw[key], key)
+            if error:
+                return None, error
+            settings[key] = value
+
+    codec = raw.get("codec", settings["codec"])
+    if codec not in EXPORT_CODECS:
+        return None, f"codec must be one of {', '.join(EXPORT_CODECS)}"
+    settings["codec"] = codec
+
+    preset = raw.get("preset", settings["preset"])
+    if preset not in EXPORT_PRESETS:
+        return None, f"preset must be one of {', '.join(EXPORT_PRESETS)}"
+    settings["preset"] = preset
+
+    # Defaulted per codec, not globally: main10 is libx265's name and is
+    # meaningless to libx264, so a settings dict that only switches codec
+    # would otherwise carry an invalid profile across.
+    allowed_profiles = EXPORT_PROFILES[codec]
+    profile = raw.get("profile", DEFAULT_EXPORT_SETTINGS["profile"])
+    if profile not in allowed_profiles:
+        return None, f"profile for {codec} must be one of {', '.join(allowed_profiles)}"
+    settings["profile"] = profile
+
+    pix_fmt = raw.get("pix_fmt", settings["pix_fmt"])
+    if pix_fmt not in EXPORT_PIX_FMTS:
+        return None, f"pix_fmt must be one of {', '.join(EXPORT_PIX_FMTS)}"
+    settings["pix_fmt"] = pix_fmt
+
+    ten_bit_pix = pix_fmt in TEN_BIT_PIX_FMTS
+    ten_bit_profile = profile in TEN_BIT_PROFILES
+    if ten_bit_profile and not ten_bit_pix:
+        return None, f"profile {profile} needs a 10-bit pixel format ({', '.join(TEN_BIT_PIX_FMTS)})"
+    if ten_bit_pix and profile != "auto" and not ten_bit_profile:
+        return None, f"pixel format {pix_fmt} is 10-bit, so profile {profile} would truncate it"
+
+    extra_args = raw.get("extra_args", "")
+    if not isinstance(extra_args, str):
+        return None, "extra_args must be a string"
+    ok, reason, _ = validate_extra_encode_args(extra_args)
+    if not ok:
+        return None, f"extra args: {reason}"
+    settings["extra_args"] = extra_args.strip()
+
+    return settings, None
 
 
 def audio_args(source_info):
@@ -251,6 +444,11 @@ def encode_args(source_info, quality="lossless"):
         (codec="h264" for under50mb, codec="hevc" for under50mb_hevc — HEVC
         gets better quality per bit at the same size, at the cost of a much
         slower two-pass encode).
+      "custom" — the same kind of two-pass size-capped mode as those two, but
+        with every flag (cap, codec, preset, profile, pixel format, maxrate/
+        bufsize multipliers, extra args) supplied by the FFmpeg Custom Settings
+        window instead of hardcoded here. Also not produced by this function —
+        see render_custom_two_pass().
 
     Audio is identical in all modes here: AAC matched to (never worse
     than) the source's bitrate/sample-rate/channels — AAC is lossy by
@@ -450,6 +648,156 @@ def render_size_capped(input_args, filter_args, source_info, out_path, duration_
         raise RuntimeError(last_stderr)
     finally:
         for suffix in _PASSLOG_SUFFIXES[codec]:
+            try:
+                os.remove(stats_prefix + suffix)
+            except OSError:
+                pass
+
+
+def custom_target_bitrate_kbps(duration_s, target_bytes, safety):
+    """Video bitrate in kbps for the "custom" mode, as specified:
+
+        (target_bytes * 8 * safety) / duration_s / 1000
+
+    Note what this deliberately does NOT do, in contrast to
+    target_bitrate_for_size() above: it hands the WHOLE byte budget to video
+    and reserves nothing for audio. The AAC track is muxed on top of it, so
+    the real file is larger than this bitrate alone implies — which is exactly
+    what the safety headroom (default 0.90) is there to absorb, and why the
+    measure-and-retry loop in render_custom_two_pass() is what actually
+    enforces the cap. The consequence worth knowing: on a long render with a
+    high-bitrate source audio track, audio can eat a big enough share of the
+    budget that the first attempt overshoots and a retry is needed (each retry
+    re-encodes both passes, so it costs real time). Lower the safety headroom
+    for those, rather than expecting the formula to account for audio.
+
+    Floored at MIN_VIDEO_BITRATE so a wildly undersized cap produces a bad
+    render rather than a zero-bitrate ffmpeg error.
+    """
+    duration_s = max(duration_s, 0.1)
+    kbps = (target_bytes * 8 * safety) / duration_s / 1000
+    return max(int(kbps), MIN_VIDEO_BITRATE // 1000)
+
+
+def render_custom_two_pass(input_args, filter_args, source_info, out_path, duration_s,
+                            settings=None, timeout=1800, max_attempts=4):
+    """Two-pass ABR render driven by the FFmpeg Custom Settings window's
+    `settings` dict instead of by hardcoded flags — the "custom" quality mode.
+
+    Same contract as render_size_capped(): returns None on success (the file at
+    out_path is the result), raises RuntimeError carrying the responsible
+    ffmpeg's stderr on failure, including when every retry still overshoots the
+    cap. Raises ValueError if `settings` doesn't validate (only reachable via a
+    hand-edited .export_settings.json — the routes validate on save).
+
+    This deliberately MIRRORS render_size_capped rather than generalizing it.
+    The two differ in every substantive decision — legacy reserves audio bits
+    inside the budget, hardcodes preset/maxrate/bufsize per codec, and injects
+    a 10-bit pixel format only for HEVC — so folding them together would mean a
+    single function whose behavior is switched by a flag at every step, and any
+    edit to the shared body would put the two hand-verified, frame-hash-checked
+    under50mb* modes at risk. The duplicated part is small (the -pass flags) and
+    the codec-specific facts behind it are documented once, in
+    render_size_capped's docstring: libx265 has no -pass/-passlogfile and uses
+    -x265-params "pass=N:stats=<file>", but does honor top-level
+    -maxrate/-bufsize.
+
+    Platform notes, all deliberate for this macOS/Apple Silicon target:
+      - Software libx265/libx264 only (see EXPORT_CODECS) — no NVENC exists
+        here, and VideoToolbox has no two-pass mode.
+      - The pass-1 sink is os.devnull, i.e. /dev/null (never NUL).
+      - No zscale/colorspace conversion is inserted. Sources are already
+        Rec.709 YUV, so a colorspace filter would be a no-op at best and a
+        wrong-primaries conversion at worst; the only pixel work done here is
+        the bit-depth/chroma format the user asked for.
+      - HEVC output is not browser-safe (hevc is absent from
+        BROWSER_SAFE_VIDEO_CODECS), so the Export Bin's <video> plays it
+        through the existing /preview transcode path. This mode is for
+        delivery, not for previewing.
+
+    The chosen pixel format is spliced into the existing filter chain via
+    _inject_pixel_format for BOTH codecs (legacy does it for HEVC only), since
+    here it's a user-visible setting that has to be honored even when it matches
+    the source's own format.
+    """
+    settings, error = normalize_export_settings(settings or {})
+    if error:
+        raise ValueError(error)
+
+    ok, reason, extra_args = validate_extra_encode_args(settings["extra_args"])
+    if not ok:
+        raise ValueError(f"extra args: {reason}")
+
+    codec = settings["codec"]
+    # _PASSLOG_SUFFIXES is keyed by the stream codec name, not the encoder's.
+    passlog_key = "hevc" if codec == "libx265" else "h264"
+    target_bytes = int(settings["target_mib"] * 1024 * 1024)
+
+    filter_args = _inject_pixel_format(filter_args, settings["pix_fmt"])
+    stats_prefix = out_path + ".ffpass"
+    last_stderr = ""
+    try:
+        for attempt in range(max_attempts):
+            shrink = 0.85 ** attempt  # shrink the budget 15% per retry
+            kbps = custom_target_bitrate_kbps(
+                duration_s, int(target_bytes * shrink), settings["safety"])
+
+            common_video = ["-c:v", codec, "-b:v", f"{kbps}k",
+                            "-maxrate", f"{int(kbps * settings['maxrate_mult'])}k",
+                            "-bufsize", f"{int(kbps * settings['bufsize_mult'])}k",
+                            "-preset", settings["preset"]]
+            if settings["profile"] != "auto":
+                common_video += ["-profile:v", settings["profile"]]
+            common_video += extra_args
+
+            if codec == "libx265":
+                pass_args = [
+                    ["-x265-params", f"pass=1:stats={stats_prefix}"],
+                    ["-x265-params", f"pass=2:stats={stats_prefix}"],
+                ]
+            else:
+                pass_args = [
+                    ["-pass", "1", "-passlogfile", stats_prefix],
+                    ["-pass", "2", "-passlogfile", stats_prefix],
+                ]
+
+            if source_info.get("has_audio"):
+                # Source-quality AAC floored at the same 96 kbps the other
+                # size-capped mode uses. These bits are NOT deducted from the
+                # video budget — see custom_target_bitrate_kbps.
+                audio_rate = max(source_info.get("audio_bit_rate") or 0,
+                                 UNDER_50MB_MIN_AUDIO_BITRATE)
+                audio_out = ["-c:a", "aac", "-b:a", str(audio_rate),
+                             "-ar", str(source_info.get("audio_sample_rate") or 44100),
+                             "-ac", str(source_info.get("audio_channels") or 2)]
+            else:
+                audio_out = ["-an"]
+
+            # Extra args ride along in pass 1 too, so the complexity map is
+            # gathered under the same encoder settings that spend it. Verified
+            # by hand that output-only flags (-movflags, -tag:v) are simply
+            # ignored by the null muxer rather than erroring, so this is safe
+            # for the whole documented range of the field.
+            pass1 = (input_args + filter_args + common_video + pass_args[0] +
+                     ["-an", "-f", "null", os.devnull])
+            pass2 = (input_args + filter_args + common_video + audio_out +
+                     pass_args[1] + [out_path])
+
+            for args in (pass1, pass2):
+                result = run_ffmpeg(args, timeout=timeout)
+                if result.returncode != 0:
+                    raise RuntimeError(result.stderr[-4000:])
+
+            actual_size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
+            if actual_size <= target_bytes:
+                return None
+            last_stderr = (
+                f"encode succeeded but output was {actual_size} bytes "
+                f"(over the {target_bytes} byte cap) after {attempt + 1} attempt(s)"
+            )
+        raise RuntimeError(last_stderr)
+    finally:
+        for suffix in _PASSLOG_SUFFIXES[passlog_key]:
             try:
                 os.remove(stats_prefix + suffix)
             except OSError:
@@ -1275,6 +1623,81 @@ def estimate_reverse_memory_bytes(width, height, duration_s, fps):
     return width * height * 3 * fps * duration_s
 
 
+def _media_path_ok(p):
+    """(ok, reason) for one path-looking ffmpeg argument: it must resolve inside
+    INPUT_DIR or OUTPUT_DIR, and an input must already exist. Shared by
+    validate_ffmpeg_command (the chat assistant's approved commands) and
+    validate_extra_encode_args (the export settings' free-text field) so
+    "a path ffmpeg is allowed to touch" has exactly one definition."""
+    abs_p = p if os.path.isabs(p) else os.path.join(PROJECT_ROOT, p)
+    resolved = os.path.realpath(abs_p)
+    in_input = resolved.startswith(os.path.realpath(INPUT_DIR) + os.sep)
+    in_output = resolved.startswith(os.path.realpath(OUTPUT_DIR) + os.sep)
+    if not (in_input or in_output):
+        return False, f"path outside input/output: {p!r}"
+    if in_input and not os.path.exists(resolved):
+        return False, f"input file does not exist: {p!r}"
+    return True, None
+
+
+def _looks_like_path(tok):
+    """Whether a lone argument value should be treated as a filesystem path and
+    put through _media_path_ok. Deliberately narrow: most values in an encoder
+    flag fragment are not paths ("hvc1", "+faststart", "60"), and running the
+    containment check on those would reject the whole field. A bare media
+    filename counts — an accidental output name typed into extra args is the
+    realistic mistake, and it has no slash in it."""
+    return (os.sep in tok or tok.startswith("~")
+            or tok.lower().endswith(MEDIA_EXTENSIONS))
+
+
+def validate_extra_encode_args(text):
+    """Parse the "custom" mode's Advanced extra args field into an argv list.
+    Returns (ok, reason, args) — the same shape validate_ffmpeg_command uses,
+    and reached through the same two pieces of machinery: shlex.split for
+    tokenizing, and _media_path_ok for any token that looks like a path.
+
+    An empty/blank field is valid and yields []. As with
+    validate_ffmpeg_command, no character blocklist is applied to argument
+    CONTENTS: these args land in a list handed to subprocess.run (never
+    shell=True), so ; ( ) $ are inert bytes in one argv element. What is
+    rejected instead is structural:
+
+      - the fragment must start with a flag, so a stray output filename or a
+        pasted whole `ffmpeg ...` command is caught rather than being appended
+        as a second output;
+      - flags this mode already owns or that would break the render, per
+        _EXTRA_ARG_CONFLICTS (ffmpeg takes the LAST occurrence of a flag, so an
+        unrejected duplicate would silently override a settings field);
+      - any path-looking token that isn't inside input/ or output/.
+    """
+    if not isinstance(text, str):
+        return False, "extra args must be a string", None
+    if not text.strip():
+        return True, None, []
+    try:
+        tokens = shlex.split(text)
+    except ValueError as e:
+        return False, f"could not parse: {e}", None
+    if not tokens:
+        return True, None, []
+
+    if tokens[0] in ("ffmpeg", FFMPEG):
+        return False, "give flags only, not a whole ffmpeg command", None
+    if not tokens[0].startswith("-"):
+        return False, f"must start with a flag, got {tokens[0]!r}", None
+
+    for tok in tokens:
+        if tok in _EXTRA_ARG_CONFLICTS:
+            return False, f"{tok} is not allowed here ({_EXTRA_ARG_CONFLICTS[tok]})", None
+        if _looks_like_path(tok):
+            ok, reason = _media_path_ok(tok)
+            if not ok:
+                return False, reason, None
+
+    return True, None, tokens
+
+
 def validate_ffmpeg_command(cmd):
     """Parse `cmd` into a safe argv list. Returns (ok, reason, argv).
 
@@ -1309,13 +1732,8 @@ def validate_ffmpeg_command(cmd):
         path_args.append(argv[-1])
 
     for p in path_args:
-        abs_p = p if os.path.isabs(p) else os.path.join(PROJECT_ROOT, p)
-        resolved = os.path.realpath(abs_p)
-        in_input = resolved.startswith(os.path.realpath(INPUT_DIR) + os.sep)
-        in_output = resolved.startswith(os.path.realpath(OUTPUT_DIR) + os.sep)
-        if not (in_input or in_output):
-            return False, f"path outside input/output: {p!r}", None
-        if in_input and not os.path.exists(resolved):
-            return False, f"input file does not exist: {p!r}", None
+        ok, reason = _media_path_ok(p)
+        if not ok:
+            return False, reason, None
 
     return True, None, argv
