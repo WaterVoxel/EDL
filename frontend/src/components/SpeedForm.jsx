@@ -49,11 +49,11 @@ export default function SpeedForm({ selectedClip, setClips, noiseEnabled = false
           time, never any clip's own audio or a single video frame. Amber
           matches the other render-affecting toggle (ANIM) rather than a
           clip-editing color. On state is carried by color alone — the label
-          stays "A1 Noise" either way so the button never changes size. */}
+          stays "A1 Room Tone" either way so the button never changes size. */}
       <button
         onClick={onToggleNoise}
         title={noiseEnabled
-          ? 'Turn off noise fill — holds and round-ups render as pure silence'
+          ? 'Turn off room tone — holds and round-ups render as pure silence'
           : 'Fill the silent gap a hold or round-up leaves in the audio with room tone instead of pure silence. Holds and round-ups only, and never underneath the A1 track'}
         className={`px-1.5 py-0.5 text-[9px] rounded border transition-colors ${
           noiseEnabled
@@ -61,7 +61,7 @@ export default function SpeedForm({ selectedClip, setClips, noiseEnabled = false
             : 'bg-neutral-800 text-neutral-400 border-neutral-700 hover:text-neutral-200'
         }`}
       >
-        A1 Noise
+        A1 Room Tone
       </button>
     </div>
   )

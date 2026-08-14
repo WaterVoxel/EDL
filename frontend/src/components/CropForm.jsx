@@ -26,7 +26,11 @@ export default function CropForm({ selectedClip, setClips, animateEnabled = fals
 
   return (
     <div className="flex items-center gap-1.5">
-      <span className="text-[9px] font-semibold uppercase tracking-wide text-neutral-500 whitespace-nowrap">Crop</span>
+      {/* Labelled for V1 because that's the track being cropped in practice,
+          but note the control is fed `activeSelectedClip` — it follows
+          `focusedTrack`, so with a V2 clip focused this same dropdown crops
+          V2. Make the label track-aware if that ever becomes confusing. */}
+      <span className="text-[9px] font-semibold uppercase tracking-wide text-neutral-500 whitespace-nowrap">V1 CROP</span>
       {!selectedClip && <span className="text-[9px] text-neutral-600">select a clip</span>}
       {selectedClip && !hasResolution && <span className="text-[9px] text-neutral-600">resolution unknown</span>}
       {selectedClip && hasResolution && (

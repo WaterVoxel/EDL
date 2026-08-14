@@ -1,4 +1,5 @@
 import { useRef, useEffect, useCallback, useState } from 'react'
+import { createPortal } from 'react-dom'
 import TimelineClip from './TimelineClip'
 import AudioBedBar from './AudioBedBar'
 import AudioBedPlayer from './AudioBedPlayer'
@@ -42,6 +43,12 @@ export default function Timeline({
   v2RenderMode = 'A', onSetV2RenderMode,
   audioBed = null, onAddToA1, onRemoveBed, a1Visible = true, onToggleA1,
   a1Muted = false, noiseEnabled = false,
+  // The two halves of the bar swap, so each one is rendered where the other
+  // used to be: `toolbar` is App.jsx's clip edit row, handed down as a node
+  // and drawn as this card's first row; `barSlot` is the DOM element up in
+  // App.jsx that this card's own action bar is portaled into. Both default to
+  // nothing, so the component still renders standalone without either.
+  barSlot = null, toolbar = null,
 }) {
   const selectItem = onSelectItem || ((id) => onSelectId(id))
   const selectItem2 = onSelectItem2 || (() => {})
@@ -409,131 +416,152 @@ export default function Timeline({
     if (pos != null) transport.seekTimeline(pos)
   }
 
+  // This card's action bar: the transport clock, the two V2-derived edit
+  // actions, and the render buttons. It renders through a portal into
+  // `barSlot` — the app-level row above this card, which is where the clip
+  // edit tools used to be — instead of as this card's own header. Every
+  // control in it is driven by `transport` (a hook that lives in THIS
+  // component) or by handlers passed to it, so the JSX has to stay here; a
+  // portal moves only the DOM parent, keeping the React tree, the handlers,
+  // and the state exactly as they were.
+  const actionsBar = (
+    <div className="grid grid-cols-[1fr_auto_1fr] items-center">
+      <div className="flex items-center gap-1.5 justify-self-start">
+        {/* The two V2-derived edit actions live on THIS side, away from the
+            render buttons on the right: they rewrite clips rather than write
+            a file, so keeping them here holds "changes the timeline" and
+            "produces an export" visually apart. Undo used to lead this group
+            and now sits ahead of Hold in App.jsx's editToolbar instead — the
+            onUndo/canUndo props stay, because this component's key handler
+            still owns Cmd/Ctrl+Z. With no V2 clips this group renders empty,
+            which the 1fr_auto_1fr grid absorbs without moving the transport. */}
+        {clips.length > 0 && track2Clips.length > 0 && (
+          <button
+            onClick={onReconstruct}
+            title="Strip V1's edits (holds, reverse, speed, crop) back out of V2's own clip(s) — for footage that was rendered, taken through an external tool, and dropped back onto V2"
+            className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] rounded bg-orange-600 text-white hover:bg-orange-500"
+          >
+            V2 Reconstruct
+          </button>
+        )}
+        {track2Clips.length > 0 && (
+          <button
+            onClick={onAnalyze}
+            title="Cut the V2 file at the same time locations as V1 (including holds and round-up)"
+            className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] rounded bg-teal-700 text-white hover:bg-teal-600"
+          >
+            V2 Analyzer
+          </button>
+        )}
+      </div>
+      <div className="justify-self-center">
+        <TransportBar
+          playing={transport.playing}
+          looping={transport.looping}
+          timelinePos={transport.timelinePos}
+          totalDuration={transport.totalDuration}
+          fps={activeFps}
+          onPlay={transport.play}
+          onStop={transport.stop}
+          onGoToStart={transport.goToStart}
+          onGoToEnd={transport.goToEnd}
+          onStepFrames={transport.stepFrames}
+          onToggleLoop={transport.toggleLoop}
+          onSeekTimeline={transport.seekTimeline}
+          displayMode={timeDisplayMode}
+          onToggleDisplayMode={onToggleTimeDisplayMode}
+        />
+      </div>
+      <div className="flex items-center gap-1.5 justify-self-end">
+        {/* The primary render. Lives in this bar rather than in the Preview
+            header so every render action sits in one row, and it reads
+            left-to-right as V1 then V2. Styled like Render V2 (outline, not a
+            filled button) since they're the same kind of action, in indigo
+            because that's V1's color everywhere else. Always present but
+            disabled with no clips — it's the main action, so it shouldn't
+            vanish. */}
+        <button
+          onClick={onRender}
+          disabled={rendering || clips.length === 0}
+          title="Apply every V1 edit decision in one lossless pass and write the result to the export folder"
+          className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] rounded border border-indigo-600 text-indigo-400 hover:bg-indigo-900/40 disabled:border-neutral-700 disabled:text-neutral-600 disabled:hover:bg-transparent"
+        >
+          {rendering ? 'Rendering…' : 'Render V1'}
+        </button>
+        {track2Clips.length > 0 && (
+          <button
+            onClick={onRenderV2}
+            title={v2RenderMode === 'AB'
+              ? 'Render V2 composited over V1 as one clip'
+              : 'Render the V2 track to a file'}
+            className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] rounded border border-teal-700 text-teal-400 hover:bg-teal-900/40"
+          >
+            Render V2
+          </button>
+        )}
+        {/* What "Render V2" produces: A = the V2 track alone (default),
+            A/B = V2 composited on top of V1 as a single clip. A segmented
+            switch rather than a checkbox, since the two are alternatives
+            and the active one names the output. */}
+        {track2Clips.length > 0 && (
+          <div
+            className="flex items-stretch rounded overflow-hidden border border-teal-700 text-[9px] leading-none"
+            role="group"
+            aria-label="Render V2 output mode"
+          >
+            <button
+              onClick={() => onSetV2RenderMode?.('A')}
+              aria-pressed={v2RenderMode !== 'AB'}
+              title="A — render only the V2 track, as its own file"
+              className={`px-1.5 py-0.5 ${v2RenderMode !== 'AB' ? 'bg-teal-700 text-white' : 'text-teal-400 hover:bg-teal-900/40'}`}
+            >
+              A
+            </button>
+            <button
+              onClick={() => onSetV2RenderMode?.('AB')}
+              aria-pressed={v2RenderMode === 'AB'}
+              title="A/B — render V2 on top of V1, composited into one clip"
+              className={`px-1.5 py-0.5 border-l border-teal-700 ${v2RenderMode === 'AB' ? 'bg-teal-700 text-white' : 'text-teal-400 hover:bg-teal-900/40'}`}
+            >
+              A/B
+            </button>
+          </div>
+        )}
+        {/* Last in the row, past the V2 group: it's the only audio render, so
+            it sits apart from the two picture renders rather than between
+            them. Amber for the same reason — indigo is V1's and teal is V2's,
+            and amber is already the A1 Room Tone toggle's color, so the audio
+            actions read as one family. Shown only when there is something on
+            A1 to render — a loaded track, or A1 Room Tone on (room tone in the
+            holds is A1 content too) — the same "appears with its track" rule
+            Render V2 follows. */}
+        {(audioBed || noiseEnabled) && (
+          <button
+            onClick={onRenderA1}
+            disabled={rendering || clips.length === 0}
+            title="Render the A1 track alone to a .wav, timed to the V1 sequence — same length, ready to line up beside the V1 file"
+            className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] rounded border border-amber-600 text-amber-400 hover:bg-amber-900/40 disabled:border-neutral-700 disabled:text-neutral-600 disabled:hover:bg-transparent"
+          >
+            Render A1
+          </button>
+        )}
+      </div>
+    </div>
+  )
+
   return (
     <div className="rounded-md bg-neutral-900 border border-neutral-800 flex flex-col">
-      <div className="grid grid-cols-[1fr_auto_1fr] items-center px-2.5 py-1.5 border-b border-neutral-800">
-        <div className="flex items-center gap-1.5 justify-self-start">
-          <button
-            onClick={onUndo}
-            disabled={!canUndo}
-            title="Undo last V1 edit (Cmd/Ctrl+Z)"
-            className="w-5 h-5 flex items-center justify-center rounded text-[12px] text-neutral-400 hover:text-white hover:bg-neutral-700 disabled:opacity-40"
-          >↩</button>
-          {/* The two V2-derived edit actions live on THIS side, away from the
-              render buttons on the right: they rewrite clips rather than write
-              a file, so grouping them with Undo keeps "changes the timeline"
-              and "produces an export" visually separate. */}
-          {clips.length > 0 && track2Clips.length > 0 && (
-            <button
-              onClick={onReconstruct}
-              title="Strip V1's edits (holds, reverse, speed, crop) back out of V2's own clip(s) — for footage that was rendered, taken through an external tool, and dropped back onto V2"
-              className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] rounded bg-orange-600 text-white hover:bg-orange-500"
-            >
-              Reconstruct
-            </button>
-          )}
-          {track2Clips.length > 0 && (
-            <button
-              onClick={onAnalyze}
-              title="Cut the V2 file at the same time locations as V1 (including holds and round-up)"
-              className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] rounded bg-teal-700 text-white hover:bg-teal-600"
-            >
-              Analize
-            </button>
-          )}
-        </div>
-        <div className="justify-self-center">
-          <TransportBar
-            playing={transport.playing}
-            looping={transport.looping}
-            timelinePos={transport.timelinePos}
-            totalDuration={transport.totalDuration}
-            fps={activeFps}
-            onPlay={transport.play}
-            onStop={transport.stop}
-            onGoToStart={transport.goToStart}
-            onGoToEnd={transport.goToEnd}
-            onStepFrames={transport.stepFrames}
-            onToggleLoop={transport.toggleLoop}
-            onSeekTimeline={transport.seekTimeline}
-            displayMode={timeDisplayMode}
-            onToggleDisplayMode={onToggleTimeDisplayMode}
-          />
-        </div>
-        <div className="flex items-center gap-1.5 justify-self-end">
-          {/* The primary render. Lives here rather than in the Preview header
-              so every render action sits in one row, and it reads left-to-right
-              as V1 then V2. Styled like Render V2 (outline, not a filled
-              button) since they're the same kind of action, in indigo because
-              that's V1's color everywhere else. Always present but disabled
-              with no clips — it's the main action, so it shouldn't vanish. */}
-          <button
-            onClick={onRender}
-            disabled={rendering || clips.length === 0}
-            title="Apply every V1 edit decision in one lossless pass and write the result to the export folder"
-            className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] rounded border border-indigo-600 text-indigo-400 hover:bg-indigo-900/40 disabled:border-neutral-700 disabled:text-neutral-600 disabled:hover:bg-transparent"
-          >
-            {rendering ? 'Rendering…' : 'Render V1'}
-          </button>
-          {track2Clips.length > 0 && (
-            <button
-              onClick={onRenderV2}
-              title={v2RenderMode === 'AB'
-                ? 'Render V2 composited over V1 as one clip'
-                : 'Render the V2 track to a file'}
-              className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] rounded border border-teal-700 text-teal-400 hover:bg-teal-900/40"
-            >
-              Render V2
-            </button>
-          )}
-          {/* What "Render V2" produces: A = the V2 track alone (default),
-              A/B = V2 composited on top of V1 as a single clip. A segmented
-              switch rather than a checkbox, since the two are alternatives
-              and the active one names the output. */}
-          {track2Clips.length > 0 && (
-            <div
-              className="flex items-stretch rounded overflow-hidden border border-teal-700 text-[9px] leading-none"
-              role="group"
-              aria-label="Render V2 output mode"
-            >
-              <button
-                onClick={() => onSetV2RenderMode?.('A')}
-                aria-pressed={v2RenderMode !== 'AB'}
-                title="A — render only the V2 track, as its own file"
-                className={`px-1.5 py-0.5 ${v2RenderMode !== 'AB' ? 'bg-teal-700 text-white' : 'text-teal-400 hover:bg-teal-900/40'}`}
-              >
-                A
-              </button>
-              <button
-                onClick={() => onSetV2RenderMode?.('AB')}
-                aria-pressed={v2RenderMode === 'AB'}
-                title="A/B — render V2 on top of V1, composited into one clip"
-                className={`px-1.5 py-0.5 border-l border-teal-700 ${v2RenderMode === 'AB' ? 'bg-teal-700 text-white' : 'text-teal-400 hover:bg-teal-900/40'}`}
-              >
-                A/B
-              </button>
-            </div>
-          )}
-          {/* Last in the row, past the V2 group: it's the only audio render, so
-              it sits apart from the two picture renders rather than between
-              them. Amber for the same reason — indigo is V1's and teal is V2's,
-              and amber is already the A1 Noise toggle's color, so the audio
-              actions read as one family. Shown only when there is something on
-              A1 to render — a loaded track, or A1 Noise on (room tone in the
-              holds is A1 content too) — the same "appears with its track" rule
-              Render V2 follows. */}
-          {(audioBed || noiseEnabled) && (
-            <button
-              onClick={onRenderA1}
-              disabled={rendering || clips.length === 0}
-              title="Render the A1 track alone to a .wav, timed to the V1 sequence — same length, ready to line up beside the V1 file"
-              className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] rounded border border-amber-600 text-amber-400 hover:bg-amber-900/40 disabled:border-neutral-700 disabled:text-neutral-600 disabled:hover:bg-transparent"
-            >
-              Render A1
-            </button>
-          )}
-        </div>
-      </div>
+      {/* The action bar above, drawn into App.jsx's row instead of here. */}
+      {barSlot && createPortal(actionsBar, barSlot)}
+
+      {/* …and in its place, this card's first row is now the clip edit
+          toolbar (Hold, Trim, Duplicate, Reverse, Split, Raise, Speed +
+          A1 Room Tone). It arrives as a ready-made node from App.jsx because
+          every control in it acts on whichever TRACK is focused — clips,
+          setters and selection that all live up there. */}
+      {toolbar && (
+        <div className="px-2.5 py-1.5 border-b border-neutral-800">{toolbar}</div>
+      )}
 
       {clips.length === 0 && track2Clips.length === 0 ? (
         <div className="flex items-center justify-center h-24 text-[11px] text-neutral-600">
@@ -803,6 +831,7 @@ export default function Timeline({
                         pps={PPS}
                         gapPx={GAP}
                         muted={a1Muted}
+                        noiseEnabled={noiseEnabled}
                         onRemove={onRemoveBed}
                       />
                     </div>

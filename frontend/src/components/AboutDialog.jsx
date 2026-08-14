@@ -15,7 +15,7 @@ export default function AboutDialog({ onClose }) {
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-800">
-          <h3 className="text-sm font-bold text-white tracking-tight">NARA LOSSLESS EDITOR</h3>
+          <h3 className="text-sm font-bold text-white tracking-tight">NARA EDITOR</h3>
           <button
             onClick={onClose}
             className="w-5 h-5 flex items-center justify-center rounded text-neutral-500 hover:text-white hover:bg-neutral-700 text-[13px]"
@@ -24,7 +24,7 @@ export default function AboutDialog({ onClose }) {
 
         <div className="flex-1 overflow-y-auto px-4 py-3 flex flex-col gap-4">
           <p className="text-[11px] text-neutral-300 leading-relaxed">
-            NARA LOSSLESS EDITOR is a local, EDL-style video editor built on ffmpeg. Every edit — trim, splice,
+            NARA EDITOR is a local, EDL-style video editor built on ffmpeg. Every edit — trim, splice,
             reverse, slow down, hold, round-up — is staged as a non-destructive decision and only
             applied when you press Render, in a single ffmpeg pass. Source files are never modified.
           </p>
@@ -188,14 +188,14 @@ export default function AboutDialog({ onClose }) {
               V2 is a reference lane above the main track for round-tripping edits between files.
             </p>
             <p>
-              <strong>① Analize</strong> — drop any video onto V2, and Analyze clones V1's cut
+              <strong>① V2 Analyzer</strong> — drop any video onto V2, and Analyze clones V1's cut
               structure onto it at identical time locations: same IN/OUT points, same hold and
               round-up durations, always played forward. Use it to conform an alternate take, a
               cleaned-up master, or an AI-processed version of the footage to the exact cuts you
               built on V1.
             </p>
             <p>
-              <strong>② Reconstruct</strong> — the inverse: it reads V1's decisions and undoes them,
+              <strong>② V2 Reconstruct</strong> — the inverse: it reads V1's decisions and undoes them,
               placing the full, untrimmed, un-reversed, hold-free original source file(s) on V2 —
               one clip per distinct source, in the order they appear. The result is the pre-edit
               state of the footage, verified bit-exact against the original.
@@ -243,8 +243,15 @@ export default function AboutDialog({ onClose }) {
             <p>
               Frame-accurate transport (play/stop, frame stepping, first/last frame, loop, editable
               timecode with a TC/frames toggle) · project Library with save/open · .nara project
-              export · EDL export · export-destination picker and right-click "Show destination" ·
-              favorites, sorting, and filtering in both media panels.
+              export · EDL export · <strong>frame grabs</strong> from the Preview header — download the
+              current frame as a PNG at full source resolution, or copy it to the clipboard (the
+              decoded frame only; the crop box and V2 overlay layers aren't baked in) ·{' '}
+              <strong>Render without audio</strong> on any render (picture only;
+              it also leaves out the A1 bed and room tone) · export-destination picker · right-click{' '}
+              <strong>Rename</strong>,{' '}
+              <strong>Show destination</strong> and <strong>Delete</strong> in both media bins
+              (renaming is blocked while a clip on the timeline still points at that file) · favorites, sorting, and filtering in
+              both media panels.
             </p>
           </Section>
         </div>

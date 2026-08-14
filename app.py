@@ -231,6 +231,14 @@ def get_export_quality():
     return quality if quality in fu.EXPORT_QUALITIES else "lossless"
 
 
+def resolve_media_dir(which):
+    """Map a request's `dir` field onto one of the two media folders: "input"
+    is the Media Bin's sources, anything else (the default) the Export Bin.
+    Only the export side is user-relocatable, so it goes through
+    get_output_dir()."""
+    return fu.INPUT_DIR if which == "input" else get_output_dir()
+
+
 @app.route("/api/browse_directory", methods=["POST"])
 def browse_directory():
     """Open a native macOS folder-picker dialog and return the selected path."""
@@ -264,11 +272,12 @@ def browse_directory():
 
 @app.route("/api/reveal_file", methods=["POST"])
 def reveal_file():
-    """Reveal a rendered file in the OS file browser (Finder on macOS)."""
+    """Reveal a source (dir="input") or rendered file in the OS file browser
+    (Finder on macOS)."""
     data = request.get_json(force=True)
     name = data.get("name") or ""
     try:
-        path = fu.safe_path(name, get_output_dir())
+        path = fu.safe_path(name, resolve_media_dir(data.get("dir")))
     except fu.PathError as e:
         return jsonify({"error": str(e)}), 400
     if not os.path.exists(path):
@@ -285,18 +294,20 @@ def reveal_file():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/rename_output", methods=["POST"])
-def rename_output():
-    """Rename a file in the Export Bin (output/) in place, preserving its
-    extension. safe_path guards both names against traversal; the new name
-    must be a plain media filename and must not collide with an existing
-    one."""
+@app.route("/api/rename_file", methods=["POST"])
+def rename_file():
+    """Rename a file in place in the Export Bin (output/) or, with
+    dir="input", in the Media Bin (input/) — preserving its extension.
+    safe_path guards both names against traversal; the new name must be a
+    plain media filename and must not collide with an existing one. This is
+    the one write the app makes to input/: it renames, never rewrites, so a
+    source file's bytes are still untouched."""
     data = request.get_json(force=True)
     old = data.get("name") or ""
     new = secure_filename(data.get("newName") or "")
     if not new:
         return jsonify({"error": "new name required"}), 400
-    out_dir = get_output_dir()
+    out_dir = resolve_media_dir(data.get("dir"))
     try:
         old_path = fu.safe_path(old, out_dir)
     except fu.PathError as e:
@@ -356,6 +367,25 @@ def set_export_settings():
         "output_dir": settings.get("output_dir", ""),
         "quality": get_export_quality(),
     })
+
+
+@app.route("/api/outputs/<path:name>", methods=["DELETE"])
+def delete_output_file(name):
+    # Single-file counterpart to clear_output: removes one render from the
+    # export dir. Mirrors delete_input_file exactly — safe_path traversal
+    # guard, MEDIA_EXTENSIONS filter (the same set clear_output sweeps) — but
+    # resolves against get_output_dir(), so it deletes from wherever exports
+    # are actually being written, not just the default output/.
+    try:
+        path = fu.safe_path(name, get_output_dir())
+    except fu.PathError as e:
+        return jsonify({"error": str(e)}), 400
+    if not name.lower().endswith(fu.MEDIA_EXTENSIONS):
+        return jsonify({"error": "not a media file"}), 400
+    if not os.path.isfile(path):
+        return jsonify({"error": "file not found"}), 404
+    os.remove(path)
+    return jsonify({"ok": True, "removed": name})
 
 
 @app.route("/api/clear_output", methods=["POST"])

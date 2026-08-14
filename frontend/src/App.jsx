@@ -7,6 +7,7 @@ import TourOverlay from './components/TourOverlay'
 import MediaLibrary from './components/MediaLibrary'
 import OutputPanel from './components/OutputPanel'
 import PreviewPlayer from './components/PreviewPlayer'
+import FrameGrabButtons from './components/FrameGrabButtons'
 import TechInfoPanel from './components/TechInfoPanel'
 import HoldFrameForm from './components/HoldFrameForm'
 import TrimForm from './components/TrimForm'
@@ -26,7 +27,7 @@ import ProjectLibrary from './components/ProjectLibrary'
 import AboutDialog from './components/AboutDialog'
 import Timeline from './components/Timeline/Timeline'
 import { clipBaseSec, roundUpAmount } from './clipMath'
-import { loadTrackTags, tagTrack, isAudioFile } from './fileList'
+import { loadTrackTags, tagTrack, renameTrackTag, isAudioFile } from './fileList'
 import { analyzeAgainstV1, reconstructFromV1 } from './analyzeMath'
 import { matchOverlays } from './overlayMatch'
 
@@ -34,6 +35,33 @@ const MIN_RIGHT_PANEL = 260
 const MAX_RIGHT_PANEL = 720
 const MIN_LEFT_PANEL = 180
 const MAX_LEFT_PANEL = 560
+
+// Same inline-SVG idiom as Timeline's EyeIcon and the frame-grab icons:
+// 24-unit box, stroke: currentColor, so the button's own text color drives it.
+// A stroked bulb replaced the 💡 emoji: the emoji stayed yellow no matter what
+// the button did, so it couldn't invert against the amber "tour running" fill,
+// and it rendered at whatever weight the system font decided. Drawn one pixel
+// larger than DocIcon because a narrow outline reads lighter than a page's
+// block shape at the same box size.
+function BulbIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M15 14c.2-1 .7-1.7 1.5-2.5A5.5 5.5 0 0 0 18 8a6 6 0 0 0-12 0c0 1.2.4 2.5 1.5 3.5.8.8 1.3 1.5 1.5 2.5" />
+      <path d="M9.5 17.5h5" />
+      <path d="M10.5 20.5h3" />
+    </svg>
+  )
+}
+
+function DocIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+      <path d="M14 3v5h5" />
+      <path d="M9 13h6M9 17h4" />
+    </svg>
+  )
+}
 
 function AppInner() {
   const [inputFiles, setInputFiles] = useState([])
@@ -100,7 +128,9 @@ function AppInner() {
   }, [])
   const [rendering, setRendering] = useState(false)
   const [showRenderDialog, setShowRenderDialog] = useState(false)
-  // Noise gap fill (the Speed row's "A1 Noise" toggle): when on, the silent gap a
+  // Room-tone gap fill (the Speed row's "A1 Room Tone" toggle — `noiseEnabled`
+  // and the `fillNoise`/`noise_*` wire names are the older spelling of the same
+  // thing): when on, the silent gap a
   // HOLD or round-up leaves in the audio is filled with room tone from the
   // checked-in asset instead of pure silence. Holds/rounds only — a slow-down's
   // gap runs the whole length of its picture, so the server leaves it silent
@@ -123,6 +153,12 @@ function AppInner() {
   // share one tabbed dock at the bottom of the center column — only one is
   // visible at a time.
   const [centerTab, setCenterTab] = useState('timeline')
+  // The row above the dock is a SLOT: Timeline.jsx portals its action bar
+  // (transport clock, Undo/V2 Reconstruct/V2 Analyzer, the render buttons) into it,
+  // while this file's clip edit tools render inside the Timeline card instead
+  // — the two bars trade places. State, not a ref, because the portal target
+  // has to be a rendered element Timeline can be re-rendered with.
+  const [timelineBarSlot, setTimelineBarSlot] = useState(null)
   // "Animate" mode: reveals the ANIM lane under V1 with +/− keyframe
   // buttons, and drives the CropOverlay's on-preview position from the
   // active clip's cropKeyframes (interpolated at the playhead) instead of
@@ -174,7 +210,9 @@ function AppInner() {
   if (tourActive) {
     const stepId = tourSteps[tourStepIndex]?.id
     if (stepId === 'agentDock' && centerTab === 'timeline') setCenterTab('assistant')
-    else if (stepId === 'timeline' && centerTab !== 'timeline') setCenterTab('timeline')
+    // 'editToolbar' joins 'timeline' here because the edit tools now render
+    // INSIDE the Timeline card, so that step's target is tab-gated too.
+    else if ((stepId === 'timeline' || stepId === 'editToolbar') && centerTab !== 'timeline') setCenterTab('timeline')
   }
 
   // Track 2 ("Analyze") is a scratch lane, not part of the undo history —
@@ -326,6 +364,30 @@ function AppInner() {
     refresh()
   }
 
+  // Which files the timeline is currently pointing at, by filename — each bin
+  // reads its own set to refuse renaming a file its clips reference (a clip
+  // resolves its media by name, so a rename would orphan it). Split by dir
+  // because a clip can be re-pointed at an Export Bin file (a chat edit, a
+  // Reformat): a same-named file in the other folder isn't the same file.
+  function inUseNamesFor(dir) {
+    return new Set(
+      [...timelineClips, ...track2Clips]
+        .filter(c => (c.sourceDir || 'input') === dir)
+        .map(c => c.sourceName)
+        .concat(audioBed && (audioBed.dir || 'input') === dir ? [audioBed.name] : [])
+    )
+  }
+  const inUseSourceNames = inUseNamesFor('input')
+  const inUseOutputNames = inUseNamesFor('output')
+
+  // A source file was renamed in the Media Bin. No clip can be pointing at it
+  // (rename is blocked while one is), so all this has to do is carry the
+  // sticky V1/V2/A1 track tag over to the new name and re-read the list.
+  function handleSourceRenamed(oldName, newName) {
+    setTrackTags(prev => renameTrackTag(oldName, newName, prev))
+    refresh()
+  }
+
   // Called after the Agentic Assistant Editor runs an accepted ffmpeg
   // command. `output` (from /api/execute) names the file that command
   // actually wrote. If a clip is selected, load that result onto it in
@@ -472,7 +534,7 @@ function AppInner() {
 
   // Render A1 — the audio counterpart to Render V1: writes the A1 track alone
   // to a .wav, timed to the V1 sequence (head-hold delay, padded/cut to the
-  // sequence length, bed gain, room tone in the head hold when A1 Noise is on),
+  // sequence length, bed gain, room tone in the head hold when A1 Room Tone is on),
   // so it lines up with the V1 file in another tool. No render dialog: there is
   // no quality or audio choice to make, so the button just renders. It reads
   // V1's clips because V1's edits are what give the track its length — an A1
@@ -749,7 +811,7 @@ function AppInner() {
   }
 
   function handleExportEdl() {
-    const lines = ['TITLE: NARA LOSSLESS EDITOR', '']
+    const lines = ['TITLE: NARA EDITOR', '']
     let recFrame = 0
     const fps = timelineClips[0]?.fps || 24
     function tc(seconds) {
@@ -802,6 +864,47 @@ function AppInner() {
     return info
   })()
 
+  // The clip edit tools. Built here (they act on whichever track is focused,
+  // which is state this file owns) but handed to Timeline as a node so they
+  // render as the Timeline card's first row — the position the transport /
+  // render bar used to occupy. The row's own layout classes travel with it;
+  // Timeline only supplies the surrounding padding and divider.
+  const editToolbar = (
+    <div data-tour="editToolbar" className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+      {/* Undo leads the row — moved out of the action bar's left group so it
+          sits with the tools whose effects it reverses. Note it is NOT
+          focusedTrack-aware like the rest of the row: the undo stack is V1's
+          own useUndoableState, so this only ever steps V1 back, which is what
+          the title says. Cmd/Ctrl+Z still fires from Timeline.jsx's key
+          handler (same onUndo prop), so the shortcut is unaffected. */}
+      <button
+        onClick={undoTimeline}
+        disabled={!canUndo}
+        title="Undo last V1 edit (Cmd/Ctrl+Z)"
+        className="w-5 h-5 flex items-center justify-center rounded text-[12px] text-neutral-400 hover:text-white hover:bg-neutral-700 disabled:opacity-40"
+      >↩</button>
+      <div className="w-px h-3.5 bg-neutral-700" />
+      <HoldFrameForm clips={activeClips} setClips={setActiveClips} />
+      <div className="w-px h-3.5 bg-neutral-700" />
+      <TrimForm selectedClip={activeSelectedClip} setClips={setActiveClips} displayMode={timeDisplayMode} />
+      <div className="w-px h-3.5 bg-neutral-700" />
+      <DuplicateButton selectedClip={activeSelectedClip} clips={activeClips} setClips={setActiveClips} onSelectId={setActiveSelectedId} />
+      <div className="w-px h-3.5 bg-neutral-700" />
+      <ReverseForm selectedClip={activeSelectedClip} setClips={setActiveClips} />
+      <div className="w-px h-3.5 bg-neutral-700" />
+      <SpliceButton selectedClip={activeSelectedClip} clips={activeClips} setClips={setActiveClips} onSelectId={setActiveSelectedId} />
+      <div className="w-px h-3.5 bg-neutral-700" />
+      <RaiseButton clips={activeClips} setClips={setActiveClips} />
+      <div className="w-px h-3.5 bg-neutral-700" />
+      <SpeedForm
+        selectedClip={activeSelectedClip}
+        setClips={setActiveClips}
+        noiseEnabled={noiseEnabled}
+        onToggleNoise={toggleNoise}
+      />
+    </div>
+  )
+
   return (
     <div className="flex flex-col h-screen bg-neutral-950 text-neutral-200">
       {/* Top toolbar */}
@@ -809,9 +912,9 @@ function AppInner() {
         <div data-tour="title" className="flex items-center gap-2">
           <button
             onClick={() => setShowAbout(true)}
-            title="About Nara Lossless Editor"
+            title="About Nara Editor"
             className="text-xs font-bold text-white tracking-tight hover:text-indigo-300"
-          >NARA LOSSLESS EDITOR</button>
+          >NARA EDITOR</button>
           <span className="text-[9px] text-neutral-600 border border-neutral-700 rounded px-1 py-0.5">EDL mode</span>
         </div>
         <div data-tour="project" className="flex items-center gap-1.5">
@@ -869,8 +972,21 @@ function AppInner() {
             onClick={startTour}
             disabled={tourActive}
             title="Take a guided tour of the app, one part at a time"
-            className={`w-6 h-6 flex items-center justify-center rounded text-[13px] border ${tourActive ? 'bg-amber-500 text-neutral-950 border-amber-500' : 'border-neutral-700 text-neutral-400 hover:text-amber-400 hover:border-amber-500'} disabled:cursor-default`}
-          >💡</button>
+            className={`w-6 h-6 flex items-center justify-center rounded border ${tourActive ? 'bg-amber-500 text-neutral-950 border-amber-500' : 'border-neutral-700 text-neutral-400 hover:text-amber-400 hover:border-amber-500'} disabled:cursor-default`}
+          >
+            <BulbIcon />
+          </button>
+          {/* Second way into the About dialog, beside the tour: the NARA title
+              already opens it, but nothing about a title looks clickable, so
+              the manual now has a visible affordance next to the tour it
+              complements — the bulb walks the UI, this one explains the app. */}
+          <button
+            onClick={() => setShowAbout(true)}
+            title="About Nara Editor — the in-app manual (pipeline, crop presets, EDL, V2, assistant)"
+            className="w-6 h-6 flex items-center justify-center rounded border border-neutral-700 text-neutral-400 hover:text-indigo-300 hover:border-indigo-500"
+          >
+            <DocIcon />
+          </button>
         </div>
       </div>
 
@@ -888,7 +1004,7 @@ function AppInner() {
           className="flex flex-col gap-2 p-2 overflow-y-auto shrink-0"
         >
           <div className="flex-1 min-h-0 flex flex-col">
-            <MediaLibrary files={inputFiles} trackTags={trackTags} onAddToTimeline={handleAddToTimeline} onCleared={handleCleared} onDeleted={refresh} onUpload={handleUpload}>
+            <MediaLibrary files={inputFiles} trackTags={trackTags} inUseNames={inUseSourceNames} onAddToTimeline={handleAddToTimeline} onCleared={handleCleared} onDeleted={refresh} onRenamed={handleSourceRenamed} onUpload={handleUpload}>
               <div data-tour="mediaInfoIn">
                 <TechInfoPanel info={displayInfo} title="Media Info In" />
               </div>
@@ -906,7 +1022,9 @@ function AppInner() {
         {/* Center: Preview + toolbar + Timeline */}
         <div className="flex-1 flex flex-col min-w-0">
           <div data-tour="previewHeader" className="flex items-center justify-between px-2.5 py-1 border-b border-neutral-800 bg-neutral-900">
-            <span className="text-[9px] font-semibold uppercase tracking-wide text-neutral-500">Preview</span>
+            {/* The "Preview" label used to sit here; the two frame grabs took
+                its place (the panel's position already says what it is). */}
+            <FrameGrabButtons />
             <div className="flex items-center gap-2">
               <CropForm
                 selectedClip={activeSelectedClip}
@@ -917,7 +1035,7 @@ function AppInner() {
                 onToggleFree={() => setFreeEnabled(v => !v)}
               />
               {/* The Render button used to sit here; it now lives in the
-                  Timeline's own button row as "Render V1", beside Render V2. */}
+                  Timeline's action bar as "Render V1", beside Render V2. */}
             </div>
           </div>
           <div ref={previewStageRef} data-tour="previewStage" className="relative flex-1 min-h-[50vh] flex items-center justify-center bg-black p-3">
@@ -962,26 +1080,18 @@ function AppInner() {
             >Actions</button>
           </div>
 
-          <div data-tour="editToolbar" className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-2.5 py-1.5 border-y border-neutral-800 bg-neutral-900">
-            <HoldFrameForm clips={activeClips} setClips={setActiveClips} />
-            <div className="w-px h-3.5 bg-neutral-700" />
-            <TrimForm selectedClip={activeSelectedClip} setClips={setActiveClips} displayMode={timeDisplayMode} />
-            <div className="w-px h-3.5 bg-neutral-700" />
-            <DuplicateButton selectedClip={activeSelectedClip} clips={activeClips} setClips={setActiveClips} onSelectId={setActiveSelectedId} />
-            <div className="w-px h-3.5 bg-neutral-700" />
-            <ReverseForm selectedClip={activeSelectedClip} setClips={setActiveClips} />
-            <div className="w-px h-3.5 bg-neutral-700" />
-            <SpliceButton selectedClip={activeSelectedClip} clips={activeClips} setClips={setActiveClips} onSelectId={setActiveSelectedId} />
-            <div className="w-px h-3.5 bg-neutral-700" />
-            <RaiseButton clips={activeClips} setClips={setActiveClips} />
-            <div className="w-px h-3.5 bg-neutral-700" />
-            <SpeedForm
-              selectedClip={activeSelectedClip}
-              setClips={setActiveClips}
-              noiseEnabled={noiseEnabled}
-              onToggleNoise={toggleNoise}
-            />
-          </div>
+          {/* The Timeline's action bar lands here — Timeline.jsx portals it
+              into this element (see `timelineBarSlot`), because every control
+              in it is driven by that component's own playback transport. The
+              row keeps this position's chrome; only its contents came from
+              elsewhere. The element itself always stays mounted (a portal
+              needs a stable target), but it drops its padding and borders on
+              the other dock tabs — the Timeline is unmounted then, so the row
+              would otherwise show as an empty strip. */}
+          <div
+            ref={setTimelineBarSlot}
+            className={centerTab === 'timeline' ? 'px-2.5 py-1.5 border-y border-neutral-800 bg-neutral-900' : ''}
+          />
 
           {/* Timeline / AGENT / Actions pane content — only one visible at
               a time, per the tab bar above. Timeline sets this wrapper's
@@ -1046,6 +1156,8 @@ function AppInner() {
                   onToggleA1={toggleA1Visible}
                   a1Muted={a1Muted}
                   noiseEnabled={noiseEnabled}
+                  barSlot={timelineBarSlot}
+                  toolbar={editToolbar}
                 />
               </div>
             )}
@@ -1080,7 +1192,7 @@ function AppInner() {
           data-tour="rightColumn"
           className="flex flex-col gap-2 p-2 overflow-y-auto shrink-0"
         >
-          <OutputPanel files={outputFiles} onCleared={refresh} />
+          <OutputPanel files={outputFiles} inUseNames={inUseOutputNames} onCleared={refresh} />
         </div>
       </div>
 
@@ -1094,6 +1206,10 @@ function AppInner() {
       )}
 
       {showRenderDialog && (
+        // "Render without audio" is offered on every target, not just V2: a V1
+        // (or A/B) render is just as often wanted as picture only.
+        // handleRenderConfirm drops the A1 bed and the room-tone fill when it's
+        // checked — the backend rejects no-audio combined with either.
         <RenderDialog
           defaultName={(() => {
             const sourceClips = renderTarget === 'v2' ? track2Clips : timelineClips
@@ -1104,7 +1220,7 @@ function AppInner() {
             if (renderTarget === 'composite') return `${stem}-composite.mp4`
             return `${stem}.mp4`
           })()}
-          showNoAudioOption={renderTarget === 'v2'}
+          showNoAudioOption
           onConfirm={handleRenderConfirm}
           onCancel={() => setShowRenderDialog(false)}
         />

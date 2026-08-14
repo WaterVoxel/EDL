@@ -1,5 +1,5 @@
-NARA LOSSLESS EDITOR
-====================
+NARA EDITOR
+===========
 
 A local, EDL-style video editor. Every edit -- trim, splice, reverse,
 slow down, hold, round-up -- is staged as a non-destructive decision and
@@ -8,7 +8,7 @@ are never changed.
 
 This guide assumes no prior experience. Follow the steps in order.
 
-Once the app is running, click "NARA LOSSLESS EDITOR" in the top bar for
+Once the app is running, click "NARA EDITOR" in the top bar for
 a full explanation of its features from inside the app.
 
 
@@ -120,7 +120,7 @@ printed in Step 4 -- usually:
 
     http://127.0.0.1:5173/
 
-The Nara Lossless Editor should now load in your browser.
+The Nara Editor should now load in your browser.
 
 
 STEP 6: STOPPING THE APP

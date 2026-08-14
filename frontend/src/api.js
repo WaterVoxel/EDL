@@ -18,6 +18,7 @@ export const upload = (file) => {
 export const clearInput = () => fetch('/api/clear_input', { method: 'POST' }).then(r => r.json())
 export const deleteInputFile = (name) => fetch(`/api/files/${encodeURIComponent(name)}`, { method: 'DELETE' }).then(r => r.json())
 export const clearOutput = () => fetch('/api/clear_output', { method: 'POST' }).then(r => r.json())
+export const deleteOutputFile = (name) => fetch(`/api/outputs/${encodeURIComponent(name)}`, { method: 'DELETE' }).then(r => r.json())
 // fillNoise is a plain boolean: the server owns the asset path, so there is
 // nothing for the client to name.
 export const renderTimeline = (clips, output, noAudio = false, audioBed = null, fillNoise = false) =>
@@ -36,7 +37,9 @@ export const deleteProject = (name) => fetch(`/api/projects/${encodeURIComponent
 export const getExportSettings = () => fetch('/api/export_settings').then(r => r.json())
 export const setExportSettings = (settings) => postJSON('/api/export_settings', settings)
 export const browseDirectory = (initial) => postJSON('/api/browse_directory', { initial })
-export const revealFile = (name) => postJSON('/api/reveal_file', { name })
-export const renameOutput = (name, newName) => postJSON('/api/rename_output', { name, newName })
+// Both take the bin they act on, same 'input'|'output' vocabulary probe() uses,
+// defaulting to the Export Bin since that's where they started.
+export const revealFile = (name, dir = 'output') => postJSON('/api/reveal_file', { name, dir })
+export const renameFile = (name, newName, dir = 'output') => postJSON('/api/rename_file', { name, newName, dir })
 export const chat = (message, session_id, selected_clip) => postJSON('/api/chat', { message, session_id, selected_clip })
 export const execute = (command) => postJSON('/api/execute', { command })

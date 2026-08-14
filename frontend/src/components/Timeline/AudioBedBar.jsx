@@ -13,6 +13,15 @@ import { sequencePosToPx, sequenceClipBounds, sequenceVideoStartSec } from '../.
  *   longer   → the bed clipped at the sequence edge, with a cut marker
  *   equal    → flush, no annotation
  *
+ * `noiseEnabled` (the A1 Room Tone toggle) relabels both annotated gaps — the
+ * head hold and the short-bed remainder — to amber "noise", so the lane tracks
+ * the button. Only the FIRST of those is literally room tone in the render:
+ * build_timeline_filter's noise_gaps rule is {"head_hold"} as soon as there is
+ * a bed, so the remainder stays apad silence however the toggle is set. That
+ * nuance lives in the remainder's tooltip (product decision — the label follows
+ * the toggle, the tooltip states what actually renders); don't take the shared
+ * word as evidence the render fills both.
+ *
  * A1 is LINKED to V1 twice over. Geometrically: every horizontal measurement
  * goes through sequencePosToPx, the same per-clip-width + inter-clip-gap layout
  * V1's flex row produces. Measuring the bed as one continuous `sequenceSec *
@@ -24,7 +33,7 @@ import { sequencePosToPx, sequenceClipBounds, sequenceVideoStartSec } from '../.
  * Clip dividers and hold markers come from the same bounds, making the link
  * visible rather than merely asserted.
  */
-export default function AudioBedBar({ bed, clips, sequenceSec, pps, gapPx, muted = false, onRemove }) {
+export default function AudioBedBar({ bed, clips, sequenceSec, pps, gapPx, muted = false, noiseEnabled = false, onRemove }) {
   const bedSec = bed.durationSec || 0
   // Where V1's picture starts — the bed is delayed to here by the render, so
   // the space the bed has to fill is the sequence MINUS the head hold.
@@ -64,7 +73,11 @@ export default function AudioBedBar({ bed, clips, sequenceSec, pps, gapPx, muted
         </div>
       </div>
 
-      {/* Silence the render pads on when the bed runs out early. */}
+      {/* Silence the render pads on when the bed runs out early. Reads "noise"
+          with A1 Room Tone on to match the button, but the render pads this
+          stretch with apad silence either way (noise_gaps fills holds only, and
+          with a bed loaded only the head one) — which is why the tooltip keeps
+          saying "silence" and spells the exception out. */}
       {state === 'short' && (
         <div
           className="absolute top-0 bottom-0 rounded-r border border-l-0 border-emerald-900/60 overflow-hidden flex items-center justify-center"
@@ -74,22 +87,35 @@ export default function AudioBedBar({ bed, clips, sequenceSec, pps, gapPx, muted
             backgroundImage:
               'repeating-linear-gradient(45deg, rgba(16,185,129,0.14) 0 3px, transparent 3px 6px)',
           }}
-          title={`Silence — the bed is ${(availSec - bedSec).toFixed(2)}s shorter than the space it has to fill`}
+          title={
+            `Silence — the bed is ${(availSec - bedSec).toFixed(2)}s shorter than the space it has to fill`
+            + (noiseEnabled ? '. This stretch still renders as pure silence with A1 Room Tone on: room tone fills holds only, and with a bed loaded only the head hold' : '')
+          }
         >
-          <span className="text-[7px] text-emerald-600/90 font-mono uppercase tracking-wide truncate px-1">silence</span>
+          <span className={`text-[7px] font-mono uppercase tracking-wide truncate px-1 ${noiseEnabled ? 'text-amber-500/90' : 'text-emerald-600/90'}`}>
+            {noiseEnabled ? 'noise' : 'silence'}
+          </span>
         </div>
       )}
 
       {/* The head hold, which the bed is delayed PAST — labelled, because an
           empty gap at the head of the lane otherwise reads as a bug rather
-          than as the bed waiting for the picture to start. */}
+          than as the bed waiting for the picture to start. With A1 Room Tone on
+          it reads "noise", since this gap is exactly what the toggle fills; the
+          block stays fuchsia (it is still structurally the head hold, matching
+          V1's hold segments and the tail-hold marks below) and only the word
+          goes amber, the color the toggle itself uses. */}
       {startPx > 0 && (
         <div
           className="absolute top-0 bottom-0 left-0 rounded-l border border-r-0 border-fuchsia-500/40 bg-fuchsia-500/10 overflow-hidden flex items-center justify-center"
           style={{ width: startPx }}
-          title={`The bed waits out V1's ${startSec.toFixed(2)}s head hold and starts with the picture`}
+          title={noiseEnabled
+            ? `Room tone — the bed waits out V1's ${startSec.toFixed(2)}s head hold and starts with the picture, and A1 Room Tone fills the gap it leaves`
+            : `The bed waits out V1's ${startSec.toFixed(2)}s head hold and starts with the picture`}
         >
-          <span className="text-[7px] text-fuchsia-400/90 font-mono uppercase tracking-wide truncate px-1">hold</span>
+          <span className={`text-[7px] font-mono uppercase tracking-wide truncate px-1 ${noiseEnabled ? 'text-amber-400/90' : 'text-fuchsia-400/90'}`}>
+            {noiseEnabled ? 'noise' : 'hold'}
+          </span>
         </div>
       )}
 

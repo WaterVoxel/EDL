@@ -1,4 +1,4 @@
-# Nara Lossless Editor
+# Nara Editor
 
 A local, macOS-only, EDL-style video editor: Flask + ffmpeg backend (`app.py`, `ffmpeg_utils.py`) and a React 19 + Vite + Tailwind 4 frontend (`frontend/`). Edits are staged as non-destructive decisions on a two-track timeline and applied in a single lossless ffmpeg pass at Render. Source files in `input/` are never modified. Also doubles as a workspace for one-off ffmpeg edits requested directly in chat.
 

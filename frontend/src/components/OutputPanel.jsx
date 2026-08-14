@@ -1,14 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
-import { probe, clearOutput, revealFile, renameOutput } from '../api'
+import { probe, clearOutput, deleteOutputFile, revealFile, renameFile } from '../api'
 import TechInfoPanel from './TechInfoPanel'
 import DownloadButton from './DownloadButton'
 import ClearButton from './ClearButton'
 import SortFilterBar from './SortFilterBar'
 import ExportSettings from './ExportSettings'
 import ContextMenu from './ContextMenu'
-import { loadFavorites, toggleFavorite, sortFiles, filterFiles } from '../fileList'
+import { loadFavorites, toggleFavorite, renameFavorite, sortFiles, filterFiles } from '../fileList'
 
-export default function OutputPanel({ files, onCleared }) {
+// `inUseNames` is the set of Export Bin filenames the timeline points at — a
+// clip lands there when a chat edit or Reformat re-points it at a render. Like
+// the Media Bin's own set, it only gates Rename (see handleRename).
+export default function OutputPanel({ files, inUseNames = null, onCleared }) {
   const videoRef = useRef(null)
   const [selectedName, setSelectedName] = useState(null)
   const [info, setInfo] = useState(null)
@@ -31,17 +34,47 @@ export default function OutputPanel({ files, onCleared }) {
   }
 
   async function handleRename(name) {
+    // A render can itself be a clip's source (a chat edit or Reformat
+    // re-points the selected clip at the file it just produced), and a clip
+    // resolves its media by filename — so renaming one the timeline still
+    // uses would orphan it, surfacing only as an ffmpeg failure at Render.
+    // Same refusal the Media Bin makes, for the same reason.
+    if (inUseNames?.has(name)) {
+      alert(`"${name}" is in use on the timeline as a clip's source, so it can't be renamed — the clip points at it by name. Remove that clip first.`)
+      return
+    }
     const dot = name.lastIndexOf('.')
     const stem = dot > 0 ? name.slice(0, dot) : name
     const input = window.prompt('Rename export to:', stem)
     if (input == null) return
     const trimmed = input.trim()
     if (!trimmed || trimmed === stem) return
-    const result = await renameOutput(name, trimmed)
+    const result = await renameFile(name, trimmed)
     if (result.error) { alert('Rename failed: ' + result.error); return }
+    // The ★ is keyed by filename, so carry it over or the rename drops it.
+    setFavorites(renameFavorite('output', name, result.name, favorites))
     // Re-point the current selection at the new name so the preview/info
     // panel stay on the same file, then refresh the list from disk.
     if (name === selectedName) loadOutput(result.name)
+    onCleared()
+  }
+
+  async function handleDelete(name) {
+    // Deleting is allowed even when a clip points at this render (unlike
+    // Rename, which has a "do it later" alternative) — the same call the
+    // Media Bin's own Delete makes. The confirm just says so, since an
+    // orphaned clip would otherwise only surface as a Render failure.
+    const inUseNote = inUseNames?.has(name)
+      ? '\n\nA clip on the timeline uses this file as its source — that clip will have nothing to render.'
+      : ''
+    if (!window.confirm(`Delete "${name}" from the Export Bin? This removes the file from disk and cannot be undone.${inUseNote}`)) return
+    const result = await deleteOutputFile(name)
+    if (result.error) { alert('Delete failed: ' + result.error); return }
+    if (name === selectedName) {
+      setSelectedName(null)
+      setInfo(null)
+      if (videoRef.current) videoRef.current.removeAttribute('src')
+    }
     onCleared()
   }
 
@@ -159,6 +192,7 @@ export default function OutputPanel({ files, onCleared }) {
           items={[
             { label: 'Rename', onClick: () => handleRename(contextMenu.name) },
             { label: 'Show destination', onClick: () => handleShowDestination(contextMenu.name) },
+            { label: 'Delete', onClick: () => handleDelete(contextMenu.name), danger: true, separatorBefore: true },
           ]}
         />
       )}

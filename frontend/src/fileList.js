@@ -30,6 +30,17 @@ export function toggleFavorite(dir, name, currentSet) {
   return next
 }
 
+// Both sticky client states below are keyed by FILENAME, so a rename on disk
+// would otherwise silently drop them. These move the entry to the new name.
+export function renameFavorite(dir, oldName, newName, currentSet) {
+  if (!currentSet.has(oldName)) return currentSet
+  const next = new Set(currentSet)
+  next.delete(oldName)
+  next.add(newName)
+  saveFavorites(dir, next)
+  return next
+}
+
 // Sorts files with favorites always first, then by the chosen field.
 // sortBy: 'name' | 'date'. sortDir: 'asc' | 'desc'.
 export function sortFiles(files, favorites, sortBy, sortDir) {
@@ -94,6 +105,19 @@ export function tagTrack(name, track, current) {
   const existing = current[name] || []
   if (existing.includes(track)) return current
   const next = { ...current, [name]: [...existing, track] }
+  saveTrackTags(next)
+  return next
+}
+
+// Carry a renamed file's tags over to its new name (unioned with anything
+// already stamped there by an earlier file of that name). Returns the same
+// object unchanged, with no write, when the old name carried no tags.
+export function renameTrackTag(oldName, newName, current) {
+  const existing = current[oldName]
+  if (!existing || !existing.length) return current
+  const merged = [...new Set([...(current[newName] || []), ...existing])]
+  const next = { ...current, [newName]: merged }
+  delete next[oldName]
   saveTrackTags(next)
   return next
 }

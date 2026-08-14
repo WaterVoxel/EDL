@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
-import { probe, clearInput, deleteInputFile } from '../api'
+import { probe, clearInput, deleteInputFile, revealFile, renameFile } from '../api'
 import { useMedia } from '../context/MediaContext'
 import ClearButton from './ClearButton'
 import Dropzone from './Dropzone'
 import SortFilterBar from './SortFilterBar'
-import { loadFavorites, toggleFavorite, sortFiles, filterFiles, filterByTrack } from '../fileList'
+import { loadFavorites, toggleFavorite, renameFavorite, sortFiles, filterFiles, filterByTrack } from '../fileList'
 
 const TRACK_FILTERS = [
   { key: 'all', label: 'All' },
@@ -13,7 +13,10 @@ const TRACK_FILTERS = [
   { key: 'a1', label: 'A1' },
 ]
 
-export default function MediaLibrary({ files, trackTags = {}, onAddToTimeline, onCleared, onDeleted, onUpload, children }) {
+// `inUseNames` is the set of source filenames the timeline currently points at
+// (V1 + V2 clips and the A1 bed), passed down from App.jsx because it owns
+// that state. It only gates Rename — see handleRename for why.
+export default function MediaLibrary({ files, trackTags = {}, inUseNames = null, onAddToTimeline, onCleared, onDeleted, onRenamed, onUpload, children }) {
   const { setBinSelection } = useMedia()
   // A dedicated preview box for source media — mirrors OutputPanel's own
   // video element (own ref, own <video>), independent of the shared
@@ -90,6 +93,41 @@ export default function MediaLibrary({ files, trackTags = {}, onAddToTimeline, o
     e.preventDefault()
     selectFile(name)
     setMenu({ name, x: e.clientX, y: e.clientY })
+  }
+
+  async function handleShowDestination(name) {
+    setMenu(null)
+    const result = await revealFile(name, 'input')
+    if (result.error) alert('Could not show file: ' + result.error)
+  }
+
+  async function handleRename(name) {
+    setMenu(null)
+    // A clip records its source by FILENAME, so renaming a file the timeline
+    // still points at would leave those clips — and every undo step behind
+    // them — aimed at a file that no longer exists, surfacing only as an
+    // ffmpeg failure at Render. Refuse rather than silently rewriting the
+    // timeline. (A rename still breaks a *saved* .nara project that used the
+    // old name; nothing here can know about those.)
+    if (inUseNames?.has(name)) {
+      alert(`"${name}" is on the timeline (or loaded as the A1 bed), so it can't be renamed — the clips point at it by name. Remove it from the timeline first.`)
+      return
+    }
+    const dot = name.lastIndexOf('.')
+    const stem = dot > 0 ? name.slice(0, dot) : name
+    const input = window.prompt('Rename source file to:', stem)
+    if (input == null) return
+    const trimmed = input.trim()
+    if (!trimmed || trimmed === stem) return
+    const result = await renameFile(name, trimmed, 'input')
+    if (result.error) { alert('Rename failed: ' + result.error); return }
+    // Both sticky per-file states are keyed by filename, so carry them over:
+    // the ★ belongs to this component, the track tag to App.jsx (onRenamed,
+    // which also refreshes the list from disk).
+    setFavorites(renameFavorite('input', name, result.name, favorites))
+    // Keep the preview/Media Info In on the same file under its new name.
+    if (name === selectedName) selectFile(result.name)
+    onRenamed?.(name, result.name)
   }
 
   async function handleDelete(name) {
@@ -222,8 +260,20 @@ export default function MediaLibrary({ files, trackTags = {}, onAddToTimeline, o
           className="fixed z-50 min-w-32 rounded-md border border-neutral-700 bg-neutral-900 shadow-xl py-1 text-[11px]"
         >
           <button
+            onClick={() => handleRename(menu.name)}
+            title="Rename the file in input/ (blocked while it's on the timeline)"
+            className="block w-full text-left px-3 py-1 text-neutral-200 hover:bg-neutral-800"
+          >Rename</button>
+          <button
+            onClick={() => handleShowDestination(menu.name)}
+            title="Reveal the file in Finder"
+            className="block w-full text-left px-3 py-1 text-neutral-200 hover:bg-neutral-800"
+          >Show destination</button>
+          {/* Delete stays visually separate — it's the only irreversible one. */}
+          <div className="my-1 border-t border-neutral-800" />
+          <button
             onClick={() => handleDelete(menu.name)}
-            className="w-full text-left px-3 py-1 text-red-400 hover:bg-red-500/10 hover:text-red-300"
+            className="block w-full text-left px-3 py-1 text-red-400 hover:bg-red-500/10 hover:text-red-300"
           >Delete</button>
         </div>
       )}
