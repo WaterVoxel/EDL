@@ -614,6 +614,20 @@ def render_timeline():
         bed_index = len(in_paths) + len(overlay_paths)
         bed_paths.append(bed_path)
 
+    # Gap-fill room tone: one more "-i", after every clip, overlay, and the
+    # bed, so its index is stable only once those are all counted. The client
+    # sends a plain boolean — the PATH is fixed server-side (fu.NOISE_ASSET),
+    # never a client-supplied name, so this adds no new file-reference surface.
+    noise_paths = []
+    noise_index = None
+    if data.get("fillNoise"):
+        if not os.path.isfile(fu.NOISE_ASSET):
+            return jsonify({
+                "error": f"noise fill: asset missing at {fu.NOISE_ASSET}"
+            }), 400
+        noise_index = len(in_paths) + len(overlay_paths) + len(bed_paths)
+        noise_paths.append(fu.NOISE_ASSET)
+
     # Server always derives fps/has_audio/resolution itself — never trusts
     # client-supplied values — same principle /api/hold_frame already
     # follows. Only inSec/outSec/hold durations come from the request.
@@ -857,6 +871,8 @@ def render_timeline():
     no_audio = bool(data.get("noAudio"))
     if no_audio and bed_index is not None:
         return jsonify({"error": "cannot mix an audio bed into a render with audio disabled"}), 400
+    if no_audio and noise_index is not None:
+        return jsonify({"error": "cannot fill gaps with noise in a render with audio disabled"}), 400
     # The bed counts as an audio source for the encoder's own settings: with a
     # bed under an entirely silent V1, it is the ONLY real audio in the render,
     # and leaving it out here would degenerate audio_sample_rate to 0.
@@ -884,14 +900,16 @@ def render_timeline():
     out_path = os.path.join(export_dir, out_name)
 
     filt = fu.build_timeline_filter(
-        clip_specs, target_w, target_h, target_fps, no_audio=no_audio, audio_bed=bed_index
+        clip_specs, target_w, target_h, target_fps, no_audio=no_audio, audio_bed=bed_index,
+        fill_noise=noise_index
     )
 
     # Overlay sources come after every clip input, matching the input_index
-    # each overlay spec was assigned above; the audio bed comes last, matching
-    # bed_index.
+    # each overlay spec was assigned above; then the audio bed (bed_index),
+    # then the gap-fill noise asset (noise_index) — this order is what both
+    # indices were computed from, so it must not be rearranged.
     input_args = []
-    for p in in_paths + overlay_paths + bed_paths:
+    for p in in_paths + overlay_paths + bed_paths + noise_paths:
         input_args += ["-i", p]
     filter_args = ["-filter_complex", filt, "-map", "[outv]"]
     if not no_audio:
@@ -917,6 +935,150 @@ def render_timeline():
     if result.returncode != 0:
         return jsonify({"error": "ffmpeg failed", "detail": result.stderr[-4000:]}), 500
     return jsonify({"output": out_name})
+
+
+@app.route("/api/render_a1", methods=["POST"])
+def render_a1():
+    """Render the A1 track ALONE to a .wav, timed to the V1 sequence.
+
+    Same request shape as /api/render_timeline (clips, audioBed, fillNoise) so
+    the client can hand over the payload it already built, but only the timing
+    keys of each clip are read — see build_a1_filter. The V1 clips are still
+    PROBED (never trusted from the client, the same rule render_timeline
+    follows), because fps and the video stream's duration are what quantize the
+    length; they are just never opened as ffmpeg inputs, so this render decodes
+    no video and returns in about a second.
+
+    Output is pcm_s16le at the graph's own 44.1 kHz stereo, i.e. lossless and
+    independent of the export-quality setting: this is a stem meant to be mixed
+    somewhere else, so lossy AAC would be the wrong default even in "under 50
+    MB" mode.
+    """
+    data = request.get_json(force=True)
+    clips = data.get("clips") or []
+    if not clips:
+        return jsonify({"error": "need at least 1 clip"}), 400
+
+    # The A1 track has content only if a bed, room-tone fill, or both are on.
+    raw_bed = data.get("audioBed")
+    fill_noise_on = bool(data.get("fillNoise"))
+    if not raw_bed and not fill_noise_on:
+        return jsonify({"error": "nothing on A1 to render: load an audio track or turn on A1 Noise"}), 400
+
+    in_paths = []
+    try:
+        for c in clips:
+            in_paths.append(fu.safe_path(
+                c["input"], get_output_dir() if c.get("dir") == "output" else fu.INPUT_DIR
+            ))
+    except (fu.PathError, KeyError) as e:
+        return jsonify({"error": str(e)}), 400
+    for p in in_paths:
+        if not os.path.exists(p):
+            return jsonify({"error": f"input file not found: {p}"}), 404
+
+    infos = []
+    for p in in_paths:
+        try:
+            infos.append(fu.get_video_info(p))
+        except RuntimeError as e:
+            return jsonify({"error": f"probe failed for {p}", "detail": str(e)}), 500
+
+    # Timing-only clip specs. The validation here is the subset that can move a
+    # LENGTH — in/out numerics, the video-stream clamp, the holds-on-the-edges
+    # contract, and the speed range. Crop/overlay/reverse are deliberately not
+    # validated or passed: they cannot change how long the sequence runs, and
+    # rejecting them here would only make an A1 render fail on timelines that
+    # render fine on V1.
+    clip_specs = []
+    for i, (c, info) in enumerate(zip(clips, infos)):
+        try:
+            in_sec = float(c["inSec"])
+            out_sec = float(c["outSec"])
+        except (KeyError, ValueError, TypeError):
+            return jsonify({"error": f"clip {i}: inSec/outSec must be numeric"}), 400
+        if out_sec <= in_sec or in_sec < 0 or out_sec > info["duration"] + 0.001:
+            return jsonify({"error": f"clip {i}: invalid inSec/outSec for source duration {info['duration']}"}), 400
+        video_dur = info.get("video_duration") or info["duration"]
+        out_sec = min(out_sec, video_dur)
+        if out_sec <= in_sec:
+            return jsonify({"error": f"clip {i}: trim window lies past the video stream end ({video_dur}s)"}), 400
+        try:
+            raw_speed = c.get("speed")
+            speed = 1.0 if raw_speed is None else float(raw_speed)
+        except (ValueError, TypeError):
+            return jsonify({"error": f"clip {i}: speed must be numeric"}), 400
+        if not (0 < speed <= 1.0):
+            return jsonify({"error": f"clip {i}: speed must be in (0, 1] — only slow-down is supported"}), 400
+        is_first = i == 0
+        is_last = i == len(clips) - 1
+        clip_specs.append({
+            "inSec": in_sec,
+            "outSec": out_sec,
+            "fps": info["fps"] or 30.0,
+            "video_duration": video_dur,
+            "speed": speed,
+            "lead_hold_sec": float(c.get("headHoldSec") or 0) if is_first else 0.0,
+            "trail_hold_sec": (float(c.get("tailHoldSec") or 0) + float(c.get("roundHoldSec") or 0)) if is_last else 0.0,
+        })
+
+    # The bed is the only real input (plus the noise asset) — resolved and
+    # probed exactly as render_timeline does, including the has-audio check that
+    # would otherwise become an unbindable [N:a] pad and an opaque exit 234.
+    input_paths = []
+    bed_index = None
+    if raw_bed:
+        try:
+            bed_name = raw_bed["input"]
+            bed_path = fu.safe_path(
+                bed_name,
+                get_output_dir() if raw_bed.get("dir") == "output" else fu.INPUT_DIR,
+            )
+        except (fu.PathError, KeyError) as e:
+            return jsonify({"error": f"audio bed: {e}"}), 400
+        if not bed_name.lower().endswith(fu.MEDIA_EXTENSIONS):
+            return jsonify({"error": f"audio bed: unsupported file type: {bed_name}"}), 400
+        if not os.path.exists(bed_path):
+            return jsonify({"error": f"audio bed: file not found: {bed_path}"}), 404
+        try:
+            bed_info = fu.get_video_info(bed_path)
+        except RuntimeError as e:
+            return jsonify({"error": f"probe failed for audio bed {bed_path}", "detail": str(e)}), 500
+        if not bed_info["has_audio"]:
+            return jsonify({"error": f"audio bed: {bed_name} has no audio stream"}), 400
+        bed_index = len(input_paths)
+        input_paths.append(bed_path)
+
+    noise_index = None
+    if fill_noise_on:
+        if not os.path.isfile(fu.NOISE_ASSET):
+            return jsonify({"error": f"noise fill: asset missing at {fu.NOISE_ASSET}"}), 400
+        noise_index = len(input_paths)
+        input_paths.append(fu.NOISE_ASSET)
+
+    try:
+        filt = fu.build_a1_filter(clip_specs, audio_bed=bed_index, fill_noise=noise_index)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    # Always a .wav, whatever name the client asked for.
+    export_dir = get_output_dir()
+    base = os.path.splitext(data.get("output") or "render_A1")[0]
+    candidate = f"{base}.wav"
+    n = 1
+    while os.path.exists(os.path.join(export_dir, candidate)):
+        candidate = f"{base}_{n}.wav"
+        n += 1
+    out_path = os.path.join(export_dir, candidate)
+
+    args = []
+    for p in input_paths:
+        args += ["-i", p]
+    args += ["-filter_complex", filt, "-map", "[outa]", "-c:a", "pcm_s16le", out_path]
+    result = fu.run_ffmpeg(args)
+    if result.returncode != 0:
+        return jsonify({"error": "ffmpeg failed", "detail": result.stderr[-4000:]}), 500
+    return jsonify({"output": candidate})
 
 
 def _clip_total_sec(spec):

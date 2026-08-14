@@ -7,6 +7,15 @@ import subprocess
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 INPUT_DIR = os.path.join(PROJECT_ROOT, "input")
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output")
+# Constant, checked-in media the app itself owns (as opposed to user sources in
+# input/, which the Media Bin's Clear button wipes). Nothing here is uploadable,
+# listable, or deletable through any route — assets are referenced by the code
+# that needs them, never by name from the client.
+ASSETS_DIR = os.path.join(PROJECT_ROOT, "frontend", "assets")
+# Room tone used to fill the silent gaps a hold/round/slow-down would otherwise
+# leave in the audio track (see build_timeline_filter's fill_noise). It is only
+# ~3 s long, so every use aloops it and atrims to the exact gap length.
+NOISE_ASSET = os.path.join(ASSETS_DIR, "Audio_NOISE.wav")
 FFMPEG = "/opt/homebrew/bin/ffmpeg"
 FFPROBE = "/opt/homebrew/bin/ffprobe"
 
@@ -630,9 +639,156 @@ def keyframe_ladder(keyframes, coord, in_sec):
     return f"if(lt(t,{first_t:.4f}),{kfs[0][coord]:.4f},{expr})"
 
 
+def clip_timing(spec):
+    """Frame-quantized timing for one clip: (lead_frames, trail_frames, expected_sec).
+
+    THE source of truth for how long a clip occupies the rendered sequence —
+    build_timeline_filter uses it to size every per-clip cap (and, summed, the
+    A1 bed), and build_a1_filter uses it to make an A1-only render land on
+    exactly the same length. Keep it that way: two independent copies of this
+    arithmetic would let a V1 render and its A1 stem drift apart.
+
+    trim selects the source frames with pts in [in_sec, out_sec) and each hold
+    contributes round(H*fps) frames by construction, so the whole budget is
+    counted in FRAMES first and converted to seconds once — a hold's requested
+    duration is never used raw (see the hold-quantization gotcha). out_sec is
+    clamped to the video stream's own last frame for the reason the docstring of
+    build_timeline_filter gives: a window past that frame selects nothing.
+    A slow-down stretches only the main segment; holds are absolute durations.
+    """
+    fps = spec["fps"] or 30.0
+    in_sec = spec["inSec"]
+    out_sec = spec["outSec"]
+    speed = spec.get("speed") or 1.0
+    lead_hold = spec.get("lead_hold_sec") or 0
+    trail_hold = spec.get("trail_hold_sec") or 0
+    video_dur = spec.get("video_duration") or out_sec
+
+    eps = 1e-6
+    last_frame = max(int(round(video_dur * fps)) - 1, 0)
+    lead_frames = int(round(lead_hold * fps)) if lead_hold > 0 else 0
+    trail_frames = int(round(trail_hold * fps)) if trail_hold > 0 else 0
+    first_sel = max(int(math.ceil(in_sec * fps - eps)), 0)
+    last_sel_excl = min(int(math.ceil(out_sec * fps - eps)), last_frame + 1)
+    n_main = max(last_sel_excl - first_sel, 1)
+    expected_sec = (lead_frames + trail_frames) / fps + (n_main / fps) / speed
+    return lead_frames, trail_frames, expected_sec
+
+
+def build_a1_filter(clip_specs, sample_rate=44100, channel_layout="stereo",
+                    audio_bed=None, fill_noise=None):
+    """Build a filter_complex that renders the A1 track ALONE as [outa].
+
+    This is the audio-only counterpart to build_timeline_filter: same A1
+    content, same timing, no video and none of the clips' own audio. Its output
+    is sample-for-sample the A1 contribution to the equivalent V1 render, and
+    exactly as long, so the .wav drops into another tool already in sync with
+    the V1 file.
+
+    That equivalence is why this function reuses the pieces rather than
+    reimplementing them: clip_timing for the length (bed offset = clip 0's
+    lead_frames/fps, total = the sum of every clip's expected_sec, the same
+    frame-quantized truth the V1 graph pads its bed to) and the same adelay →
+    aformat → apad/atrim → volume=BED_GAIN bed chain, node for node.
+
+    clip_specs only needs the timing keys (inSec, outSec, fps, speed,
+    lead_hold_sec, trail_hold_sec, video_duration) — crop, overlay, reverse and
+    has_audio cannot change a length, so they are ignored here. NO clip input is
+    referenced by the returned graph at all: the only inputs are the bed and the
+    noise asset, which is what makes an A1 render cheap (no video decode).
+
+    audio_bed / fill_noise are input indices, as in build_timeline_filter, and
+    obey the same noise rule: room tone fills a HOLD gap only, and never where
+    the bed can be heard — so with a bed the head hold is room tone and the rest
+    of the track is bed, and with no bed at all the head and trail holds are
+    room tone over silence. At least one of the two must be given; with neither
+    there is no A1 track to render and the caller gets a ValueError rather than
+    a silent file.
+    """
+    if audio_bed is None and fill_noise is None:
+        raise ValueError("build_a1_filter needs an audio_bed, a fill_noise, or both")
+    if not clip_specs:
+        raise ValueError("build_a1_filter needs at least one clip to take its timing from")
+
+    timings = [clip_timing(spec) for spec in clip_specs]
+    fps0 = clip_specs[0]["fps"] or 30.0
+    head_sec = timings[0][0] / fps0
+    total_sec = sum(t[2] for t in timings)
+    # The trail hold lives on the LAST clip (the caller contract the V1 graph
+    # relies on too), and its gap is the last trail_frames/fps of the sequence.
+    fps_last = clip_specs[-1]["fps"] or 30.0
+    tail_sec = timings[-1][1] / fps_last
+
+    chains = []
+
+    def noise_piece(duration, label):
+        """Room tone cut to `duration` — the same chain build_timeline_filter emits."""
+        return (f"[{fill_noise}:a]aloop=loop=-1:size=2147483647,"
+                f"atrim=end={duration},asetpts=PTS-STARTPTS,"
+                f"aformat=sample_rates={sample_rate}:channel_layouts={channel_layout}{label}")
+
+    def silence_piece(duration, label):
+        return (f"anullsrc=channel_layout={channel_layout}:sample_rate={sample_rate}:"
+                f"duration={duration}{label}")
+
+    # The gap layer: room tone where a hold is eligible for it, silence
+    # everywhere else, assembled head → middle → tail so the pieces total
+    # exactly total_sec. With a bed, only the head is eligible (the bed covers
+    # the tail — see build_timeline_filter's noise_gaps), so the tail piece is
+    # silence and the layer is just "room tone, then silence".
+    head_noise = fill_noise is not None and head_sec > 0
+    tail_noise = fill_noise is not None and audio_bed is None and tail_sec > 0
+    pieces = []
+    if head_sec > 0:
+        chains.append((noise_piece if head_noise else silence_piece)(head_sec, "[a1head]"))
+        pieces.append("[a1head]")
+    middle_sec = total_sec - head_sec - (tail_sec if tail_noise else 0)
+    if middle_sec > 1e-9:
+        chains.append(silence_piece(middle_sec, "[a1mid]"))
+        pieces.append("[a1mid]")
+    if tail_noise:
+        chains.append(noise_piece(tail_sec, "[a1tail]"))
+        pieces.append("[a1tail]")
+
+    if len(pieces) > 1:
+        chains.append(f"{''.join(pieces)}concat=n={len(pieces)}:v=0:a=1[a1gaps]")
+        gaps_label = "[a1gaps]"
+    else:
+        gaps_label = pieces[0]
+
+    if audio_bed is None:
+        # Room tone alone: pad/trim so the length is the sequence's, exactly as
+        # the bed branch below would.
+        chains.append(
+            f"{gaps_label}aformat=sample_rates={sample_rate}:channel_layouts={channel_layout},"
+            f"apad=whole_dur={total_sec},atrim=end={total_sec},asetpts=PTS-STARTPTS[outa]"
+        )
+        return ";".join(chains)
+
+    # The bed branch, node for node as build_timeline_filter builds it — same
+    # adelay (prepends silence, so the pad below still measures from 0), same
+    # frame-quantized offset, same BED_GAIN — so this render and the V1 one
+    # carry bit-identical bed samples.
+    bed_src = f"[{audio_bed}:a]"
+    if head_sec > 0:
+        delay_ms = round(head_sec * 1000)
+        chains.append(f"{bed_src}adelay=delays={delay_ms}:all=1[a1bdel]")
+        bed_src = "[a1bdel]"
+    chains.append(
+        f"{bed_src}aformat=sample_rates={sample_rate}:channel_layouts={channel_layout},"
+        f"apad=whole_dur={total_sec},atrim=end={total_sec},asetpts=PTS-STARTPTS,"
+        f"volume={BED_GAIN}[a1bed]"
+    )
+    # duration=first keeps the gap layer (already exactly total_sec) in charge of
+    # the length, and normalize=0 makes the sum unity-gain — the same two
+    # settings the V1 mix uses.
+    chains.append(f"{gaps_label}[a1bed]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[outa]")
+    return ";".join(chains)
+
+
 def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
                            sample_rate=44100, channel_layout="stereo", no_audio=False,
-                           audio_bed=None):
+                           audio_bed=None, fill_noise=None):
     """Build one filter_complex string that renders an entire timeline (a
     sequence of trimmed clips, each optionally extended by a frozen-frame
     hold at its lead and/or trail edge, and optionally played backwards)
@@ -694,6 +850,34 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
         uniform fps).
     no_audio=True with a bed is a contradiction (there is no [aseq] to mix
     into) and raises ValueError rather than silently dropping one of them.
+
+    fill_noise is an input index (like audio_bed) pointing at NOISE_ASSET.
+    When given, the HOLD gaps this function would otherwise fill with anullsrc
+    silence are filled with room tone from that input instead: the head hold,
+    and the trail hold (which already includes the Raise round-up extension,
+    folded in by the caller). Room tone is a patch over a frozen frame, so it
+    fills nothing else — a slowed main segment and a silent source's main
+    segment are gaps too, but each runs the full length of the picture it
+    carries, which would make the room tone a bed under moving video rather
+    than a patch; both stay pure silence.
+
+    Noise is also never audible at the same time as the A1 bed. The head hold
+    is inherently safe (the bed is delayed past it — see audio_bed above), but
+    the trail hold sits at the sequence's end with the bed still summed over
+    it, so passing audio_bed and fill_noise TOGETHER silences the trail gap:
+    with a bed loaded, only the head hold gets room tone. (Consequence worth
+    knowing: a bed shorter than the sequence leaves its own tail silent, and
+    that tail is not noise-filled either — the rule is enforced by gap
+    position, not by measuring how far the bed actually reaches.)
+
+    Nothing else changes — a clip's real audio is never touched, and the gap
+    LENGTHS are identical either way, so switching noise on or off cannot move
+    a single sample of dialogue or change any video frame.
+    The asset is only ~3s, so each gap aloops it and atrims to the exact
+    quantized gap length; a 10s hold works. Every gap reads the SAME input
+    pad, which ffmpeg auto-splits (verified) — unlike a filter-produced
+    label, a raw input pad needs no explicit asplit. Requires no_audio to be
+    False for the same reason a bed does: there is no audio graph to fill.
 
     clip_specs[i] is a dict: {inSec, outSec, fps, has_audio, lead_hold_sec,
     trail_hold_sec, reversed, video_duration, crop}. lead_hold_sec should only be
@@ -784,6 +968,49 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
     """
     if no_audio and audio_bed is not None:
         raise ValueError("audio_bed cannot be used with no_audio=True: there is no audio graph to mix into")
+    if no_audio and fill_noise is not None:
+        raise ValueError("fill_noise cannot be used with no_audio=True: there is no audio graph to fill")
+
+    # Which KINDS of gap room tone is allowed to fill. Two rules, both about
+    # noise never being heard alongside real audio:
+    #
+    #  * "hold" gaps only. A slowed segment's gap and a silent source's body
+    #    are gaps too, but they run as long as the picture they carry, so
+    #    filling them turns room tone into a bed under the video instead of a
+    #    patch over a frozen frame. Those stay pure silence.
+    #  * With an A1 bed, the TRAIL gap drops back to silence as well. The bed
+    #    is summed over the whole sequence (amix, at the end of this function),
+    #    and the trail hold — tail hold plus the Raise round-up, folded
+    #    together by the caller — sits at the sequence's END, under the bed;
+    #    that is the one place noise and the bed would sound at once. The HEAD
+    #    gap needs no such guard: the bed is delayed past it by construction
+    #    (bed_offset_sec below), so the head hold is bed-free. Both halves of
+    #    that rely on the same caller contract the bed offset already does —
+    #    lead holds only on clip 0, trail holds only on the last clip.
+    noise_gaps = {"head_hold"} if audio_bed is not None else {"head_hold", "trail_hold"}
+
+    def gap_chain(duration, label, kind):
+        """Emit the chain filling one `duration`-second audio gap into `label`.
+
+        The one place gap audio is generated, so silence and noise can never
+        disagree about a gap's LENGTH — only about what it contains. `duration`
+        is always an already-frame-quantized value from the caller. `kind` is
+        "head_hold", "trail_hold", or "body", and decides only whether this gap
+        is eligible for room tone (see noise_gaps above); the emitted length is
+        identical either way.
+        """
+        if fill_noise is None or kind not in noise_gaps:
+            return (f"anullsrc=channel_layout={channel_layout}:sample_rate={sample_rate}:"
+                    f"duration={duration}{label}")
+        # size is the per-iteration sample count aloop buffers; the asset is
+        # far shorter than this cap, so one iteration holds all of it and
+        # loop=-1 repeats it forever. atrim then cuts the stream to the exact
+        # gap length, and aformat conforms it to the graph's rate/layout (the
+        # asset is 48k stereo while the graph runs at sample_rate) — aformat
+        # LAST, matching the per-clip and bed chains.
+        return (f"[{fill_noise}:a]aloop=loop=-1:size=2147483647,"
+                f"atrim=end={duration},asetpts=PTS-STARTPTS,"
+                f"aformat=sample_rates={sample_rate}:channel_layouts={channel_layout}{label}")
 
     chains = []
     norm_v_labels = []
@@ -889,24 +1116,14 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
         lead_sample_start, lead_sample_end = frame_window(last_idx if is_reversed else first_idx)
         trail_sample_start, trail_sample_end = frame_window(first_idx if is_reversed else last_idx)
 
-        # Exact frame budget for this clip's normalized segment. trim selects
-        # source frames with pts in [in_sec, out_sec), holds contribute
-        # round(H*fps) frames each by construction. The fps normalization
-        # filter can emit one spurious duplicate frame at EOF (the concat
-        # graph runs in a 1/1000000 timebase, and an end timestamp landing
-        # exactly on a frame tick rounds into an extra output frame), so the
-        # per-clip chain is hard-capped at this count — and the audio is
-        # padded/cut to the same length — or every clip boundary drifts
-        # another 1/fps out of sync.
-        lead_frames = int(round(lead_hold * fps)) if lead_hold > 0 else 0
-        trail_frames = int(round(trail_hold * fps)) if trail_hold > 0 else 0
-        first_sel = max(int(math.ceil(in_sec * fps - eps)), 0)
-        last_sel_excl = min(int(math.ceil(out_sec * fps - eps)), last_frame + 1)
-        n_main = max(last_sel_excl - first_sel, 1)
-        # A slow-down stretches only the main segment's timing (holds are
-        # already absolute durations); the constant-fps normalization then
-        # fills the stretched span by repeating source frames.
-        expected_sec = (lead_frames + trail_frames) / fps + (n_main / fps) / speed
+        # Exact frame budget for this clip's normalized segment (see
+        # clip_timing). The fps normalization filter can emit one spurious
+        # duplicate frame at EOF (the concat graph runs in a 1/1000000
+        # timebase, and an end timestamp landing exactly on a frame tick rounds
+        # into an extra output frame), so the per-clip chain is hard-capped at
+        # this count — and the audio is padded/cut to the same length — or every
+        # clip boundary drifts another 1/fps out of sync.
+        lead_frames, trail_frames, expected_sec = clip_timing(spec)
         n_norm_frames = max(int(round(expected_sec * target_fps)), 1)
         expected_secs.append(expected_sec)
         if i == 0:
@@ -941,10 +1158,7 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
             )
             v_pieces.append(f"[vlead{i}]")
             if not no_audio:
-                chains.append(
-                    f"anullsrc=channel_layout={channel_layout}:sample_rate={sample_rate}:"
-                    f"duration={lead_frames / fps}[alead{i}]"
-                )
+                chains.append(gap_chain(lead_frames / fps, f"[alead{i}]", "head_hold"))
                 a_pieces.append(f"[alead{i}]")
 
         v_reverse_step = ",reverse" if is_reversed else ""
@@ -960,19 +1174,25 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
             if speed != 1.0:
                 # Stretched video has no natural audio (playing it slowed
                 # would shift pitch/tempo — out of scope for a lossless time
-                # stretch), so the main segment gets silence of the
-                # stretched duration, same as hold segments do.
-                chains.append(
-                    f"anullsrc=channel_layout={channel_layout}:sample_rate={sample_rate}:"
-                    f"duration={(out_sec - in_sec) / speed}[amain{i}]"
-                )
+                # stretch), so the main segment gets a gap of the stretched
+                # duration, same as hold segments do — but always a SILENT one:
+                # a body-length gap is not a hold (see noise_gaps).
+                chains.append(gap_chain((out_sec - in_sec) / speed, f"[amain{i}]", "body"))
             elif has_audio:
-                chains.append(f"[{i}:a]atrim=start={in_sec}:end={out_sec},asetpts=PTS-STARTPTS{a_reverse_step}[amain{i}]")
-            else:
+                # The aformat here is load-bearing, not belt-and-braces:
+                # concat negotiates its output format from its FIRST input, so
+                # without it a clip whose only gap is at the TAIL puts the raw
+                # source pad first and a mono/48k source silently downmixes the
+                # stereo gap audio that follows (measured -4.4 dB on noise
+                # fill; invisible for pure silence, since downmixed silence is
+                # still silence). Normalizing every piece as it is created
+                # makes the negotiation independent of piece ORDER.
                 chains.append(
-                    f"anullsrc=channel_layout={channel_layout}:sample_rate={sample_rate}:"
-                    f"duration={out_sec - in_sec}[amain{i}]"
+                    f"[{i}:a]atrim=start={in_sec}:end={out_sec},asetpts=PTS-STARTPTS{a_reverse_step},"
+                    f"aformat=sample_rates={sample_rate}:channel_layouts={channel_layout}[amain{i}]"
                 )
+            else:
+                chains.append(gap_chain(out_sec - in_sec, f"[amain{i}]", "body"))
             a_pieces.append(f"[amain{i}]")
 
         if trail_hold > 0:
@@ -983,10 +1203,7 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
             )
             v_pieces.append(f"[vtrail{i}]")
             if not no_audio:
-                chains.append(
-                    f"anullsrc=channel_layout={channel_layout}:sample_rate={sample_rate}:"
-                    f"duration={trail_frames / fps}[atrail{i}]"
-                )
+                chains.append(gap_chain(trail_frames / fps, f"[atrail{i}]", "trail_hold"))
                 a_pieces.append(f"[atrail{i}]")
 
         if len(v_pieces) > 1:

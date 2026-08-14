@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { listFiles, listOutputs, probe, upload, renderTimeline, saveProject } from './api'
+import { listFiles, listOutputs, probe, upload, renderTimeline, renderA1, saveProject } from './api'
 import { useUndoableState } from './hooks/useUndoableState'
 import { MediaProvider, useMedia } from './context/MediaContext'
 import { TourProvider, useTour } from './context/TourContext'
@@ -100,6 +100,17 @@ function AppInner() {
   }, [])
   const [rendering, setRendering] = useState(false)
   const [showRenderDialog, setShowRenderDialog] = useState(false)
+  // Noise gap fill (the Speed row's "A1 Noise" toggle): when on, the silent gap a
+  // HOLD or round-up leaves in the audio is filled with room tone from the
+  // checked-in asset instead of pure silence. Holds/rounds only — a slow-down's
+  // gap runs the whole length of its picture, so the server leaves it silent
+  // rather than laying room tone under moving video — and never at the same time
+  // as the A1 bed: with a bed loaded the server drops the trail gap back to
+  // silence, since that gap sits under the bed. A render-wide switch, not a
+  // per-clip decision — it never marks a clip dirty and never changes a video
+  // frame. Session-only, like v2RenderMode: not persisted in the .nara.
+  const [noiseEnabled, setNoiseEnabled] = useState(false)
+  const toggleNoise = useCallback(() => setNoiseEnabled(v => !v), [])
   // Shared timecode/frames display mode — lifted here (rather than local to
   // TransportBar) so Trim and Splice, which live as separate sibling
   // components, can format/parse positions the same way the transport clock
@@ -441,13 +452,50 @@ function AppInner() {
       // no meaning. noAudio also excludes it — the backend rejects that
       // combination outright, so don't send it.
       const bed = (isV2 || noAudio || !audioBed) ? null : { input: audioBed.name, dir: audioBed.dir }
-      const result = await renderTimeline(payload, outputName, noAudio, bed)
+      // Unlike the bed, noise fill is NOT V1-only: a V2 render has its own
+      // holds and slow-downs, and their gaps deserve the same treatment. It is
+      // suppressed only by noAudio, where there is no audio graph to fill (the
+      // backend rejects that combination outright).
+      const noise = !noAudio && noiseEnabled
+      const result = await renderTimeline(payload, outputName, noAudio, bed, noise)
       if (result.error) { alert('Render failed: ' + result.error + (result.detail ? '\n' + result.detail : '')); return }
       if (!isV2) {
         setTimelineClips(prev => prev.map(c => ({ ...c, dirty: false })))
       } else {
         setTrack2Clips(prev => prev.map(c => ({ ...c, dirty: false })))
       }
+      refresh()
+    } finally {
+      setRendering(false)
+    }
+  }
+
+  // Render A1 — the audio counterpart to Render V1: writes the A1 track alone
+  // to a .wav, timed to the V1 sequence (head-hold delay, padded/cut to the
+  // sequence length, bed gain, room tone in the head hold when A1 Noise is on),
+  // so it lines up with the V1 file in another tool. No render dialog: there is
+  // no quality or audio choice to make, so the button just renders. It reads
+  // V1's clips because V1's edits are what give the track its length — an A1
+  // render is meaningless without them, which is why the button is gated on
+  // both a bed (or noise) and a V1 clip.
+  async function handleRenderA1() {
+    if (timelineClips.length === 0) return
+    setRendering(true)
+    try {
+      const payload = clipsToPayload(timelineClips)
+      const bed = audioBed ? { input: audioBed.name, dir: audioBed.dir } : null
+      const base = projectName || (audioBed ? audioBed.name.replace(/\.[^.]+$/, '') : 'render')
+      const result = await renderA1(payload, `${base}_A1`, bed, noiseEnabled)
+      if (result.error) {
+        alert('Render A1 failed: ' + result.error + (result.detail ? '\n' + result.detail : ''))
+        return
+      }
+      // Nothing else reports where an A1 render landed (it writes no video, so
+      // it never shows up as a dirty-clip change), hence a persistent log line.
+      setAnalyzeLog(prev => [
+        { kind: 'info', text: `♪ A1 rendered → ${result.output}` },
+        ...prev,
+      ])
       refresh()
     } finally {
       setRendering(false)
@@ -923,11 +971,16 @@ function AppInner() {
             <div className="w-px h-3.5 bg-neutral-700" />
             <ReverseForm selectedClip={activeSelectedClip} setClips={setActiveClips} />
             <div className="w-px h-3.5 bg-neutral-700" />
-            <SpliceButton selectedClip={activeSelectedClip} clips={activeClips} setClips={setActiveClips} onSelectId={setActiveSelectedId} displayMode={timeDisplayMode} />
+            <SpliceButton selectedClip={activeSelectedClip} clips={activeClips} setClips={setActiveClips} onSelectId={setActiveSelectedId} />
             <div className="w-px h-3.5 bg-neutral-700" />
             <RaiseButton clips={activeClips} setClips={setActiveClips} />
             <div className="w-px h-3.5 bg-neutral-700" />
-            <SpeedForm selectedClip={activeSelectedClip} setClips={setActiveClips} />
+            <SpeedForm
+              selectedClip={activeSelectedClip}
+              setClips={setActiveClips}
+              noiseEnabled={noiseEnabled}
+              onToggleNoise={toggleNoise}
+            />
           </div>
 
           {/* Timeline / AGENT / Actions pane content — only one visible at
@@ -974,6 +1027,7 @@ function AppInner() {
                   onReconstruct={handleReconstruct}
                   onRenderV2={handleRenderV2Click}
                   onRender={handleRenderClick}
+                  onRenderA1={handleRenderA1}
                   rendering={rendering}
                   timeDisplayMode={timeDisplayMode}
                   onToggleTimeDisplayMode={toggleTimeDisplayMode}
@@ -991,6 +1045,7 @@ function AppInner() {
                   a1Visible={a1Visible}
                   onToggleA1={toggleA1Visible}
                   a1Muted={a1Muted}
+                  noiseEnabled={noiseEnabled}
                 />
               </div>
             )}

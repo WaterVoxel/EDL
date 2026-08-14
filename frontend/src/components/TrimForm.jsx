@@ -4,7 +4,7 @@ import { retimeKeyframesForTrim } from '../cropAnimation'
 
 // Formats/parses a source-time value in whichever unit the shared
 // timecode/frames toggle (TransportBar) is currently set to, so Trim's
-// In/Out fields always match what the transport clock and Splice show.
+// In/Out fields always match what the transport clock shows.
 function toDisplay(sec, mode, fps) {
   return mode === 'frames' ? String(Math.round(sec * fps)) : sec.toFixed(2)
 }

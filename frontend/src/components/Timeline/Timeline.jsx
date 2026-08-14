@@ -36,12 +36,12 @@ export default function Timeline({
   clips, setClips, selectedId, selectedPart = 'main', onSelectId, onSelectItem, onUndo, canUndo,
   track2Clips = [], setTrack2Clips, selectedId2 = null, selectedPart2 = 'main', onSelectItem2,
   focusedTrack = 1, onFocusTrack, onAddToV2, onAnalyze, onReconstruct, onRenderV2,
-  onRender, rendering = false,
+  onRender, onRenderA1, rendering = false,
   timeDisplayMode, onToggleTimeDisplayMode, animateEnabled = false,
   v1Visible = true, onToggleV1, v2Visible = true, onToggleV2, hasOverlay = false,
   v2RenderMode = 'A', onSetV2RenderMode,
   audioBed = null, onAddToA1, onRemoveBed, a1Visible = true, onToggleA1,
-  a1Muted = false,
+  a1Muted = false, noiseEnabled = false,
 }) {
   const selectItem = onSelectItem || ((id) => onSelectId(id))
   const selectItem2 = onSelectItem2 || (() => {})
@@ -412,14 +412,35 @@ export default function Timeline({
   return (
     <div className="rounded-md bg-neutral-900 border border-neutral-800 flex flex-col">
       <div className="grid grid-cols-[1fr_auto_1fr] items-center px-2.5 py-1.5 border-b border-neutral-800">
-        <div className="flex items-center gap-2 justify-self-start">
-          <h2 className="text-[9px] font-semibold uppercase tracking-wide text-neutral-500">Timeline</h2>
+        <div className="flex items-center gap-1.5 justify-self-start">
           <button
             onClick={onUndo}
             disabled={!canUndo}
             title="Undo last V1 edit (Cmd/Ctrl+Z)"
             className="w-5 h-5 flex items-center justify-center rounded text-[12px] text-neutral-400 hover:text-white hover:bg-neutral-700 disabled:opacity-40"
           >↩</button>
+          {/* The two V2-derived edit actions live on THIS side, away from the
+              render buttons on the right: they rewrite clips rather than write
+              a file, so grouping them with Undo keeps "changes the timeline"
+              and "produces an export" visually separate. */}
+          {clips.length > 0 && track2Clips.length > 0 && (
+            <button
+              onClick={onReconstruct}
+              title="Strip V1's edits (holds, reverse, speed, crop) back out of V2's own clip(s) — for footage that was rendered, taken through an external tool, and dropped back onto V2"
+              className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] rounded bg-orange-600 text-white hover:bg-orange-500"
+            >
+              Reconstruct
+            </button>
+          )}
+          {track2Clips.length > 0 && (
+            <button
+              onClick={onAnalyze}
+              title="Cut the V2 file at the same time locations as V1 (including holds and round-up)"
+              className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] rounded bg-teal-700 text-white hover:bg-teal-600"
+            >
+              Analize
+            </button>
+          )}
         </div>
         <div className="justify-self-center">
           <TransportBar
@@ -454,24 +475,6 @@ export default function Timeline({
           >
             {rendering ? 'Rendering…' : 'Render V1'}
           </button>
-          {clips.length > 0 && track2Clips.length > 0 && (
-            <button
-              onClick={onReconstruct}
-              title="Strip V1's edits (holds, reverse, speed, crop) back out of V2's own clip(s) — for footage that was rendered, taken through an external tool, and dropped back onto V2"
-              className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] rounded bg-orange-600 text-white hover:bg-orange-500"
-            >
-              Reconstruct
-            </button>
-          )}
-          {track2Clips.length > 0 && (
-            <button
-              onClick={onAnalyze}
-              title="Cut the V2 file at the same time locations as V1 (including holds and round-up)"
-              className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] rounded bg-teal-700 text-white hover:bg-teal-600"
-            >
-              Analize
-            </button>
-          )}
           {track2Clips.length > 0 && (
             <button
               onClick={onRenderV2}
@@ -510,6 +513,24 @@ export default function Timeline({
                 A/B
               </button>
             </div>
+          )}
+          {/* Last in the row, past the V2 group: it's the only audio render, so
+              it sits apart from the two picture renders rather than between
+              them. Amber for the same reason — indigo is V1's and teal is V2's,
+              and amber is already the A1 Noise toggle's color, so the audio
+              actions read as one family. Shown only when there is something on
+              A1 to render — a loaded track, or A1 Noise on (room tone in the
+              holds is A1 content too) — the same "appears with its track" rule
+              Render V2 follows. */}
+          {(audioBed || noiseEnabled) && (
+            <button
+              onClick={onRenderA1}
+              disabled={rendering || clips.length === 0}
+              title="Render the A1 track alone to a .wav, timed to the V1 sequence — same length, ready to line up beside the V1 file"
+              className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] rounded border border-amber-600 text-amber-400 hover:bg-amber-900/40 disabled:border-neutral-700 disabled:text-neutral-600 disabled:hover:bg-transparent"
+            >
+              Render A1
+            </button>
           )}
         </div>
       </div>
