@@ -168,3 +168,34 @@ The chat/assistant panel shows an error
     That one feature needs an extra tool (the "claude" command-line
     app) that most people won't have installed. Everything else in the
     editor works fine without it.
+
+
+
+
+
+════════════════════════════════════════════════════════
+                CONTACT / CREATOR
+════════════════════════════════════════════════════════
+
+Nara Editor 
+(a local, macOS-only lossless video editor) 
+
+Created and maintained by:
+
+ Julian Sarmiento 
+  
+   Get in touch:
+
+     Name .......... Julian Sarmiento 
+     Email .......... <sarmieaj@amazon.com>
+     Departament ......... VFX GenAI Specialist, PV Studio AI (7931)
+     Location ......... LAX22-CO (Culver City,CA,US) 
+
+Questions, bug reports, and feature requests are welcome
+through any of the channels above.
+
+─────────────────────────────────────────────────────────
+                     <08/2026> 
+════════════════════════════════════════════════════════
+
+

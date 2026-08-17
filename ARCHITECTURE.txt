@@ -785,6 +785,63 @@ version to my exact edit" workflow. If V1's cuts run past the end of
 whatever's on V2, the affected segment is clamped to fit and a warning
 is surfaced with the exact overflow amount.
 
+BATCH ANALYZE (the plain cut)
+
+The button beside it, V2 BATCH ANALYZER, answers a different question
+with a much simpler rule: it CUTS the single file on V2 at V1's cut
+points, one V2 clip per V1 clip, and copies nothing else. Four clips
+on V1 give four clips on V2, at the same places.
+
+The distinction between the two buttons is the TIME BASE, and it is
+the whole reason there are two. Analyze copies V1's own IN/OUT
+points, which is meaningful only when V2 is another version of the
+SAME source -- there, the same timecodes still point at the same
+footage. Batch Analyze assumes the opposite and much more common case
+for multi-shot work: V2 holds V1's sequence JOINED into one file (a
+Render V1 output, or Render V2 on its `1` mode) that went out to an
+external tool and came back whole. In that file the second shot does
+not begin at V1 clip 2's inSec -- it begins where clip 1 ended -- so
+the boundaries are cumulative DURATIONS from the head of V2's own
+window. That is also the only reading of "the same places as V1" that
+lands on the frames the user sees under V1's own playhead. It is the
+return leg of a `1`-mode render, exactly as 1+ is of sending each
+shot out separately (section 7).
+
+Four decisions in the math (frontend/src/analyzeMath.js,
+batchCutAgainstV1 + sequenceCutOffsets):
+
+  - HOLDS COUNT, but only where the render puts them. A hold is real
+    duplicated frames in the rendered file, so clip 0's head hold
+    shifts every later cut point. Mid-sequence holds do NOT, because
+    the render drops them (app.py's lead_hold/trail_hold first/last
+    rule) -- and a stale mid-sequence hold is reachable in the UI, so
+    trusting it would move every cut here while moving nothing in the
+    file being cut. The last clip's tail and round-up never enter a
+    boundary at all: they lie past the final cut.
+  - NOTHING ELSE IS COPIED. Holds, reverse and speed are already
+    baked into that footage as frames -- re-applying them would
+    duplicate them a second time, the same reasoning Reconstruct
+    documents below. Each shot keeps V2's own clip's properties and
+    differs from its neighbours only in where it starts and ends.
+  - CUT POINTS, NOT DURATIONS. N clips give N-1 boundaries, and the
+    LAST shot runs to the end of V2's window rather than stopping at
+    V1's total, because that is what cutting a file means -- nothing
+    is discarded. Extra length an external tool added (a padded
+    frame, a longer generation) is kept on the last shot and reported
+    in the Actions log rather than trimmed off silently. A V2 file
+    too short for all of V1's cuts yields fewer shots, with the
+    overflow reported the same way.
+  - CUTS SNAP TO V2's OWN FPS GRID. V2's, not V1's -- these are
+    source times on V2's file. Rounding each boundary to the nearest
+    frame makes the shots tile the window exactly, instead of leaving
+    a sub-frame sliver for ffmpeg's `trim` to resolve one way at the
+    end of one shot and the other way at the start of the next.
+
+Only V2's FIRST clip is cut; any clip after it is left exactly as it
+was, the same convention Reconstruct uses. One clip on V1 means there
+are no cut points at all, and the button says so instead of doing
+nothing.
+
 RECONSTRUCT is step 2 of a round-trip workflow, not a standalone
 inverse of Analyze. The intended sequence: Analyze conforms V2 to V1's
 cuts (as above); the user then takes V2's rendered footage out of the
@@ -871,6 +928,44 @@ box, so a source-sized V2 over it has two possible meanings and is
 refused with an explanation rather than guessed. The live overlay
 layers in the preview are purely visual (a second <video> element per
 overlay); nothing but an A/B render produces overlay specs.
+
+A SECOND switch beside that one, 1 / 1+, decides how many FILES the
+same click writes. The two are orthogonal: A / A/B decides what a shot
+contains, 1 / 1+ decides whether the shots land in one file or in one
+file each.
+
+  - 1 (default) is the original behavior: the whole track joined into a
+    single clip, one ffmpeg pass, one file.
+  - 1+ renders every cut on its own -- N passes, N files, named
+    <name>_01, _02 ... in track order (zero-padded so a series sorts in
+    cut order in Finder). The cuts are the track that render is built
+    from: V2's own clips in A, V1's clips in A/B, where V2's clips are
+    overlays ON V1's cuts rather than cuts of their own.
+
+Laid end to end, a 1+ series IS the 1 render -- verified frame for
+frame (180/180, framemd5) across a track carrying a head hold, a
+reverse, a slow-down and a tail+round hold. Three things differ, all
+of them consequences of a shot being its own file rather than a segment
+of one:
+
+  - Target resolution and frame rate come from that one clip instead of
+    the largest and fastest on the track, so a shot is no longer padded
+    up to a bigger neighbor's frame (measured: a 160x120 cropped clip
+    renders 160x120 alone, 320x240 padded when joined to a 320x240
+    clip).
+  - A size-capped quality mode budgets each file separately, so N shots
+    means N files each under the cap.
+  - Audio splits at the same points, each file with its own AAC frame
+    boundaries; A1 is left out entirely, because the lane is timed to
+    the whole V1 sequence (one delay, one length) and re-laying it under
+    each shot would restart it at every cut. Render A1 still writes it.
+
+Holds stay a property of the SEQUENCE in 1+, not of each shot: the
+head hold opens the first shot and the tail/round hold closes the last,
+exactly as in one file. A stale mid-sequence hold (a Raise on what used
+to be the last clip, before another was appended) is zeroed for the
+same reason -- the joined render ignores it, so the split must too, or
+that shot would come out longer than the stretch it stands for.
 
 Either picture track can be rendered independently through the exact
 same pipeline described in sections 4 and 5.

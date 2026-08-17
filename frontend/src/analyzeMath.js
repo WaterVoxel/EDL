@@ -206,6 +206,134 @@ export function reconstructFromV1(v1Clips, v2Clips) {
   return { segments: [reconstructed, ...v2Clips.slice(1)], warnings }
 }
 
+// "Batch Analyze" is the plain-cut sibling of Analyze, for a whole sequence
+// handled as ONE file: Render V1 (or Render V2 in its `1` mode) joins the cut
+// into a single clip, that file goes out to an external tool and comes back
+// whole, and all that's wanted from it is V1's cuts — the file split where V1
+// splits, nothing else applied.
+//
+// Analyze can't do that job, and the difference is which time base V2's numbers
+// live in. Analyze clones each V1 clip's own inSec/outSec onto V2, which is
+// meaningful only when V2 is another version of the SAME source (an alternate
+// take, a cleaned-up master) — there, the same timecodes still point at the same
+// footage. A joined render is a different animal: it holds V1's clips laid end
+// to end, so its second shot does not begin at V1 clip 2's inSec, it begins
+// where clip 1 ended. Batch Analyze therefore works in SEQUENCE time —
+// cumulative durations from the head of V2's own window — which is also the only
+// reading of "the same places as V1" that lands on the frames the user sees
+// under V1's own playhead.
+//
+// Nothing else about V1 is copied. Holds especially are NOT re-applied: the
+// round-tripped file already contains those frozen frames as real footage, so
+// adding a hold to a segment would duplicate them a second time. Reverse and
+// speed are likewise already baked in (same reasoning reconstructFromV1
+// documents at length). Each segment keeps V2's own clip's properties and
+// differs from its neighbours only in where it starts and ends.
+
+// Where V1's clips meet, in seconds from the start of the rendered sequence:
+// N clips give N-1 internal boundaries.
+//
+// Holds count toward those boundaries, because they are real duplicated frames
+// in the rendered file — but only where the RENDER puts them, which is head
+// hold on clip 0 and tail/round on the last clip (app.py's lead_hold/trail_hold
+// rule, mirrored client-side by clipMath.sanitizeHoldPlacement). A stale
+// mid-sequence hold is reachable in the UI (see gotchas.md) and would push every
+// later cut point here while moving nothing in the file being cut, so it is
+// ignored rather than trusted. The last clip's tail and round-up never enter a
+// boundary at all — they lie past the final cut — so clip 0's head hold is the
+// only hold that can shift anything.
+export function sequenceCutOffsets(v1Clips) {
+  const offsets = []
+  if (v1Clips.length === 0) return offsets
+  let elapsed = v1Clips[0].headHoldSec || 0
+  for (let i = 0; i < v1Clips.length - 1; i++) {
+    elapsed += clipMainSec(v1Clips[i])
+    offsets.push(elapsed)
+  }
+  return offsets
+}
+
+// Total length the V1 sequence renders to — the same first/last hold rule as
+// above, so this and sequenceCutOffsets can't disagree about where the sequence
+// ends.
+function sequenceRenderedSec(v1Clips) {
+  if (v1Clips.length === 0) return 0
+  const last = v1Clips[v1Clips.length - 1]
+  return (v1Clips[0].headHoldSec || 0)
+    + v1Clips.reduce((sum, c) => sum + clipMainSec(c), 0)
+    + (last.tailHoldSec || 0) + (last.roundHoldSec || 0)
+}
+
+const CUT_EPSILON = 0.001
+
+// Returns { segments, overflow, leftoverSec }:
+//   segments    — V2's FIRST clip replaced by one clip per V1 clip, in track
+//                 order; any further V2 clips are left exactly as they were
+//                 (same convention as reconstructFromV1 — Render V2 in `1` mode
+//                 is what's meant to collapse V2 to one clip first).
+//   overflow    — seconds by which V1's sequence ran past the end of V2's own
+//                 window, 0 when it fit. Cut points past that end produce no
+//                 segment at all rather than an empty one, so a V2 file shorter
+//                 than V1 yields fewer shots than V1 has clips.
+//   leftoverSec — seconds by which V2's window outlasts V1's sequence, 0 when it
+//                 doesn't. Not trimmed off: see below.
+//
+// These are CUT POINTS, not durations. N V1 clips give N-1 boundaries and the
+// last segment runs to the END of V2's window rather than stopping at V1's
+// total, because that is what cutting a file means — no footage is discarded.
+// It also keeps whatever an external tool added (a padded frame, a slightly
+// longer generation) instead of silently dropping it; `leftoverSec` reports it
+// so the extra length is visible rather than a surprise.
+export function batchCutAgainstV1(v1Clips, v2Clips) {
+  if (v1Clips.length === 0 || v2Clips.length === 0) {
+    return { segments: v2Clips, overflow: 0, leftoverSec: 0 }
+  }
+
+  const v2c = v2Clips[0]
+  const span = v2c.outSec - v2c.inSec
+  const v1Sec = sequenceRenderedSec(v1Clips)
+  const overflow = Math.max(0, v1Sec - span)
+  const leftoverSec = Math.max(0, span - v1Sec)
+
+  // Snapped to V2's own frame grid: a cut point is a frame boundary, and
+  // rounding to the nearest frame here means the segments tile V2's window
+  // exactly instead of leaving sub-frame slivers for ffmpeg's `trim` to resolve
+  // one way at the end of one shot and the other way at the start of the next.
+  // V2's fps, not V1's — these are source times on V2's file.
+  const fps = v2c.fps > 0 ? v2c.fps : 0
+  const snap = s => (fps ? Math.round(s * fps) / fps : s)
+
+  // Only cuts that fall strictly inside V2's window and strictly after the
+  // previous surviving cut are kept. Both halves of that drop an EMPTY shot
+  // rather than a real one: a cut past the end has no footage to cut (it is
+  // counted in `overflow` instead), and a cut that repeats the previous
+  // boundary — a zero-length V1 clip, or two clips whose boundary snaps to the
+  // same frame of V2 — has no footage between them.
+  const cuts = []
+  for (const offset of sequenceCutOffsets(v1Clips).map(snap)) {
+    const prev = cuts.length > 0 ? cuts[cuts.length - 1] : 0
+    if (offset > prev + CUT_EPSILON && offset < span - CUT_EPSILON) cuts.push(offset)
+  }
+  const edges = [0, ...cuts, span]
+
+  const shots = []
+  for (let i = 0; i < edges.length - 1; i++) {
+    shots.push({
+      ...v2c,
+      id: crypto.randomUUID(),
+      inSec: v2c.inSec + edges[i],
+      outSec: v2c.inSec + edges[i + 1],
+      headHoldSec: 0,
+      tailHoldSec: 0,
+      roundHoldSec: 0,
+      dirty: true,
+      displayName: `Shot${String(i + 1).padStart(2, '0')}`,
+    })
+  }
+
+  return { segments: [...shots, ...v2Clips.slice(1)], overflow, leftoverSec }
+}
+
 export function analyzeAgainstV1(v1Clips, v2File) {
   let overflow = 0
   const v2DurationSec = v2File.sourceDurationSec

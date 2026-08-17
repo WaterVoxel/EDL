@@ -24,20 +24,24 @@ export default function AboutDialog({ onClose }) {
 
         <div className="flex-1 overflow-y-auto px-4 py-3 flex flex-col gap-4">
           <p className="text-[11px] text-neutral-300 leading-relaxed">
-            NARA EDITOR is a local, EDL-style video editor built on ffmpeg. Every edit — trim, splice,
-            reverse, slow down, hold, round-up — is staged as a non-destructive decision and only
-            applied when you press Render, in a single ffmpeg pass. Source files are never modified.
+            NARA EDITOR is a local, EDL-style video editor built on ffmpeg. Every picture edit — trim,
+            split, reverse, slow down, hold, round-up, crop, overlay — is staged as a non-destructive
+            decision and only applied when you press Render, which compiles the entire timeline into a
+            single ffmpeg filter graph (two passes, in the size-capped modes). An edit never rewrites
+            your footage: renders always write a new file to{' '}
+            <span className="font-mono text-neutral-400">output/</span>.
           </p>
 
           <Section title="Lossless pipeline">
             <p>
-              Renders default to <strong>mathematically lossless</strong> video: H.264 encoded with a
-              constant quantizer of zero (<span className="font-mono text-neutral-400">-qp 0</span>),
-              which preserves every decoded pixel bit-exactly. This is verified frame-by-frame against
-              source hashes — including on 10-bit sources, where the commonly-cited{' '}
+              <strong>Lossless</strong> is the reference mode: H.264 at a constant quantizer of zero
+              (<span className="font-mono text-neutral-400">-qp 0</span>), which preserves every
+              decoded pixel bit-exactly. This is verified frame-by-frame against source hashes —
+              including on 10-bit sources, where the commonly-cited{' '}
               <span className="font-mono text-neutral-400">-crf 0</span> is <em>not</em> actually
-              lossless. Five alternatives live in Export Settings (⚙, in the Export Bin header) for
-              when file size matters more than bit-exactness:
+              lossless. It's also what the app falls back to when no mode has been chosen. Six modes
+              live in Export Settings (⚙, in the Export Bin header), and whichever is selected there
+              is what every render uses — worth a glance before you deliver:
             </p>
             <div className="overflow-x-auto">
               <table className="w-full text-[10px] font-mono">
@@ -83,25 +87,30 @@ export default function AboutDialog({ onClose }) {
               </table>
             </div>
             <p>
-              The size-capped modes are a real promise, not an estimate: they encode twice (the first
-              pass measures the picture's complexity, the second spends the byte budget against that
-              map), then <strong>weigh the finished file</strong> and re-encode 15% smaller if it
-              still overshot.
+              The three size-capped modes are a real promise, not an estimate. They encode twice — the
+              first pass measures the picture's complexity, the second spends the byte budget against
+              that map — then <strong>weigh the finished file</strong>. The budget starts at 92% of the
+              cap (90% for Custom, and adjustable) as headroom for container overhead; if the result
+              still overshoots, the budget is cut to 85% and it encodes again, up to four attempts
+              total. If four can't make it, the render <em>fails and reports the size it actually
+              reached</em> rather than quietly handing you an oversized file.
             </p>
             <p>
               <strong>Custom</strong> is the same machinery with every knob exposed — target size,
               safety headroom, codec, speed preset, profile, pixel format, rate-control multipliers
               and raw ffmpeg flags — in <strong>FFmpeg Custom Settings</strong> (the gear button in
-              the top bar). Settings
-              there can be saved as named presets, exported and imported as files, and travel inside
-              the project file, so a delivery spec is set up once and reused. HEVC output isn't
-              browser-playable, so previewing it in-app transcodes on the fly; it's a delivery
-              format, not a working one.
+              the top bar). Settings there can be saved as named presets, exported and imported as
+              files, and travel inside the project file, so a delivery spec is set up once and
+              reused. HEVC output isn't browser-playable, so previewing it in-app transcodes on the
+              fly; it's a delivery format, not a working one.
             </p>
             <p>
-              Audio is AAC in every mode, matched to — never worse than — the source's own bitrate
-              (192 kb/s floor; the size-capped modes drop to a 96 kb/s floor so the cap can be met),
-              sample rate, and channel count.
+              Audio in a timeline render is AAC, matched to — never worse than — the source's own
+              bitrate (192 kb/s floor), at the highest sample rate and channel count in play. The two
+              Under 50MB modes lower that floor to 96 kb/s and, when the cap is tight, will squeeze
+              audio as far as 32 kb/s: video is served first, down to a hard minimum of 100 kb/s.
+              Custom is different — it hands the <em>whole</em> budget to video and lets 96 kb/s-plus
+              audio ride on top, which is why its retry loop earns its keep.
             </p>
             <p>
               Several edits introduce <strong>zero new pixels</strong> in any mode, since they only
@@ -115,7 +124,7 @@ export default function AboutDialog({ onClose }) {
                 <span className="font-mono text-neutral-400">setpts</span>) with no interpolation or
                 generated frames; capped so the effective rate never drops below 12 fps.
               </li>
-              <li><strong>Splice</strong> / <strong>Trim</strong> — cuts between existing frames, copies nothing new.</li>
+              <li><strong>Split</strong> / <strong>Trim</strong> — cuts between existing frames, copies nothing new.</li>
             </ul>
             <p>
               Every claim above is enforced by the project's own test discipline, not just asserted:
@@ -125,16 +134,38 @@ export default function AboutDialog({ onClose }) {
             </p>
           </Section>
 
-          <Section title="Crop resolutions & AI-model alignment">
+          <Section title="Crop — presets, free-form, animated">
             <p>
-              Crop lets you keep a fixed-size region of a clip's frame at Render time — 12 presets
-              across two size tiers (480p, 720p) and six aspect ratios each, positioned by dragging
-              the box on the preview. The box never upscales past the source's own resolution, and
-              its size/position always snap to even pixels (required for standard 4:2:0 chroma
-              subsampling).
+              Crop keeps a region of a clip's frame, applied at Render time. Three ways to set the box:
+            </p>
+            <ul className="list-disc pl-4 space-y-0.5">
+              <li>
+                <strong>Presets</strong> — 12 fixed sizes across two tiers (480p, 720p) and six aspect
+                ratios each, positioned by dragging the box on the preview.
+              </li>
+              <li>
+                <strong>Free</strong> — drag the corners. The aspect ratio stays locked to the preset
+                you started from, no side is allowed below 16px, and square boxes snap to multiples of
+                32 so they stay on the grid described below.
+              </li>
+              <li>
+                <strong>Animate</strong> — keyframe the box's <em>position</em> over the clip (the
+                ANIM lane under the clip). Size is fixed for the whole animation, because a changing
+                crop size would mean a changing output resolution. Only x and y interpolate; motion is
+                linear between keyframes and held flat before the first and after the last. Keyframe
+                times are source seconds measured from the clip's IN point, which is the one unit the
+                preview and the render expression already agree on.
+              </li>
+            </ul>
+            <p>
+              The box never upscales past the source's own resolution, and its size and position land
+              on even pixels, as standard 4:2:0 chroma subsampling requires. That last rule has a
+              visible consequence worth knowing: ffmpeg floors the crop offset to an even number, so a
+              very slow programmed pan advances in <strong>2px steps</strong> rather than continuously.
+              That's deliberate — the alternative is chroma-plane misalignment.
             </p>
             <p>
-              The specific pixel counts aren't round numbers — they're chosen to land close to a
+              The preset pixel counts aren't round numbers — they're chosen to land close to a
               multiple of <strong>16px</strong> in both dimensions. That unit matters for AI video
               models such as Seedance-style diffusion transformers, which downsample through an 8×
               VAE encoder and then group pixels into 2×2 patches — an 8 × 2 = 16px native processing
@@ -187,16 +218,57 @@ export default function AboutDialog({ onClose }) {
             </p>
           </Section>
 
+          <Section title="Reformat">
+            <p>
+              Reformat is the other geometry tool, and the one exception to the stage-everything rule:
+              it takes a file straight from the Media Bin, rescales the whole frame, and writes the
+              result to the Export Bin immediately. Nothing about the timeline is involved and no
+              framing decision is made — Crop chooses <em>which part</em> of the picture you keep,
+              Reformat keeps all of it at a different size.
+            </p>
+            <p>
+              24 bounding boxes are on offer: four tiers (480p, 720p, 1080p, 4K) × the same six aspect
+              ratios as Crop. The source is contain-fitted into the box —{' '}
+              <span className="font-mono text-neutral-400">scale = min(1, boxW/srcW, boxH/srcH)</span>{' '}
+              — so it keeps <strong>its own</strong> aspect ratio, not the box's, and there is no pad
+              step: you get whatever the proportional shrink produces, never letterboxing. The leading{' '}
+              <span className="font-mono text-neutral-400">min(1, …)</span> means it will never
+              upscale; ask for a bigger box than the source and the file comes back at its own size.
+            </p>
+            <p>
+              <strong>Adaptive</strong> is a seventh choice that drops the target ratio entirely and
+              keeps the source's exact ratio, sizing it to the tier's pixel budget instead:{' '}
+              <span className="font-mono text-neutral-400">min(1, √(tierArea/sourceArea))</span>,
+              where the budget is that tier's 16:9 area. That works because all six ratios in a tier
+              land within about 4% of the same area — 1080p's six boxes are all ≈2.07–2.09 megapixels
+              — so the area generalizes cleanly to an arbitrary source ratio.
+            </p>
+            <p>
+              The scale is a single{' '}
+              <span className="font-mono text-neutral-400">-vf scale=W:H</span>, with both dimensions
+              floored to even pixels, and it honors whichever export quality mode is selected — so a
+              Reformat under a size-capped mode goes through the same two-pass weigh-and-retry loop.
+              Worth being explicit about one thing: rescaling resamples, so a Reformat is the one
+              operation that cannot be bit-exact against its source even in Lossless mode. Lossless
+              there means the encode adds nothing on top of the resample.
+            </p>
+          </Section>
+
           <Section title="Media In / Media Out">
             <p>
-              <strong>Media Info In</strong> (left panel) inspects whatever source is selected —
-              container, duration, frame count, resolution, codec, profile, pixel format, bit depth,
-              and video/audio bitrates — straight from ffprobe. <strong>Media Info Out</strong>{' '}
-              (right panel) shows the same fields for the rendered result. Comparing the two panels
-              is how you confirm what the render did: in Lossless mode the pixel format and bit depth
-              match the source exactly while the profile reads High 4:4:4 Predictive; in Match/High
-              modes the profile stays standard High. Duration and total frames grow by exactly your
-              holds, round-ups, and slow-downs.
+              <strong>Media Info In</strong> (left panel) inspects whatever source is selected,
+              straight from ffprobe, in three groups: <em>File</em> (name, format, size, duration,
+              total frames, overall bit rate), <em>Video</em> (codec, profile, resolution, frame rate,
+              pixel format, bit depth, video bitrate) and <em>Audio</em> (codec, sample rate,
+              channels). <strong>Media Info Out</strong> (right panel) shows the same fields for the
+              rendered result.
+            </p>
+            <p>
+              Comparing the two panels is how you confirm what a render did. In Lossless mode the
+              pixel format and bit depth match the source exactly while the profile reads High 4:4:4
+              Predictive. Match source and High quality pin neither profile nor pixel format, so those
+              rows show whatever the encoder chose for that source — informative, but not a promise.
+              Duration and total frames grow by exactly your holds, round-ups, and slow-downs.
             </p>
           </Section>
 
@@ -204,20 +276,29 @@ export default function AboutDialog({ onClose }) {
             <p>
               The timeline is an edit <em>decision</em> list, not a working copy of the media. Each
               clip on V1 is a record — source file, IN/OUT points, hold durations, reversed flag,
-              playback speed — displayed in the EDL table below the timeline with SMPTE-style
-              source/record timecodes. Nothing touches disk until Render, which compiles the whole
-              list into one ffmpeg filter graph: per clip, an optional head freeze, the trimmed main
-              body (reversed and/or time-stretched as flagged), an optional tail/round freeze — then
-              everything is normalized to a common resolution and frame rate and concatenated into
-              one continuous file, frame-budgeted so clip boundaries never drift. Because decisions
-              stay data until render time, everything is undoable (Cmd/Ctrl+Z), saveable to the
-              project Library (.nara JSON), and exportable as a CMX-style .edl file.
+              playback speed, crop box and keyframes, overlay — displayed in the EDL table below the
+              timeline with SMPTE-style source/record timecodes. <strong>Raise</strong> pulls a Media
+              Bin file onto the track, <strong>Duplicate</strong> copies a clip with every decision
+              intact, and <strong>Split</strong> divides one clip into two at the playhead.
+            </p>
+            <p>
+              No timeline edit touches disk. Render compiles the whole list into one filter graph:
+              per clip, an optional overlay composite, then crop, then an optional head freeze, the
+              trimmed main body (reversed and/or time-stretched as flagged), an optional tail/round
+              freeze — then everything is normalized to a common resolution and frame rate and
+              concatenated into one continuous file, frame-budgeted so clip boundaries never drift.
+            </p>
+            <p>
+              Because decisions stay data until render time, the timeline is saveable to the project
+              Library (.nara JSON) and exportable as a CMX-style .edl file. Undo (Cmd/Ctrl+Z) covers
+              V1, up to 50 steps back, with no redo — the V2 track and the A1 bed sit outside that
+              history, so removing them is a manual step rather than an undo.
             </p>
           </Section>
 
-          <Section title="Analyze & Reconstruct (V2 track)">
+          <Section title="V2 — Analyze, Batch Analyze, Reconstruct, composite">
             <p>
-              V2 is a reference lane above the main track for round-tripping edits between files.
+              V2 is a second video lane above the main track, for round-tripping edits between files.
             </p>
             <p>
               <strong>① V2 Analyzer</strong> — drop any video onto V2, and Analyze clones V1's cut
@@ -227,16 +308,170 @@ export default function AboutDialog({ onClose }) {
               built on V1.
             </p>
             <p>
-              <strong>② V2 Reconstruct</strong> — the inverse: it reads V1's decisions and undoes them,
+              <strong>② V2 Batch Analyzer</strong> — the plain-cut sibling, for a sequence handled as
+              one file. Render V1 (or Render V2 on <em>1</em>), take that single joined file through
+              an external tool in one pass, drop it back on V2, and this cuts it where V1 cuts: four
+              clips on V1 give four clips on V2, at the same places. It works in sequence time rather
+              than source time — the second shot in a joined file starts where the first one ended,
+              not at V1 clip 2's IN point, which is exactly the case ① can't describe. Nothing else
+              is copied: holds, reverse and speed are already baked into that footage as real frames,
+              so re-applying them would double them. The last shot runs to the end of the file, so
+              extra length an external tool added is kept rather than trimmed off silently — the
+              Actions log reports it, along with any cut that fell past the end of a file shorter
+              than V1.
+            </p>
+            <p>
+              <strong>③ V2 Reconstruct</strong> — the inverse: it reads V1's decisions and undoes them,
               placing the full, untrimmed, un-reversed, hold-free original source file(s) on V2 —
               one clip per distinct source, in the order they appear. The result is the pre-edit
               state of the footage, verified bit-exact against the original.
             </p>
             <p>
-              <strong>③ Render V2</strong> — renders whatever is on V2 through the same lossless
-              pipeline to a file in the Export Bin. Each track has its own eye toggle; the preview shows
-              the topmost visible track, while the playhead, ruler, and transport always follow
-              V1's timing.
+              <strong>④ Render V2</strong> has an <strong>A / A/B</strong> switch. <em>A</em> renders
+              the V2 track by itself to{' '}
+              <span className="font-mono text-neutral-400">&lt;stem&gt;-analyzed.mp4</span>.{' '}
+              <em>A/B</em> composites V2 <strong>onto</strong> V1 and renders the pair as one clip, to{' '}
+              <span className="font-mono text-neutral-400">&lt;stem&gt;-composite.mp4</span> — the
+              only route to a composite file.
+            </p>
+            <p>
+              <strong>⑤ 1 / 1+</strong> — the switch beside it, deciding how many files that same
+              click writes. <em>1</em> is one file, the whole track joined into a single clip.{' '}
+              <em>1+</em> renders every cut on its own:{' '}
+              <span className="font-mono text-neutral-400">&lt;name&gt;_01</span>,{' '}
+              <span className="font-mono text-neutral-400">_02</span>… in track order, one ffmpeg
+              pass each, for handing individual shots to a tool that takes one clip at a time. The
+              two switches are independent — A / A/B decides what a shot contains, 1 / 1+ decides
+              how it's split — and the cuts belong to whichever track the render is built from:
+              V2's own clips in A, V1's in A/B. <em>1+</em> and <strong>②</strong> are the two halves
+              of the same choice: send the shots out separately, or send one joined file out and cut
+              it back into shots on the way in.
+            </p>
+            <p>
+              Laid end to end a 1+ series <em>is</em> the 1 render, frame for frame (verified by
+              frame hash across a head hold, a reverse, a slow-down and a tail hold). What changes
+              is what being a separate file implies: each shot keeps its own resolution and frame
+              rate instead of being padded up to the largest clip on the track, a size-capped
+              quality mode gives every file its own budget, and A1 is left out — that lane is timed
+              to the whole V1 sequence, so re-laying it under each shot would restart it at every
+              cut. Holds stay the sequence's: the head hold opens the first shot, the tail and
+              round-up close the last, and nothing appears in the middle that the joined render
+              doesn't have.
+            </p>
+            <p>
+              The compositing rule is the point of the feature. Crop a moving region out of V1 (crop
+              box plus ANIM keyframes), render it, run it through an external tool — an AI video
+              model, a grade, a cleanup pass — and drop the result on V2. It comes back the size of
+              the crop box, not the size of V1. Nara recognizes that from the resolution difference
+              alone, with no flag to remember, and puts it back exactly where the box was, following
+              the same animated path: <strong>the crop box becomes the overlay's placement
+              rectangle</strong>, and V1 itself is never cropped in a composite — the whole point is
+              to lay the processed region back onto the full original frame. Pairing across several
+              clips is positional: 1st V2 clip onto 1st V1 clip, each inheriting that V1 clip's own
+              box and keyframes.
+            </p>
+            <p>
+              Sizes must match the box <strong>exactly</strong>; nothing is resampled to fit. A
+              513×512 file against a 512×512 box is a mistake upstream, and silently scaling it would
+              bake a soft, misaligned patch into an otherwise lossless render — so those cases warn
+              and are left alone. Same-resolution V2 is ordinary full-frame replacement, not a
+              composite, and produces no warning. A/B mode adds one case: a V2 clip matching V1's
+              source size covers the whole frame at 0,0 — unless that V1 clip is cropped, where
+              "cover the frame" has two possible meanings and neither is safe to guess, so it refuses
+              and says why.
+            </p>
+            <p>
+              Under the hood each overlay gets its own{' '}
+              <span className="font-mono text-neutral-400">-i</span> even when two clips reference the
+              same file, and is drawn with{' '}
+              <span className="font-mono text-neutral-400">overlay=…:eof_action=pass:repeatlast=0</span>{' '}
+              so a short overlay stops cleanly instead of freezing on its last frame for the rest of
+              the clip. Every overlay source is probed, and a placement that would run off the frame
+              is rejected rather than silently clipped.
+            </p>
+            <p>
+              Each track has its own eye toggle, and they control the render target and the frame grab
+              as well as the display. The playhead, ruler, and transport always follow V1's timing.
+            </p>
+          </Section>
+
+          <Section title="A1 — audio bed & room tone">
+            <p>
+              A1 is an audio-only track under the picture. Drop a file on it and it plays beneath the
+              whole V1 sequence at <span className="font-mono text-neutral-400">volume=0.35</span>,
+              summed with the clips' own audio by{' '}
+              <span className="font-mono text-neutral-400">
+                amix=inputs=2:duration=first:dropout_transition=0:normalize=0
+              </span>.
+            </p>
+            <p>
+              <span className="font-mono text-neutral-400">normalize=0</span> is the load-bearing part.
+              amix's default divides every input by the number of inputs, which would quietly drop your
+              clip audio 6 dB the moment a bed was added; with normalization off it's an exact
+              unity-gain sum — verified to a residual of 7.45e-09 across 485,100 samples. So clip audio
+              passes through at precisely its own level and the bed is the only thing attenuated.{' '}
+              <span className="font-mono text-neutral-400">duration=first</span> ends the mix with the
+              picture, however long the bed happens to be.
+            </p>
+            <p>
+              The bed starts where V1's <em>picture</em> starts. A head hold is a frozen frame, so the
+              bed is pushed past it with{' '}
+              <span className="font-mono text-neutral-400">adelay=delays=&lt;ms&gt;:all=1</span> —
+              prepending real silence rather than shifting timestamps, which keeps the later
+              pad-and-trim measuring from zero so the render ends flush. Two ordering details were
+              found by measurement, not reasoning:{' '}
+              <span className="font-mono text-neutral-400">aformat</span> must come <em>before</em> the
+              pad (resampling after padding shifted the tail by 14 samples), and nowhere in the graph
+              is <span className="font-mono text-neutral-400">aresample=async=1</span> used — nothing
+              is permitted to silently stretch audio to fit. Length comes from the sum of the clips'
+              frame-quantized durations, the same truth the picture uses; under mixed frame rates and
+              slow-motion that can differ from wall-clock by up to ~0.076s, and the audio follows the
+              frames. Adding a bed changes <strong>zero</strong> video frame hashes — checked across
+              105 frames in four configurations.
+            </p>
+            <p>
+              <strong>Room tone.</strong> A hold has no audio of its own, and digital silence in the
+              middle of a cut is audible as a hole. The gap a head hold creates is filled instead with
+              a 3.003s, 48 kHz stereo room-tone asset, conformed by{' '}
+              <span className="font-mono text-neutral-400">aformat</span> to the graph's rate and
+              layout and cut to the gap's exact length. With no bed loaded the trailing gap gets the
+              same treatment; once a bed is present the bed covers the tail and only the head gap is
+              filled. Verified across 84 frames in four combinations.
+            </p>
+            <p>
+              <strong>Render A1</strong> writes the timeline's audio alone as a{' '}
+              <span className="font-mono text-neutral-400">.wav</span> —{' '}
+              <span className="font-mono text-neutral-400">-c:a pcm_s16le</span>, uncompressed, the
+              same length as the V1 render, opening no clip as a video input at all. It rebuilds the
+              bed chain node for node, and the result was measured against the V1 render's own audio:
+              identical duration to the microsecond, bit-identical at the head, within 1 LSB through
+              the body, with only the last 6 of 44,100 tail samples differing by a single LSB
+              (≈ −90 dBFS). That's a usable stem, not an approximation of one.
+            </p>
+          </Section>
+
+          <Section title="Frame grabs">
+            <p>
+              The Preview header can hand you the current frame as a still: <strong>download</strong>{' '}
+              it as a PNG, or <strong>copy</strong> it to the clipboard. Both capture at full source
+              resolution, drawn 1:1 with no resampling. The canvas is sized to the smaller of the
+              probed width and the decoded video width — a deliberate guard, because browsers
+              sometimes report a macroblock-padded decode size and taking that at face value would
+              add a strip of garbage down the edge.
+            </p>
+            <p>
+              Downloads are named{' '}
+              <span className="font-mono text-neutral-400">&lt;source&gt;_&lt;HH-MM-SS-FF&gt;.png</span>,
+              so the timecode of the grab is in the filename. Copying goes through the async clipboard
+              handed the encode <em>promise</em> rather than the finished blob, which is what WebKit
+              requires to keep the user-gesture permission alive. You get a brief confirmation flash
+              either way.
+            </p>
+            <p>
+              What you capture is the decoded frame only — the crop box, its keyframe path, and the
+              composited overlay layer are on-screen guides and aren't baked in. The eye toggles do
+              matter, though: they decide which track the shared decoder is showing, and therefore
+              which track you grab.
             </p>
           </Section>
 
@@ -253,14 +488,20 @@ export default function AboutDialog({ onClose }) {
             <p>
               A proposed command is <strong>never run automatically</strong>. It's checked server-side
               first — must literally start with <span className="font-mono text-neutral-400">ffmpeg</span>,
-              every input/output path must resolve inside{' '}
+              every input/output path must resolve inside the project's own{' '}
               <span className="font-mono text-neutral-400">input/</span> or{' '}
-              <span className="font-mono text-neutral-400">output/</span>, and shell metacharacters are
+              <span className="font-mono text-neutral-400">output/</span> folders, and shell metacharacters are
               inert (commands run as an argument list, never through a shell). If it passes, you get{' '}
               <strong>Run</strong> and <strong>Cancel</strong> buttons; if it fails validation, the
               rejection reason is shown and there is no way to force it through. Execution itself is
               re-validated independently and capped at 10 minutes; the proposal step is capped at 60
               seconds. <strong>New</strong> clears the visible conversation and starts a fresh session.
+            </p>
+            <p>
+              This is the one path that can write into{' '}
+              <span className="font-mono text-neutral-400">input/</span>, and only over a file that
+              already exists there — it cannot create one. Read the proposed output path before
+              pressing Run; everywhere else in the app, source files are only ever read.
             </p>
             <p>
               When a Run succeeds and a clip is selected, the produced file is loaded onto that clip
@@ -275,15 +516,12 @@ export default function AboutDialog({ onClose }) {
             <p>
               Frame-accurate transport (play/stop, frame stepping, first/last frame, loop, editable
               timecode with a TC/frames toggle) · project Library with save/open · .nara project
-              export · EDL export · <strong>frame grabs</strong> from the Preview header — download the
-              current frame as a PNG at full source resolution, or copy it to the clipboard (the
-              decoded frame only; the crop box and V2 overlay layers aren't baked in) ·{' '}
-              <strong>Render without audio</strong> on any render (picture only;
-              it also leaves out the A1 bed and room tone) · export-destination picker · right-click{' '}
-              <strong>Rename</strong>,{' '}
-              <strong>Show destination</strong> and <strong>Delete</strong> in both media bins
-              (renaming is blocked while a clip on the timeline still points at that file) · favorites, sorting, and filtering in
-              both media panels.
+              export · EDL export · <strong>Render without audio</strong> on the V1, V2 and composite
+              renders (picture only; it also leaves out the A1 bed and room tone) · export-destination
+              picker · right-click <strong>Rename</strong>, <strong>Show destination</strong> and{' '}
+              <strong>Delete</strong> in both media bins (renaming is blocked while a clip on the
+              timeline — or the A1 bed — still points at that file) · favorites, sorting, and
+              filtering in both media panels.
             </p>
           </Section>
         </div>

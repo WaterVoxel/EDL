@@ -29,9 +29,10 @@ import FfmpegCustomSettings from './components/FfmpegCustomSettings'
 import Timeline from './components/Timeline/Timeline'
 import { clipBaseSec, roundUpAmount } from './clipMath'
 import { loadTrackTags, tagTrack, renameTrackTag, isAudioFile } from './fileList'
-import { analyzeAgainstV1, reconstructFromV1 } from './analyzeMath'
+import { analyzeAgainstV1, batchCutAgainstV1, reconstructFromV1 } from './analyzeMath'
 import { mergeExportPresets } from './exportPresets'
 import { matchOverlays } from './overlayMatch'
+import { shotOutputNames } from './renderNames'
 
 const MIN_RIGHT_PANEL = 260
 const MAX_RIGHT_PANEL = 720
@@ -116,13 +117,14 @@ function AppInner() {
   const toggleV1Visible = useCallback(() => setV1Visible(v => !v), [])
   const toggleV2Visible = useCallback(() => setV2Visible(v => !v), [])
 
-  // A1 — the "smart" audio track: ONE audio bed locked under the whole V1
-  // sequence. It is deliberately NOT a clip list and NOT part of
-  // focusedTrack/activeClips: it owns no timing of its own (it always starts
-  // at 0 and the render pads or cuts it to V1's length), so there is nothing
-  // for the clip toolbar to trim, reorder, or select. Shape:
-  // null | { name, dir, durationSec }.
-  const [audioBed, setAudioBed] = useState(null)
+  // A1 — the "smart" audio track: an ordered lane of audio clips locked under
+  // the whole V1 sequence. Sequential like V1 (each clip starts where the
+  // previous one ends), but still NOT part of focusedTrack/activeClips: no clip
+  // on it owns editable timing (the lane starts at V1's picture start and the
+  // render pads or cuts the whole run to V1's length), so there is nothing for
+  // the clip toolbar to trim or select. Order IS the lane, so this is an array
+  // and the render sends it in order. Shape: [{ name, dir, durationSec }].
+  const [audioBeds, setAudioBeds] = useState([])
   // Eye = show the bar on the timeline. It does not affect the render — the
   // bed is either loaded or it isn't. a1Muted silences the bed in the PREVIEW
   // only; it has no UI control (the gutter is just A1 + the eye), so it stays
@@ -282,6 +284,22 @@ function AppInner() {
   const abMatch = matchOverlays(timelineClips, track2Clips, { fullFrameSameSize: true })
   const abOverlays = abMatch.overlays
 
+  // "Render V2"'s second axis, the 1 / 1+ switch beside the A / A/B one:
+  //   '1'  → one file, the whole track joined into a single clip (the original
+  //          behavior, and the default).
+  //   '1+' → one file per cut, each shot rendered on its own and numbered in
+  //          track order.
+  // Orthogonal to v2RenderMode on purpose: that one decides WHAT each shot
+  // contains (V2 alone, or V2 over V1), this one decides how many files it
+  // lands in, so all four combinations mean something. Session-only, like
+  // v2RenderMode — it's a property of the click, not of the edit.
+  const [v2ShotMode, setV2ShotMode] = useState('1')
+  // { done, total } while a shot-by-shot render is running, null otherwise.
+  // A 1+ render is N sequential ffmpeg passes behind one click, so unlike every
+  // other render in the app it has an inside to report — the Render V2 button
+  // counts the shots off and refuses a second click until they're done.
+  const [v2ShotProgress, setV2ShotProgress] = useState(null)
+
   const logMessages = (() => {
     const msgs = []
     for (const c of timelineClips) {
@@ -391,7 +409,7 @@ function AppInner() {
       [...timelineClips, ...track2Clips]
         .filter(c => (c.sourceDir || 'input') === dir)
         .map(c => c.sourceName)
-        .concat(audioBed && (audioBed.dir || 'input') === dir ? [audioBed.name] : [])
+        .concat(audioBeds.filter(b => (b.dir || 'input') === dir).map(b => b.name))
     )
   }
   const inUseSourceNames = inUseNamesFor('input')
@@ -513,6 +531,71 @@ function AppInner() {
     })
   }
 
+  // Render V2 in 1+ mode: one pass per cut, in track order, writing
+  // `<name>_01`, `_02`… (see renderNames.shotOutputNames — the same function
+  // the dialog previewed the series with, so the names shown are the names
+  // written).
+  //
+  // Each pass is the ordinary single-clip render the backend already does, so
+  // every per-clip decision — holds, round-up, reverse, speed, crop, its V2
+  // overlay — comes out exactly as it does in the joined render. Two things
+  // legitimately differ, both because a shot is now its own file rather than a
+  // segment of one: the render's target resolution and frame rate come from
+  // that one clip instead of the largest and fastest on the track (so a 1080p
+  // shot stays 1080p instead of being padded up to a 4K neighbor's frame), and
+  // a size-capped quality mode budgets each file separately.
+  //
+  // Sequential, not concurrent: one pass already uses the whole machine, and
+  // the Export Bin should fill in cut order rather than in whatever order N
+  // parallel ffmpeg runs happened to finish. A failure stops the series there
+  // and says which shot — the shots already written stay, since they're
+  // finished files and re-running only appends a fresh series.
+  async function renderShots(sourceClips, overlays, baseName, noAudio, noise) {
+    const names = shotOutputNames(baseName, sourceClips.length)
+    for (let i = 0; i < sourceClips.length; i++) {
+      setV2ShotProgress({ done: i, total: sourceClips.length })
+      // Holds belong to the SEQUENCE, not to a clip: a head hold opens the
+      // sequence and a tail/round hold closes it, which is why both the
+      // frontend (sanitizeHoldPlacement) and the server keep them on the first
+      // and last clip and ignore them anywhere else. A shot render makes every
+      // clip both first and last of its own one-clip timeline, so a stale
+      // mid-sequence hold — a Raise on what USED TO BE the last clip, before
+      // another was appended — would suddenly render, making that shot longer
+      // than the same stretch of the joined render. Apply the sequence's rule
+      // to the sequence, not to each shot: the run still opens and closes
+      // exactly as it does in one file.
+      const isFirst = i === 0
+      const isLast = i === sourceClips.length - 1
+      const shotClip = {
+        ...sourceClips[i],
+        headHoldSec: isFirst ? (sourceClips[i].headHoldSec || 0) : 0,
+        tailHoldSec: isLast ? (sourceClips[i].tailHoldSec || 0) : 0,
+        roundHoldSec: isLast ? (sourceClips[i].roundHoldSec || 0) : 0,
+      }
+      // The whole overlay list goes in; clipsToPayload pairs by clip id (which
+      // the copy above keeps), so a shot with no V2 partner renders without one.
+      const payload = clipsToPayload([shotClip], overlays)
+      const result = await renderTimeline(payload, names[i], noAudio, [], noise)
+      if (result.error) {
+        alert(
+          `Render failed on shot ${i + 1} of ${sourceClips.length}: ` + result.error
+          + (result.detail ? '\n' + result.detail : '')
+          + (i > 0 ? `\n\nThe ${i} shot${i === 1 ? '' : 's'} before it were written.` : '')
+        )
+        return false
+      }
+      // Logged and refreshed per shot rather than once at the end: a long
+      // series should show up as it lands, which is also the only place the
+      // final names (after any server-side de-duplication) are reported.
+      setAnalyzeLog(prev => [
+        { kind: 'info', text: `▣ Shot ${i + 1}/${sourceClips.length} → ${result.output}` },
+        ...prev,
+      ])
+      refresh()
+    }
+    return true
+  }
+
   async function handleRenderConfirm(outputName, noAudio = false) {
     setShowRenderDialog(false)
     setRendering(true)
@@ -524,19 +607,43 @@ function AppInner() {
       // renders V1 exactly as before (crop and all), so both are reachable.
       // A composite always comes from the A/B toggle, so it uses the
       // full-frame-aware match (abOverlays), not the always-on one.
-      const payload = clipsToPayload(sourceClips, isComposite ? abOverlays : [])
-      // The bed is locked to V1, so it only rides along on renders that
-      // CONTAIN the V1 sequence: a plain V1 render and an A/B composite. Render
-      // V2 in mode A renders the V2 track by itself, where a V1-length bed has
-      // no meaning. noAudio also excludes it — the backend rejects that
-      // combination outright, so don't send it.
-      const bed = (isV2 || noAudio || !audioBed) ? null : { input: audioBed.name, dir: audioBed.dir }
+      const overlays = isComposite ? abOverlays : []
+      // A1 is locked to V1, so it only rides along on renders that CONTAIN the
+      // V1 sequence: a plain V1 render and an A/B composite. Render V2 in mode
+      // A renders the V2 track by itself, where a V1-length lane has no
+      // meaning. noAudio also excludes it — the backend rejects that
+      // combination outright, so don't send it. Order is the lane order.
+      const beds = (isV2 || noAudio) ? [] : audioBeds.map(b => ({ input: b.name, dir: b.dir }))
       // Unlike the bed, noise fill is NOT V1-only: a V2 render has its own
       // holds and slow-downs, and their gaps deserve the same treatment. It is
       // suppressed only by noAudio, where there is no audio graph to fill (the
       // backend rejects that combination outright).
       const noise = !noAudio && noiseEnabled
-      const result = await renderTimeline(payload, outputName, noAudio, bed, noise)
+      // The 1 / 1+ switch belongs to the V2 group, so only its two targets read
+      // it — Render V1 always writes one file, as it always has.
+      if ((isV2 || isComposite) && v2ShotMode === '1+') {
+        // A1 is defined against the WHOLE V1 sequence: one delay past the head
+        // hold, one length, one run of clips. A single shot has none of that, so
+        // laying the lane under each one would restart it at every cut — which
+        // is not what the lane says. Shot renders leave it out, and say so when
+        // there was something to leave out.
+        if (beds.length > 0) {
+          setAnalyzeLog(prev => [
+            { kind: 'info', text: `▣ A1 is not included in a 1+ render — the lane is timed to the whole V1 sequence, not to a single shot. Use Render A1 for it.` },
+            ...prev,
+          ])
+        }
+        const ok = await renderShots(sourceClips, overlays, outputName, noAudio, noise)
+        // Clean only when the whole series landed: a stopped series left some
+        // of the track unrendered, and the dot is what says so.
+        if (ok) {
+          if (isV2) setTrack2Clips(prev => prev.map(c => ({ ...c, dirty: false })))
+          else setTimelineClips(prev => prev.map(c => ({ ...c, dirty: false })))
+        }
+        return
+      }
+      const payload = clipsToPayload(sourceClips, overlays)
+      const result = await renderTimeline(payload, outputName, noAudio, beds, noise)
       if (result.error) { alert('Render failed: ' + result.error + (result.detail ? '\n' + result.detail : '')); return }
       if (!isV2) {
         setTimelineClips(prev => prev.map(c => ({ ...c, dirty: false })))
@@ -546,6 +653,7 @@ function AppInner() {
       refresh()
     } finally {
       setRendering(false)
+      setV2ShotProgress(null)
     }
   }
 
@@ -562,9 +670,12 @@ function AppInner() {
     setRendering(true)
     try {
       const payload = clipsToPayload(timelineClips)
-      const bed = audioBed ? { input: audioBed.name, dir: audioBed.dir } : null
-      const base = projectName || (audioBed ? audioBed.name.replace(/\.[^.]+$/, '') : 'render')
-      const result = await renderA1(payload, `${base}_A1`, bed, noiseEnabled)
+      const beds = audioBeds.map(b => ({ input: b.name, dir: b.dir }))
+      // Named after the FIRST clip on the lane when there's no project name —
+      // the one the render starts with, and the only stable choice as more are
+      // appended.
+      const base = projectName || (audioBeds[0] ? audioBeds[0].name.replace(/\.[^.]+$/, '') : 'render')
+      const result = await renderA1(payload, `${base}_A1`, beds, noiseEnabled)
       if (result.error) {
         alert('Render A1 failed: ' + result.error + (result.detail ? '\n' + result.detail : ''))
         return
@@ -659,33 +770,38 @@ function AppInner() {
     refresh()
   }
 
-  // A1 accepts exactly one file and replaces whatever was there — a bed is a
-  // single decision, not a lane to assemble. A file with no audio stream is
-  // refused here rather than at render time, where it would surface as an
-  // ffmpeg filtergraph error long after the user forgot what they dropped.
+  // A1 APPENDS: a new file starts where the last one on the lane ends, exactly
+  // as a V1 clip starts where the previous clip ends. Nothing is replaced, so
+  // building a bed out of several pieces (a music cue, then a voice-over) is a
+  // matter of adding them in order — and the order they're added in IS the
+  // order they play, since A1 has no reorder.
+  //
   // Shared tail of both routes onto A1: a file already sitting in input/ (the
   // bin's + button) and a freshly uploaded one (the A1 drop zone). Probes for
-  // a real audio stream before accepting — the extension can lie, and a bed
-  // with no audio stream would fail the render with a filtergraph error.
+  // a real audio stream before accepting — the extension can lie, and a clip
+  // with no audio stream would fail the render with a filtergraph error long
+  // after the user forgot what they dropped.
   async function addBedByName(name) {
     const info = await probe(name, 'input')
     if (info.error) { alert('Could not probe file: ' + info.error); return false }
     if (!info.has_audio) {
       setAnalyzeLog(prev => [
-        { kind: 'warn', text: `⚠ "${name}" has no audio stream — nothing to use as a bed` },
+        { kind: 'warn', text: `⚠ "${name}" has no audio stream — nothing to use on A1` },
         ...prev,
       ])
       return false
     }
     setTrackTags(prev => tagTrack(name, 'a1', prev))
-    setAudioBed({
+    setAudioBeds(prev => [...prev, {
       name,
       dir: 'input',
       // The container duration, not video_duration: an audio-only file has no
       // video stream, and for a file that does have one it's the audio that
-      // matters here.
+      // matters here. This is also what places every LATER clip on the lane
+      // (each one starts at the running sum), so it's read once here rather
+      // than re-probed per render.
       durationSec: info.duration,
-    })
+    }])
     return true
   }
 
@@ -696,8 +812,10 @@ function AppInner() {
     refresh()
   }
 
-  function handleRemoveBed() {
-    setAudioBed(null)
+  // By index, not by name: the same file can legitimately sit on A1 twice (a
+  // sting used at the head and again at the tail), so identity is position.
+  function handleRemoveBed(index) {
+    setAudioBeds(prev => prev.filter((_, i) => i !== index))
   }
 
   function handleAnalyze() {
@@ -718,6 +836,45 @@ function AppInner() {
     }
   }
 
+  // "V2 Batch Analyzer": V1's cut points applied to the one file on V2 as a
+  // plain split — one V2 clip per V1 clip, nothing else carried over. See
+  // batchCutAgainstV1 for why this is a different operation from V2 Analyzer
+  // and not a variant of it: the file on V2 is the SEQUENCE joined into one
+  // clip, so the cuts live at cumulative durations rather than at V1's own
+  // IN/OUT points.
+  function handleBatchAnalyze() {
+    if (track2Clips.length === 0) { alert('Drop a file on the V2 track first.'); return }
+    if (timelineClips.length === 0) { alert('V1 has no clips to take cut points from.'); return }
+    if (timelineClips.length === 1) {
+      alert('V1 has only one clip, so there are no cut points to apply. Split V1 first, or use V2 Analyzer to conform V2 to V1\'s single clip.')
+      return
+    }
+    const v2Source = track2Clips[0]
+    const name = v2Source.displayName || v2Source.sourceName
+    const { segments, overflow, leftoverSec } = batchCutAgainstV1(timelineClips, track2Clips)
+    // One shot means every cut point landed past the end of V2's footage — the
+    // file is shorter than V1's first clip, so there was nothing to cut.
+    const shotCount = segments.length - (track2Clips.length - 1)
+    if (shotCount < 2) {
+      alert(`"${name}" is shorter than V1's first clip — none of V1's cut points fall inside it.`)
+      return
+    }
+    setTrack2Clips(segments)
+    const notes = [
+      { kind: 'info', text: `▣ V2 Batch Analyzer: "${name}" cut into ${shotCount} shots at V1's cut points` },
+    ]
+    if (overflow > 0.001) {
+      notes.push({ kind: 'warn', text: `⚠ V1's sequence runs ${overflow.toFixed(2)}s past the end of "${name}" — only ${shotCount} of V1's ${timelineClips.length} cuts could be made` })
+    }
+    if (leftoverSec > 0.001) {
+      notes.push({ kind: 'info', text: `▣ "${name}" runs ${leftoverSec.toFixed(2)}s longer than V1's sequence — the extra footage stayed on the last shot rather than being trimmed off` })
+    }
+    if (track2Clips.length > 1) {
+      notes.push({ kind: 'warn', text: `⚠ V2 held ${track2Clips.length} clips — only the first was cut; the rest were left as they were` })
+    }
+    setAnalyzeLog(prev => [...notes, ...prev])
+  }
+
   function handleReconstruct() {
     if (timelineClips.length === 0) { alert('V1 has no clips to reconstruct from.'); return }
     if (track2Clips.length === 0) { alert('Drop the round-tripped file on V2 first — Reconstruct edits V2\'s own clip(s), it does not create new ones.'); return }
@@ -731,12 +888,13 @@ function AppInner() {
     }
   }
 
-  // version 4 adds exportPresets (version 3 added audioBed). Nothing reads
-  // `version` — it's a marker for humans reading a .nara — and older files
-  // still load unchanged (handleLibraryOpen defaults a missing audioBed to
-  // null and a missing preset list to none).
+  // version 5 turns A1 into a lane: `audioBeds` (an ordered array) replaces
+  // version 3's single `audioBed` object, and version 4 added exportPresets.
+  // Nothing reads `version` — it's a marker for humans reading a .nara — and
+  // older files still load unchanged (handleLibraryOpen promotes a lone
+  // `audioBed` to a one-clip lane and defaults a missing preset list to none).
   function buildProject() {
-    return { version: 4, clips: timelineClips, track2Clips, audioBed, selectedId, exportPresets }
+    return { version: 5, clips: timelineClips, track2Clips, audioBeds, selectedId, exportPresets }
   }
 
   async function handleSave() {
@@ -809,7 +967,9 @@ function AppInner() {
   function handleLibraryOpen(name, project) {
     resetTimeline(project.clips)
     setTrack2Clips(project.track2Clips || [])
-    setAudioBed(project.audioBed || null)
+    // A pre-version-5 project has a single `audioBed` object; it becomes a
+    // one-clip lane, which renders the graph it always did.
+    setAudioBeds(project.audioBeds || (project.audioBed ? [project.audioBed] : []))
     setSelectedId(project.selectedId || null)
     setProjectName(name)
     setShowLibrary(false)
@@ -1200,6 +1360,7 @@ function AppInner() {
                   onFocusTrack={setFocusedTrack}
                   onAddToV2={handleAddToV2}
                   onAnalyze={handleAnalyze}
+                  onBatchAnalyze={handleBatchAnalyze}
                   onReconstruct={handleReconstruct}
                   onRenderV2={handleRenderV2Click}
                   onRender={handleRenderClick}
@@ -1215,7 +1376,10 @@ function AppInner() {
                   hasOverlay={hasOverlay}
                   v2RenderMode={v2RenderMode}
                   onSetV2RenderMode={setV2RenderMode}
-                  audioBed={audioBed}
+                  v2ShotMode={v2ShotMode}
+                  onSetV2ShotMode={setV2ShotMode}
+                  v2ShotProgress={v2ShotProgress}
+                  audioBeds={audioBeds}
                   onAddToA1={handleAddToA1}
                   onRemoveBed={handleRemoveBed}
                   a1Visible={a1Visible}
@@ -1296,6 +1460,12 @@ function AppInner() {
             if (renderTarget === 'composite') return `${stem}-composite.mp4`
             return `${stem}.mp4`
           })()}
+          // Non-zero only for a 1+ Render V2, which turns the one name below
+          // into that many numbered files — the dialog previews them. Render V1
+          // never splits, so it never passes a count.
+          shotCount={renderTarget !== 'v1' && v2ShotMode === '1+'
+            ? (renderTarget === 'v2' ? track2Clips : timelineClips).length
+            : 0}
           showNoAudioOption
           onConfirm={handleRenderConfirm}
           onCancel={() => setShowRenderDialog(false)}

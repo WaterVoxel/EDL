@@ -1,26 +1,35 @@
 import { useRef, useEffect, useState } from 'react'
 
-// Matches ffmpeg_utils.BED_GAIN — the render attenuates the bed by this much
+// Matches ffmpeg_utils.BED_GAIN — the render attenuates A1 by this much
 // before summing it under V1's audio, so the preview has to as well or the
 // balance the user hears isn't the balance they get.
 const BED_GAIN = 0.35
 
-/* Best-effort preview of the A1 bed: a bare <audio> element slaved to the
- * timeline transport.
+/* Best-effort preview of the A1 lane: one bare <audio> element per clip on it,
+ * each slaved to the timeline transport over its own stretch of the lane.
  *
- * The key point is WHAT it follows. It reads transport.getTimelinePos(), not
- * the main video's currentTime, which makes the bed TIMELINE-locked rather
- * than source-locked — so it plays straight through mid-sequence holds,
- * reverse, and slow-mo instead of freezing or running backwards with the
- * picture. That is exactly what the render produces, where the bed is apad-ed
- * flat past its start and never sees a per-clip transform.
+ * The key point is WHAT they follow. Each reads transport.getTimelinePos(), not
+ * the main video's currentTime, which makes A1 TIMELINE-locked rather than
+ * source-locked — so it plays straight through mid-sequence holds, reverse, and
+ * slow-mo instead of freezing or running backwards with the picture. That is
+ * exactly what the render produces, where A1 is apad-ed flat past its start and
+ * never sees a per-clip transform.
  *
- * `startSec` is the one offset it does honor: V1's picture start (the first
- * clip's head hold), matching the render's adelay on the bed. Source time is
- * therefore `timelinePos - startSec` — negative during the hold, which is when
- * the element parks at 0 and stays paused so nothing is heard until the picture
- * begins. Without this the preview would play the bed over the frozen frame
- * while the render didn't.
+ * The lane is sequential, so clip N's stretch of the timeline begins at
+ * `startSec` plus the durations of the clips before it — the same running sum
+ * the render's concat produces and the same one AudioBedBar draws. An element
+ * whose stretch isn't under the playhead parks at 0 and stays paused, so only
+ * ever one is heard: the elements are the mix, and the position decides which.
+ *
+ * One element per clip rather than one element re-pointed at each source: a src
+ * swap drops the decoder and re-buffers, which would put a hole in playback at
+ * every A1 boundary — the one place the mix has to be seamless.
+ *
+ * `startSec` is V1's picture start (the first clip's head hold), matching the
+ * render's adelay on the lane. Source time for clip N is therefore
+ * `timelinePos - startSec - offsetN` — negative before the clip's turn, past
+ * its own duration after it, and silent in both, which is what the render has
+ * there (leading silence from adelay, apad silence past the lane's end).
  *
  * Position is read in a rAF loop rather than from MediaContext's currentTime,
  * which comes from `timeupdate` (~4Hz) — see gotchas.md. The sync tolerances
@@ -28,7 +37,30 @@ const BED_GAIN = 0.35
  * exactly), and only correct past 120ms while playing (a per-frame seek would
  * stutter the decode far worse than the drift it fixes).
  */
-export default function AudioBedPlayer({ bed, transport, muted = false, startSec = 0 }) {
+export default function AudioBedPlayer({ beds, transport, muted = false, startSec = 0 }) {
+  let cursor = 0
+  const placed = beds.map((bed, index) => {
+    const at = cursor
+    cursor += bed.durationSec || 0
+    return { bed, index, at }
+  })
+
+  return (
+    <>
+      {placed.map(({ bed, index, at }) => (
+        <A1ClipAudio
+          key={`${index}-${bed.name}`}
+          bed={bed}
+          transport={transport}
+          muted={muted}
+          startSec={startSec + at}
+        />
+      ))}
+    </>
+  )
+}
+
+function A1ClipAudio({ bed, transport, muted, startSec }) {
   const audioRef = useRef(null)
   // Kept in a ref, not a dep: the loop must read the LIVE transport each frame
   // (it's a fresh object every render), and re-subscribing every render would
@@ -47,11 +79,13 @@ export default function AudioBedPlayer({ bed, transport, muted = false, startSec
 
   useEffect(() => { setUseTranscode(false) }, [bed.name, bed.dir])
 
-  // Read through a ref for the same reason the transport is: the loop must see
-  // the live value, and re-running the effect on every hold edit would restart
-  // playback mid-scrub.
+  // Read through refs for the same reason the transport is: the loop must see
+  // the live values, and re-running the effect on every hold edit (or on a clip
+  // ahead of this one being removed) would restart playback mid-scrub.
   const startRef = useRef(startSec)
   startRef.current = startSec
+  const spanRef = useRef(bed.durationSec || 0)
+  spanRef.current = bed.durationSec || 0
 
   useEffect(() => {
     const el = audioRef.current
@@ -62,12 +96,17 @@ export default function AudioBedPlayer({ bed, transport, muted = false, startSec
     const tick = () => {
       const t = transportRef.current
       const pos = t?.getTimelinePos?.() ?? 0
-      // Bed source time: the timeline position minus V1's picture start.
+      // Source time for this clip: the timeline position minus where this clip's
+      // own stretch of the lane begins.
       const srcTime = pos - startRef.current
-      if (srcTime < 0) {
-        // Still inside the head hold — the render has silence here, so hold
-        // the element paused at its own 0 and let it start cleanly when the
-        // picture does.
+      if (srcTime < 0 || srcTime >= spanRef.current) {
+        // Not this clip's turn — either still ahead of it (the head hold, or an
+        // earlier clip playing) or already past its end. The render has other
+        // audio or silence here, so hold the element paused at its own 0 and let
+        // it start cleanly when its turn comes. Parking at 0 rather than leaving
+        // it wherever it ended also keeps it out of the `ended` state, where a
+        // play() would restart the file from the top and loop it under the rest
+        // of the sequence.
         if (!el.paused) el.pause()
         if (el.currentTime !== 0) el.currentTime = 0
       } else if (!t?.playing) {

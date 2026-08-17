@@ -36,12 +36,13 @@ function EyeIcon({ off, className }) {
 export default function Timeline({
   clips, setClips, selectedId, selectedPart = 'main', onSelectId, onSelectItem, onUndo, canUndo,
   track2Clips = [], setTrack2Clips, selectedId2 = null, selectedPart2 = 'main', onSelectItem2,
-  focusedTrack = 1, onFocusTrack, onAddToV2, onAnalyze, onReconstruct, onRenderV2,
+  focusedTrack = 1, onFocusTrack, onAddToV2, onAnalyze, onBatchAnalyze, onReconstruct, onRenderV2,
   onRender, onRenderA1, rendering = false,
   timeDisplayMode, onToggleTimeDisplayMode, animateEnabled = false,
   v1Visible = true, onToggleV1, v2Visible = true, onToggleV2, hasOverlay = false,
   v2RenderMode = 'A', onSetV2RenderMode,
-  audioBed = null, onAddToA1, onRemoveBed, a1Visible = true, onToggleA1,
+  v2ShotMode = '1', onSetV2ShotMode, v2ShotProgress = null,
+  audioBeds = [], onAddToA1, onRemoveBed, a1Visible = true, onToggleA1,
   a1Muted = false, noiseEnabled = false,
   // The two halves of the bar swap, so each one is rendered where the other
   // used to be: `toolbar` is App.jsx's clip edit row, handed down as a node
@@ -86,9 +87,14 @@ export default function Timeline({
     if (file && onAddToV2) onAddToV2(file)
   }
 
-  function handleA1Files(files) {
-    const file = files[0]
-    if (file && onAddToA1) onAddToA1(file)
+  // A1 is a lane, so a multi-file drop lands as several clips end to end.
+  // Awaited one at a time on purpose: each file is uploaded and probed before
+  // it's appended, and letting those race would append them in whatever order
+  // the network finished in rather than the order they were dropped.
+  async function handleA1Files(files) {
+    for (const file of Array.from(files)) {
+      if (onAddToA1) await onAddToA1(file)
+    }
   }
 
   const selectedClip = clips.find(c => c.id === selectedId)
@@ -424,6 +430,13 @@ export default function Timeline({
   // component) or by handlers passed to it, so the JSX has to stay here; a
   // portal moves only the DOM parent, keeping the React tree, the handlers,
   // and the state exactly as they were.
+  //
+  // How many files a 1+ Render V2 would write: the cuts it splits at belong to
+  // whichever track that render is built from — V2's own clips in A, V1's in
+  // A/B, where V2's clips are overlays ON V1's cuts rather than cuts of their
+  // own. Read only by labels here; App.jsx derives the same count from the same
+  // two lists when it actually runs the renders.
+  const v2ShotCount = v2RenderMode === 'AB' ? clips.length : track2Clips.length
   const actionsBar = (
     <div className="grid grid-cols-[1fr_auto_1fr] items-center">
       <div className="flex items-center gap-1.5 justify-self-start">
@@ -451,6 +464,20 @@ export default function Timeline({
             className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] rounded bg-teal-700 text-white hover:bg-teal-600"
           >
             V2 Analyzer
+          </button>
+        )}
+        {/* Its plain-cut sibling, next to it and a shade back in the same teal
+            so the pair reads as two ways of conforming V2 to V1 rather than two
+            unrelated actions. Needs V1 clips as well as a V2 file, since the cut
+            points come from V1 (the Analyzer beside it only needs V2 — it reads
+            V1 inside the handler and says so if it's empty). */}
+        {clips.length > 0 && track2Clips.length > 0 && (
+          <button
+            onClick={onBatchAnalyze}
+            title="Cut the V2 file at V1's cut points — one V2 clip per V1 clip, no holds or speed copied. For a whole V1 sequence rendered as one file and handled in a single pass outside the app"
+            className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] rounded bg-teal-900 text-white hover:bg-teal-800"
+          >
+            V2 Batch Analyzer
           </button>
         )}
       </div>
@@ -491,12 +518,22 @@ export default function Timeline({
         {track2Clips.length > 0 && (
           <button
             onClick={onRenderV2}
-            title={v2RenderMode === 'AB'
-              ? 'Render V2 composited over V1 as one clip'
-              : 'Render the V2 track to a file'}
-            className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] rounded border border-teal-700 text-teal-400 hover:bg-teal-900/40"
+            // Only a 1+ render disables the button, and only while it runs: it
+            // is N passes deep and the click that started it looks finished
+            // long before it is, so the label counts the shots off. A 1 render
+            // stays exactly as it was — one pass, no progress to report.
+            disabled={!!v2ShotProgress}
+            title={
+              (v2RenderMode === 'AB' ? 'Render V2 composited over V1' : 'Render the V2 track')
+              + (v2ShotMode === '1+'
+                ? ` as ${v2ShotCount} separate ${v2ShotCount === 1 ? 'file' : 'files'}, one per cut`
+                : ' as one clip')
+            }
+            className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] rounded border border-teal-700 text-teal-400 hover:bg-teal-900/40 disabled:border-neutral-700 disabled:text-neutral-600 disabled:hover:bg-transparent"
           >
-            Render V2
+            {v2ShotProgress
+              ? `Shot ${v2ShotProgress.done + 1}/${v2ShotProgress.total}…`
+              : 'Render V2'}
           </button>
         )}
         {/* What "Render V2" produces: A = the V2 track alone (default),
@@ -527,6 +564,38 @@ export default function Timeline({
             </button>
           </div>
         )}
+        {/* How MANY files "Render V2" writes: 1 = the whole track joined into
+            a single clip (the original behavior, and the default), 1+ = one
+            file per cut, numbered in track order.
+            Deliberately a SECOND switch rather than four modes in one: this
+            axis is orthogonal to A / A/B, which decides what each shot
+            CONTAINS. Same styling as that group because it's the same kind of
+            control on the same button, and it sits to its right so the pair
+            reads "what, then how many". */}
+        {track2Clips.length > 0 && (
+          <div
+            className="flex items-stretch rounded overflow-hidden border border-teal-700 text-[9px] leading-none"
+            role="group"
+            aria-label="Render V2 shot mode"
+          >
+            <button
+              onClick={() => onSetV2ShotMode?.('1')}
+              aria-pressed={v2ShotMode !== '1+'}
+              title="1 — render the whole track as a single clip"
+              className={`px-1.5 py-0.5 ${v2ShotMode !== '1+' ? 'bg-teal-700 text-white' : 'text-teal-400 hover:bg-teal-900/40'}`}
+            >
+              1
+            </button>
+            <button
+              onClick={() => onSetV2ShotMode?.('1+')}
+              aria-pressed={v2ShotMode === '1+'}
+              title={`1+ — render every cut as its own file (${v2ShotCount} ${v2ShotCount === 1 ? 'shot' : 'shots'}), numbered in track order`}
+              className={`px-1.5 py-0.5 border-l border-teal-700 ${v2ShotMode === '1+' ? 'bg-teal-700 text-white' : 'text-teal-400 hover:bg-teal-900/40'}`}
+            >
+              1+
+            </button>
+          </div>
+        )}
         {/* Last in the row, past the V2 group: it's the only audio render, so
             it sits apart from the two picture renders rather than between
             them. Amber for the same reason — indigo is V1's and teal is V2's,
@@ -535,7 +604,7 @@ export default function Timeline({
             A1 to render — a loaded track, or A1 Room Tone on (room tone in the
             holds is A1 content too) — the same "appears with its track" rule
             Render V2 follows. */}
-        {(audioBed || noiseEnabled) && (
+        {(audioBeds.length > 0 || noiseEnabled) && (
           <button
             onClick={onRenderA1}
             disabled={rendering || clips.length === 0}
@@ -779,16 +848,16 @@ export default function Timeline({
             })()}
             </div>
 
-            {/* A1 — the audio bed. Lives INSIDE timelineRef so the absolutely
+            {/* A1 — the audio lane. Lives INSIDE timelineRef so the absolutely
                 positioned playhead spans it and click-to-seek covers it with
                 no extra math, exactly like V1 and V2. It has no gutter focus
-                button (a plain <span>, like the ANIM label above): the bed
-                isn't clip-shaped, so there's nothing for the clip toolbar or
+                button (a plain <span>, like the ANIM label above): its clips
+                aren't trimmable, so there's nothing for the clip toolbar or
                 the Delete key to act on. */}
             <div className="border-t border-neutral-800">
               <div className="flex items-stretch">
                 <div className="shrink-0 w-12 flex items-center justify-center gap-1 text-[9px] font-mono bg-neutral-800 text-emerald-500/80">
-                  <span title="A1 — audio bed, locked to the V1 sequence">A1</span>
+                  <span title="A1 — audio, laid end to end and locked to the V1 sequence">A1</span>
                   <button
                     onClick={toggleA1}
                     title={a1Visible ? 'Hide A1 content' : 'Show A1 content'}
@@ -796,7 +865,7 @@ export default function Timeline({
                   ><EyeIcon off={!a1Visible} /></button>
                 </div>
                 <div className="flex-1 relative">
-                  {!audioBed ? (
+                  {audioBeds.length === 0 ? (
                     <label
                       onDragOver={e => { e.preventDefault(); setA1DragOver(true) }}
                       onDragEnter={e => { e.preventDefault(); setA1DragOver(true) }}
@@ -807,25 +876,34 @@ export default function Timeline({
                       <span>Drop music or voice-over to run under V1</span>
                       <input
                         type="file"
+                        multiple
                         accept=".wav,.mp3,.m4a,.aac,.flac,.aiff,audio/*"
                         className="hidden"
                         onChange={e => { handleA1Files(e.target.files); e.target.value = '' }}
                       />
                     </label>
                   ) : (
+                    /* A populated lane stays a drop target: A1 APPENDS, so
+                       dropping another file puts it after the last one rather
+                       than replacing anything. The + at the end is the same
+                       action for people who'd rather pick a file than drag it. */
                     <div
                       onClick={handleTimelineClick}
-                      className={`flex items-stretch bg-neutral-950 px-2 py-1 h-8 cursor-pointer transition-all ${!a1Visible ? 'opacity-35 grayscale pointer-events-none' : ''}`}
+                      onDragOver={e => { e.preventDefault(); setA1DragOver(true) }}
+                      onDragEnter={e => { e.preventDefault(); setA1DragOver(true) }}
+                      onDragLeave={() => setA1DragOver(false)}
+                      onDrop={e => { e.preventDefault(); setA1DragOver(false); handleA1Files(e.dataTransfer.files) }}
+                      className={`flex items-stretch gap-1 px-2 py-1 h-8 cursor-pointer transition-all ${a1DragOver ? 'bg-emerald-950/40' : 'bg-neutral-950'} ${!a1Visible ? 'opacity-35 grayscale pointer-events-none' : ''}`}
                     >
-                      {/* `clips` + `gapPx` are what LINK the bed to V1: the bar
-                          lays itself out in V1's own coordinate space (per-clip
+                      {/* `clips` + `gapPx` are what LINK A1 to V1: the bar lays
+                          itself out in V1's own coordinate space (per-clip
                           rendered widths and the 2px flex gaps between them)
                           rather than as one continuous sequenceSec*PPS span,
                           and it starts at V1's picture start rather than at 0 —
-                          so a head hold pushes the bed forward with the video,
+                          so a head hold pushes A1 forward with the video,
                           exactly as the render's adelay does. */}
                       <AudioBedBar
-                        bed={audioBed}
+                        beds={audioBeds}
                         clips={clips}
                         sequenceSec={sequenceSec}
                         pps={PPS}
@@ -834,6 +912,20 @@ export default function Timeline({
                         noiseEnabled={noiseEnabled}
                         onRemove={onRemoveBed}
                       />
+                      <label
+                        onClick={e => e.stopPropagation()}
+                        title="Add another audio file to the end of A1"
+                        className="shrink-0 self-center w-4 h-4 flex items-center justify-center rounded border border-neutral-700 text-neutral-500 text-[10px] leading-none cursor-pointer hover:border-emerald-600 hover:text-emerald-400"
+                      >
+                        +
+                        <input
+                          type="file"
+                          multiple
+                          accept=".wav,.mp3,.m4a,.aac,.flac,.aiff,audio/*"
+                          className="hidden"
+                          onChange={e => { handleA1Files(e.target.files); e.target.value = '' }}
+                        />
+                      </label>
                     </div>
                   )}
                 </div>
@@ -843,13 +935,13 @@ export default function Timeline({
         </div>
       )}
 
-      {/* Bed audio for the preview. Mounted here (not in App.jsx's preview
+      {/* A1 audio for the preview. Mounted here (not in App.jsx's preview
           stage) because `transport` lives in this component — which does mean
-          the bed goes quiet on the AGENT/Reformat/Actions tabs, where the
+          A1 goes quiet on the AGENT/Reformat/Actions tabs, where the
           Timeline unmounts. Acceptable for a best-effort preview. */}
-      {audioBed && clips.length > 0 && (
+      {audioBeds.length > 0 && clips.length > 0 && (
         <AudioBedPlayer
-          bed={audioBed}
+          beds={audioBeds}
           transport={transport}
           muted={a1Muted}
           startSec={sequenceVideoStartSec(clips)}

@@ -667,6 +667,24 @@ def splice():
 
 # ---------- render timeline ----------
 
+def _a1_request_beds(data):
+    """The A1 lane out of a render request, as an ordered list of
+    {"input": name, "dir": ...} dicts — the order is the lane order, which is
+    the order the clips play in.
+
+    Accepts the older single-object "audioBed" key as well, so a client (or a
+    saved .nara loaded by one) from when A1 held exactly one file still renders
+    the same thing. A list of one is not a special case anywhere downstream.
+    """
+    beds = data.get("audioBeds")
+    if beds is None:
+        single = data.get("audioBed")
+        beds = [single] if single else []
+    elif not isinstance(beds, list):
+        beds = [beds]
+    return [b for b in beds if b]
+
+
 @app.route("/api/render_timeline", methods=["POST"])
 def render_timeline():
     data = request.get_json(force=True)
@@ -738,38 +756,39 @@ def render_timeline():
         except RuntimeError as e:
             return jsonify({"error": f"probe failed for overlay {entry['path']}", "detail": str(e)}), 500
 
-    # The A1 audio bed: one more "-i", appended after every clip input AND
-    # every overlay input, mixed under the whole sequence. Its index is only
-    # stable once the overlay loop above has finished (that loop grows
-    # overlay_paths as it goes), which is why this block sits here.
+    # The A1 audio lane: one more "-i" per clip on it, appended after every clip
+    # input AND every overlay input, joined end to end and mixed under the whole
+    # sequence. The indices are only stable once the overlay loop above has
+    # finished (that loop grows overlay_paths as it goes), which is why this
+    # block sits here.
     bed_paths = []
-    bed_index = None
-    bed_info = None
-    raw_bed = data.get("audioBed")
-    if raw_bed:
+    bed_indexes = []
+    bed_infos = []
+    for n, raw_bed in enumerate(_a1_request_beds(data)):
         try:
             bed_name = raw_bed["input"]
             bed_path = fu.safe_path(
                 bed_name,
                 get_output_dir() if raw_bed.get("dir") == "output" else fu.INPUT_DIR,
             )
-        except (fu.PathError, KeyError) as e:
-            return jsonify({"error": f"audio bed: {e}"}), 400
+        except (fu.PathError, KeyError, TypeError) as e:
+            return jsonify({"error": f"A1 clip {n + 1}: {e}"}), 400
         if not bed_name.lower().endswith(fu.MEDIA_EXTENSIONS):
-            return jsonify({"error": f"audio bed: unsupported file type: {bed_name}"}), 400
+            return jsonify({"error": f"A1 clip {n + 1}: unsupported file type: {bed_name}"}), 400
         if not os.path.exists(bed_path):
-            return jsonify({"error": f"audio bed: file not found: {bed_path}"}), 404
+            return jsonify({"error": f"A1 clip {n + 1}: file not found: {bed_path}"}), 404
         try:
             bed_info = fu.get_video_info(bed_path)
         except RuntimeError as e:
-            return jsonify({"error": f"probe failed for audio bed {bed_path}", "detail": str(e)}), 500
-        # A bed with no audio stream would make the graph reference a [N:a]
+            return jsonify({"error": f"probe failed for A1 clip {bed_path}", "detail": str(e)}), 500
+        # An A1 clip with no audio stream would make the graph reference a [N:a]
         # pad that doesn't exist — ffmpeg exits 234 with a filtergraph
         # binding error, which is a 500 the user can do nothing with.
         if not bed_info["has_audio"]:
-            return jsonify({"error": f"audio bed: {bed_name} has no audio stream"}), 400
-        bed_index = len(in_paths) + len(overlay_paths)
+            return jsonify({"error": f"A1 clip {n + 1}: {bed_name} has no audio stream"}), 400
+        bed_indexes.append(len(in_paths) + len(overlay_paths) + len(bed_paths))
         bed_paths.append(bed_path)
+        bed_infos.append(bed_info)
 
     # Gap-fill room tone: one more "-i", after every clip, overlay, and the
     # bed, so its index is stable only once those are all counted. The client
@@ -1026,14 +1045,14 @@ def render_timeline():
     # flip to False here too, or audio_args()/either two-pass render would
     # try to attach -c:a aac to a stream that was never mapped.
     no_audio = bool(data.get("noAudio"))
-    if no_audio and bed_index is not None:
+    if no_audio and bed_indexes:
         return jsonify({"error": "cannot mix an audio bed into a render with audio disabled"}), 400
     if no_audio and noise_index is not None:
         return jsonify({"error": "cannot fill gaps with noise in a render with audio disabled"}), 400
-    # The bed counts as an audio source for the encoder's own settings: with a
-    # bed under an entirely silent V1, it is the ONLY real audio in the render,
-    # and leaving it out here would degenerate audio_sample_rate to 0.
-    audio_infos = [i for i in infos + ([bed_info] if bed_info else []) if i["has_audio"]]
+    # A1 counts as an audio source for the encoder's own settings: with a bed
+    # under an entirely silent V1, it is the ONLY real audio in the render, and
+    # leaving it out here would degenerate audio_sample_rate to 0.
+    audio_infos = [i for i in infos + bed_infos if i["has_audio"]]
     combined_info = {
         "has_audio": not no_audio,
         "audio_bit_rate": max((i["audio_bit_rate"] or 0 for i in audio_infos), default=0),
@@ -1057,14 +1076,15 @@ def render_timeline():
     out_path = os.path.join(export_dir, out_name)
 
     filt = fu.build_timeline_filter(
-        clip_specs, target_w, target_h, target_fps, no_audio=no_audio, audio_bed=bed_index,
+        clip_specs, target_w, target_h, target_fps, no_audio=no_audio, audio_beds=bed_indexes,
         fill_noise=noise_index
     )
 
     # Overlay sources come after every clip input, matching the input_index
-    # each overlay spec was assigned above; then the audio bed (bed_index),
-    # then the gap-fill noise asset (noise_index) — this order is what both
-    # indices were computed from, so it must not be rearranged.
+    # each overlay spec was assigned above; then the A1 lane in lane order
+    # (bed_indexes), then the gap-fill noise asset (noise_index) — this order is
+    # what every one of those indices was computed from, so it must not be
+    # rearranged.
     input_args = []
     for p in in_paths + overlay_paths + bed_paths + noise_paths:
         input_args += ["-i", p]
@@ -1097,7 +1117,7 @@ def render_timeline():
 def render_a1():
     """Render the A1 track ALONE to a .wav, timed to the V1 sequence.
 
-    Same request shape as /api/render_timeline (clips, audioBed, fillNoise) so
+    Same request shape as /api/render_timeline (clips, audioBeds, fillNoise) so
     the client can hand over the payload it already built, but only the timing
     keys of each clip are read — see build_a1_filter. The V1 clips are still
     PROBED (never trusted from the client, the same rule render_timeline
@@ -1116,9 +1136,9 @@ def render_a1():
         return jsonify({"error": "need at least 1 clip"}), 400
 
     # The A1 track has content only if a bed, room-tone fill, or both are on.
-    raw_bed = data.get("audioBed")
+    raw_beds = _a1_request_beds(data)
     fill_noise_on = bool(data.get("fillNoise"))
-    if not raw_bed and not fill_noise_on:
+    if not raw_beds and not fill_noise_on:
         return jsonify({"error": "nothing on A1 to render: load an audio track or turn on A1 Noise"}), 400
 
     in_paths = []
@@ -1178,31 +1198,32 @@ def render_a1():
             "trail_hold_sec": (float(c.get("tailHoldSec") or 0) + float(c.get("roundHoldSec") or 0)) if is_last else 0.0,
         })
 
-    # The bed is the only real input (plus the noise asset) — resolved and
-    # probed exactly as render_timeline does, including the has-audio check that
-    # would otherwise become an unbindable [N:a] pad and an opaque exit 234.
+    # The A1 lane is the only real input (plus the noise asset) — resolved and
+    # probed exactly as render_timeline does, in lane order, including the
+    # has-audio check that would otherwise become an unbindable [N:a] pad and an
+    # opaque exit 234.
     input_paths = []
-    bed_index = None
-    if raw_bed:
+    bed_indexes = []
+    for n, raw_bed in enumerate(raw_beds):
         try:
             bed_name = raw_bed["input"]
             bed_path = fu.safe_path(
                 bed_name,
                 get_output_dir() if raw_bed.get("dir") == "output" else fu.INPUT_DIR,
             )
-        except (fu.PathError, KeyError) as e:
-            return jsonify({"error": f"audio bed: {e}"}), 400
+        except (fu.PathError, KeyError, TypeError) as e:
+            return jsonify({"error": f"A1 clip {n + 1}: {e}"}), 400
         if not bed_name.lower().endswith(fu.MEDIA_EXTENSIONS):
-            return jsonify({"error": f"audio bed: unsupported file type: {bed_name}"}), 400
+            return jsonify({"error": f"A1 clip {n + 1}: unsupported file type: {bed_name}"}), 400
         if not os.path.exists(bed_path):
-            return jsonify({"error": f"audio bed: file not found: {bed_path}"}), 404
+            return jsonify({"error": f"A1 clip {n + 1}: file not found: {bed_path}"}), 404
         try:
             bed_info = fu.get_video_info(bed_path)
         except RuntimeError as e:
-            return jsonify({"error": f"probe failed for audio bed {bed_path}", "detail": str(e)}), 500
+            return jsonify({"error": f"probe failed for A1 clip {bed_path}", "detail": str(e)}), 500
         if not bed_info["has_audio"]:
-            return jsonify({"error": f"audio bed: {bed_name} has no audio stream"}), 400
-        bed_index = len(input_paths)
+            return jsonify({"error": f"A1 clip {n + 1}: {bed_name} has no audio stream"}), 400
+        bed_indexes.append(len(input_paths))
         input_paths.append(bed_path)
 
     noise_index = None
@@ -1213,7 +1234,7 @@ def render_a1():
         input_paths.append(fu.NOISE_ASSET)
 
     try:
-        filt = fu.build_a1_filter(clip_specs, audio_bed=bed_index, fill_noise=noise_index)
+        filt = fu.build_a1_filter(clip_specs, audio_beds=bed_indexes, fill_noise=noise_index)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 

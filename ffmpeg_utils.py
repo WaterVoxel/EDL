@@ -21,8 +21,8 @@ FFPROBE = "/opt/homebrew/bin/ffprobe"
 
 ALLOWED_EXTENSIONS = (".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm")
 
-# Audio-only files are accepted for one purpose: the A1 audio bed (see
-# build_timeline_filter's audio_bed). ALLOWED_EXTENSIONS stays video-only on
+# Audio-only files are accepted for one purpose: the A1 audio lane (see
+# build_timeline_filter's audio_beds). ALLOWED_EXTENSIONS stays video-only on
 # purpose — anywhere a VIDEO is required (a timeline clip, an overlay source)
 # still gates on it, so an audio file can never be mistaken for a clip.
 # MEDIA_EXTENSIONS is the wider "may live in input/ or the export dir" set,
@@ -1023,8 +1023,43 @@ def clip_timing(spec):
     return lead_frames, trail_frames, expected_sec
 
 
+def a1_bed_source(bed_indices, sample_rate, channel_layout, prefix, chains):
+    """The A1 lane's clips laid end to end as ONE audio stream. Returns the
+    label to feed the bed chain (adelay → aformat → apad/atrim → volume) and
+    appends whatever nodes that needed to `chains`.
+
+    A1 is sequential like V1: clip 2 starts exactly where clip 1's audio ends.
+    concat is what makes that literal — it butt-joins the streams with no gap
+    and no overlap, so the lane's length is the plain sum of its clips and
+    everything downstream still sees a single stream. Placing each clip with its
+    own adelay and summing them instead would have needed amix=inputs=N+1, which
+    would run V1's own audio through a different sum than the hand-verified
+    unity-gain two-input one. A1 is the part that changed; the mix must not.
+
+    Each input is aformat-ed to the graph's rate/layout BEFORE the concat, since
+    concat requires its inputs to agree and an A1 lane routinely holds a 48 kHz
+    stereo music file next to a 44.1 kHz mono voice-over.
+
+    A single clip returns its raw [N:a] pad and emits no node at all, so a
+    one-file lane produces the exact graph it always did — byte-identical
+    output, nothing to re-verify.
+    """
+    if len(bed_indices) == 1:
+        return f"[{bed_indices[0]}:a]"
+    parts = []
+    for n, idx in enumerate(bed_indices):
+        label = f"[{prefix}in{n}]"
+        chains.append(
+            f"[{idx}:a]aformat=sample_rates={sample_rate}:"
+            f"channel_layouts={channel_layout}{label}"
+        )
+        parts.append(label)
+    chains.append(f"{''.join(parts)}concat=n={len(parts)}:v=0:a=1[{prefix}cat]")
+    return f"[{prefix}cat]"
+
+
 def build_a1_filter(clip_specs, sample_rate=44100, channel_layout="stereo",
-                    audio_bed=None, fill_noise=None):
+                    audio_beds=None, fill_noise=None):
     """Build a filter_complex that renders the A1 track ALONE as [outa].
 
     This is the audio-only counterpart to build_timeline_filter: same A1
@@ -1045,7 +1080,7 @@ def build_a1_filter(clip_specs, sample_rate=44100, channel_layout="stereo",
     referenced by the returned graph at all: the only inputs are the bed and the
     noise asset, which is what makes an A1 render cheap (no video decode).
 
-    audio_bed / fill_noise are input indices, as in build_timeline_filter, and
+    audio_beds / fill_noise are input indices, as in build_timeline_filter, and
     obey the same noise rule: room tone fills a HOLD gap only, and never where
     the bed can be heard — so with a bed the head hold is room tone and the rest
     of the track is bed, and with no bed at all the head and trail holds are
@@ -1053,8 +1088,8 @@ def build_a1_filter(clip_specs, sample_rate=44100, channel_layout="stereo",
     there is no A1 track to render and the caller gets a ValueError rather than
     a silent file.
     """
-    if audio_bed is None and fill_noise is None:
-        raise ValueError("build_a1_filter needs an audio_bed, a fill_noise, or both")
+    if not audio_beds and fill_noise is None:
+        raise ValueError("build_a1_filter needs an audio_beds, a fill_noise, or both")
     if not clip_specs:
         raise ValueError("build_a1_filter needs at least one clip to take its timing from")
 
@@ -1085,7 +1120,7 @@ def build_a1_filter(clip_specs, sample_rate=44100, channel_layout="stereo",
     # the tail — see build_timeline_filter's noise_gaps), so the tail piece is
     # silence and the layer is just "room tone, then silence".
     head_noise = fill_noise is not None and head_sec > 0
-    tail_noise = fill_noise is not None and audio_bed is None and tail_sec > 0
+    tail_noise = fill_noise is not None and not audio_beds and tail_sec > 0
     pieces = []
     if head_sec > 0:
         chains.append((noise_piece if head_noise else silence_piece)(head_sec, "[a1head]"))
@@ -1104,7 +1139,7 @@ def build_a1_filter(clip_specs, sample_rate=44100, channel_layout="stereo",
     else:
         gaps_label = pieces[0]
 
-    if audio_bed is None:
+    if not audio_beds:
         # Room tone alone: pad/trim so the length is the sequence's, exactly as
         # the bed branch below would.
         chains.append(
@@ -1114,10 +1149,10 @@ def build_a1_filter(clip_specs, sample_rate=44100, channel_layout="stereo",
         return ";".join(chains)
 
     # The bed branch, node for node as build_timeline_filter builds it — same
-    # adelay (prepends silence, so the pad below still measures from 0), same
-    # frame-quantized offset, same BED_GAIN — so this render and the V1 one
-    # carry bit-identical bed samples.
-    bed_src = f"[{audio_bed}:a]"
+    # sequential concat of the lane's clips, same adelay (prepends silence, so
+    # the pad below still measures from 0), same frame-quantized offset, same
+    # BED_GAIN — so this render and the V1 one carry bit-identical bed samples.
+    bed_src = a1_bed_source(audio_beds, sample_rate, channel_layout, "a1b", chains)
     if head_sec > 0:
         delay_ms = round(head_sec * 1000)
         chains.append(f"{bed_src}adelay=delays={delay_ms}:all=1[a1bdel]")
@@ -1136,7 +1171,7 @@ def build_a1_filter(clip_specs, sample_rate=44100, channel_layout="stereo",
 
 def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
                            sample_rate=44100, channel_layout="stereo", no_audio=False,
-                           audio_bed=None, fill_noise=None):
+                           audio_beds=None, fill_noise=None):
     """Build one filter_complex string that renders an entire timeline (a
     sequence of trimmed clips, each optionally extended by a frozen-frame
     hold at its lead and/or trail edge, and optionally played backwards)
@@ -1154,14 +1189,16 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
     -map "[outa]" from its own args when no_audio=True — mapping a label
     this function never declares is also a hard ffmpeg error.
 
-    audio_bed is the A1 audio bed: an ffmpeg INPUT INDEX (an int, not a
-    path — the caller owns -i ordering, same contract overlay's input_index
-    follows) for a file whose audio is mixed UNDER the whole rendered
-    sequence. It owns no timing of its own: it starts where V1's PICTURE
-    starts, is padded with silence if shorter than the sequence and cut if
-    longer, and is SUMMED with the clips' own audio rather than replacing it.
-    The bed is a purely audio-side addition — it cannot change a single video
-    frame (hand-verified by framemd5 with and without one).
+    audio_beds is the A1 lane: a LIST of ffmpeg INPUT INDICES (ints, not
+    paths — the caller owns -i ordering, same contract overlay's input_index
+    follows) whose audio is mixed UNDER the whole rendered sequence. The lane is
+    sequential like V1 — clip 2 starts where clip 1's audio ends, joined by
+    concat (see a1_bed_source) — and from there the whole lane behaves as one
+    stream with no timing of its own: it starts where V1's PICTURE starts, is
+    padded with silence if shorter than the sequence and cut if longer, and is
+    SUMMED with the clips' own audio rather than replacing it. A1 is a purely
+    audio-side addition — it cannot change a single video frame (hand-verified
+    by framemd5 with and without one).
 
     "Where V1's picture starts" means the bed is delayed by the first clip's
     head hold (adelay, frame-quantized to lead_frames/fps like the hold's own
@@ -1199,7 +1236,7 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
     no_audio=True with a bed is a contradiction (there is no [aseq] to mix
     into) and raises ValueError rather than silently dropping one of them.
 
-    fill_noise is an input index (like audio_bed) pointing at NOISE_ASSET.
+    fill_noise is an input index (like an audio_beds entry) pointing at NOISE_ASSET.
     When given, the HOLD gaps this function would otherwise fill with anullsrc
     silence are filled with room tone from that input instead: the head hold,
     and the trail hold (which already includes the Raise round-up extension,
@@ -1210,9 +1247,9 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
     than a patch; both stay pure silence.
 
     Noise is also never audible at the same time as the A1 bed. The head hold
-    is inherently safe (the bed is delayed past it — see audio_bed above), but
+    is inherently safe (the bed is delayed past it — see audio_beds above), but
     the trail hold sits at the sequence's end with the bed still summed over
-    it, so passing audio_bed and fill_noise TOGETHER silences the trail gap:
+    it, so passing audio_beds and fill_noise TOGETHER silences the trail gap:
     with a bed loaded, only the head hold gets room tone. (Consequence worth
     knowing: a bed shorter than the sequence leaves its own tail silent, and
     that tail is not noise-filled either — the rule is enforced by gap
@@ -1314,8 +1351,8 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
     the overlay never touches is BIT-EXACT against the same render without
     it.
     """
-    if no_audio and audio_bed is not None:
-        raise ValueError("audio_bed cannot be used with no_audio=True: there is no audio graph to mix into")
+    if no_audio and audio_beds:
+        raise ValueError("audio_beds cannot be used with no_audio=True: there is no audio graph to mix into")
     if no_audio and fill_noise is not None:
         raise ValueError("fill_noise cannot be used with no_audio=True: there is no audio graph to fill")
 
@@ -1335,7 +1372,7 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
     #    (bed_offset_sec below), so the head hold is bed-free. Both halves of
     #    that rely on the same caller contract the bed offset already does —
     #    lead holds only on clip 0, trail holds only on the last clip.
-    noise_gaps = {"head_hold"} if audio_bed is not None else {"head_hold", "trail_hold"}
+    noise_gaps = {"head_hold"} if audio_beds else {"head_hold", "trail_hold"}
 
     def gap_chain(duration, label, kind):
         """Emit the chain filling one `duration`-second audio gap into `label`.
@@ -1583,7 +1620,7 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
         chains.append(f"{''.join(norm_v_labels)}concat=n={len(clip_specs)}:v=1:a=0[outv]")
     else:
         interleaved = "".join(f"{v}{a}" for v, a in zip(norm_v_labels, norm_a_labels))
-        if audio_bed is None:
+        if not audio_beds:
             chains.append(f"{interleaved}concat=n={len(clip_specs)}:v=1:a=1[outv][outa]")
         else:
             # The clips' own concatenated audio becomes an intermediate
@@ -1591,6 +1628,10 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
             # label the caller maps, so nothing downstream changes.
             total_sec = sum(expected_secs)
             chains.append(f"{interleaved}concat=n={len(clip_specs)}:v=1:a=1[outv][aseq]")
+            # The lane's clips are butt-joined into one stream first (see
+            # a1_bed_source), so everything below treats "A1" as a single bed
+            # however many files are on it.
+            #
             # The bed starts where V1's PICTURE starts: adelay by the first
             # clip's head hold so a hold pushes the bed forward with the video
             # instead of playing over the frozen frame. adelay prepends silence
@@ -1598,7 +1639,7 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
             # from 0 and the bed still ends flush with the sequence — a 1s hold
             # means 1s of leading silence and 1s less bed heard, never a render
             # that runs 1s long.
-            bed_src = f"[{audio_bed}:a]"
+            bed_src = a1_bed_source(audio_beds, sample_rate, channel_layout, "ab", chains)
             if bed_offset_sec > 0:
                 delay_ms = round(bed_offset_sec * 1000)
                 # all=1 delays every channel by the one value (without it
