@@ -1,3 +1,5 @@
+import { useState } from 'react'
+
 function formatBytes(bytes) {
   if (!bytes) return '—'
   const units = ['B', 'KB', 'MB', 'GB']
@@ -22,16 +24,53 @@ function Section({ label, rows }) {
   )
 }
 
-export default function TechInfoPanel({ info, title = 'Media Info' }) {
+// `collapsible` opts a panel into the disclosure chevron — down (▾) for
+// expanded, right (▸) for collapsed, the whole header row being the hit
+// target. Off by default so the Reformat panel's "Selected Clip" copy of
+// this component, which sits in a fixed three-column row where there is no
+// space to reclaim, keeps rendering exactly as it did.
+//
+// The open/closed state is deliberately LOCAL and not persisted: panel
+// widths and the center dock's tab aren't either (only file favorites and
+// track tags reach localStorage, and those are facts about files rather
+// than about layout), so persisting this one would make it the odd control
+// that remembers. Both collapsible panels sit above a `flex-1 min-h-0` bin
+// card, so collapsing hands the freed height to that list with no layout
+// math here.
+export default function TechInfoPanel({ info, title = 'Media Info', collapsible = false }) {
+  const [open, setOpen] = useState(true)
+  // A non-collapsible panel has no way to close, so it must never read as
+  // closed regardless of this state.
+  const expanded = !collapsible || open
+
+  const header = collapsible ? (
+    <button
+      type="button"
+      onClick={() => setOpen(o => !o)}
+      aria-expanded={open}
+      title={open ? `Collapse ${title}` : `Expand ${title}`}
+      className={`w-full flex items-center gap-1 px-2 py-1 text-left text-[9px] font-semibold uppercase tracking-wide text-neutral-500 hover:text-neutral-300 ${expanded ? 'border-b border-neutral-800' : ''}`}
+    >
+      {/* Fixed width because ▾ and ▸ are not the same width — without it the
+          title shifts sideways on every toggle. */}
+      <span className="w-2 shrink-0 text-center text-[10px] leading-none">{open ? '▾' : '▸'}</span>
+      {title}
+    </button>
+  ) : (
+    <div className="px-2 py-1 border-b border-neutral-800 text-[9px] font-semibold uppercase tracking-wide text-neutral-500">
+      {title}
+    </div>
+  )
+
   if (!info) {
     return (
       <div className="rounded-md bg-neutral-900 border border-neutral-800">
-        <div className="px-2 py-1 border-b border-neutral-800 text-[9px] font-semibold uppercase tracking-wide text-neutral-500">
-          {title}
-        </div>
-        <div className="p-2 font-mono text-[9px]">
-          <p className="text-neutral-600">Select a clip to see its metadata.</p>
-        </div>
+        {header}
+        {expanded && (
+          <div className="p-2 font-mono text-[9px]">
+            <p className="text-neutral-600">Select a clip to see its metadata.</p>
+          </div>
+        )}
       </div>
     )
   }
@@ -63,14 +102,14 @@ export default function TechInfoPanel({ info, title = 'Media Info' }) {
 
   return (
     <div className="rounded-md bg-neutral-900 border border-neutral-800">
-      <div className="px-2 py-1 border-b border-neutral-800 text-[9px] font-semibold uppercase tracking-wide text-neutral-500">
-        {title}
-      </div>
-      <div className="p-2 font-mono text-[9px] space-y-2">
-        <Section label="File" rows={fileRows} />
-        <Section label="Video" rows={videoRows} />
-        <Section label="Audio" rows={audioRows} />
-      </div>
+      {header}
+      {expanded && (
+        <div className="p-2 font-mono text-[9px] space-y-2">
+          <Section label="File" rows={fileRows} />
+          <Section label="Video" rows={videoRows} />
+          <Section label="Audio" rows={audioRows} />
+        </div>
+      )}
     </div>
   )
 }

@@ -34,7 +34,7 @@ function EyeIcon({ off, className }) {
 }
 
 export default function Timeline({
-  clips, setClips, selectedId, selectedPart = 'main', onSelectId, onSelectItem, onUndo, canUndo,
+  clips, setClips, onAddToV1, selectedId, selectedPart = 'main', onSelectId, onSelectItem, onUndo, canUndo,
   track2Clips = [], setTrack2Clips, selectedId2 = null, selectedPart2 = 'main', onSelectItem2,
   focusedTrack = 1, onFocusTrack, onAddToV2, onAnalyze, onBatchAnalyze, onReconstruct, onRenderV2,
   onRender, onRenderA1, rendering = false,
@@ -53,6 +53,7 @@ export default function Timeline({
 }) {
   const selectItem = onSelectItem || ((id) => onSelectId(id))
   const selectItem2 = onSelectItem2 || (() => {})
+  const [v1DragOver, setV1DragOver] = useState(false)
   const [v2DragOver, setV2DragOver] = useState(false)
   const [a1DragOver, setA1DragOver] = useState(false)
   // Per-track visibility — independent of each other. Muting a track only
@@ -81,6 +82,41 @@ export default function Timeline({
   // into a clip. Keyed by `${dir}/${name}`.
   const probeCacheRef = useRef(new Map())
   const lastActiveKeyRef = useRef(null)
+
+  // V1 is a lane, so a multi-file drop lands as several clips end to end — the
+  // same shape as A1 below, and awaited one at a time for the same reason:
+  // every file is uploaded and probed before it's appended, and letting those
+  // race would append them in whatever order the network finished in rather
+  // than the order they were dropped.
+  async function handleV1Files(files) {
+    for (const file of Array.from(files)) {
+      if (onAddToV1) await onAddToV1(file)
+    }
+  }
+
+  // V1's lane is BOTH a file drop target and the clip-reorder drop target, so
+  // every handler on it has to tell the two apart. A reorder drag carries no
+  // files, which `types` reports during dragover (where `files` is always
+  // empty by design) and `files.length` reports on drop itself.
+  const isFileDrag = e => Array.from(e.dataTransfer?.types || []).includes('Files')
+
+  const v1FileDragProps = {
+    onDragOver: e => { if (!isFileDrag(e)) return; e.preventDefault(); setV1DragOver(true) },
+    onDragEnter: e => { if (!isFileDrag(e)) return; e.preventDefault(); setV1DragOver(true) },
+    // Crossing from the lane onto one of its own clips fires dragleave on the
+    // lane too (the event bubbles), which would strobe the highlight on every
+    // clip boundary the pointer passes over. Only a leave that actually exits
+    // the lane counts.
+    onDragLeave: e => { if (!e.currentTarget.contains(e.relatedTarget)) setV1DragOver(false) },
+    onDrop: e => {
+      // No files means a clip reorder, whose own drop already ran on the
+      // TimelineClip below and is merely bubbling through here.
+      if (!e.dataTransfer.files.length) return
+      e.preventDefault()
+      setV1DragOver(false)
+      handleV1Files(e.dataTransfer.files)
+    },
+  }
 
   function handleV2Files(files) {
     const file = files[0]
@@ -730,13 +766,29 @@ export default function Timeline({
                 ><EyeIcon off={!v1Visible} /></button>
               </div>
               {clips.length === 0 ? (
-                <div className="flex-1 flex items-center justify-center h-16 text-[11px] text-neutral-600">
-                  Add clips from the Media Bin to start editing
-                </div>
+                <label
+                  {...v1FileDragProps}
+                  className={`flex-1 flex items-center justify-center gap-1.5 h-16 text-[11px] cursor-pointer transition-colors ${v1DragOver ? 'bg-indigo-950/40 text-indigo-300' : 'text-neutral-600 hover:text-neutral-400'}`}
+                >
+                  <span>Drop clips here, choose files, or add them from the Media Bin</span>
+                  <input
+                    type="file"
+                    multiple
+                    accept=".mp4,.mov,.mkv,.avi,.m4v,.webm"
+                    className="hidden"
+                    onChange={e => { handleV1Files(e.target.files); e.target.value = '' }}
+                  />
+                </label>
               ) : (
+                /* A populated lane stays a drop target: V1 APPENDS, so dropping
+                   more files puts them after the last clip rather than
+                   replacing anything — including a drop that lands on top of an
+                   existing clip, since TimelineClip's own drop handler doesn't
+                   stop the event and a file drop is a no-op for it. */
                 <div
                   onClick={handleTimelineClick}
-                  className={`flex-1 flex items-stretch gap-0.5 bg-neutral-950 px-2 py-1.5 h-16 cursor-pointer transition-all ${!v1Visible ? 'opacity-35 grayscale' : ''}`}
+                  {...v1FileDragProps}
+                  className={`flex-1 flex items-stretch gap-0.5 px-2 py-1.5 h-16 cursor-pointer transition-all ${v1DragOver ? 'bg-indigo-950/40' : 'bg-neutral-950'} ${!v1Visible ? 'opacity-35 grayscale' : ''}`}
                 >
                   {clips.map((clip, i) => (
                     <TimelineClip

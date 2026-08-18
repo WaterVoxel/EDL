@@ -338,6 +338,15 @@ function AppInner() {
 
   function handleUpload() { refresh() }
 
+  // Freshest V1 clip list, for routing decisions taken ACROSS an await — the
+  // same "latest value" ref pattern as saveRef further down. handleAddToV1
+  // uploads and appends one file at a time, so from the second file onward the
+  // enclosing closure's `timelineClips` is a render behind; reading it would
+  // make the audio gate below bounce a music file that the video dropped
+  // alongside it has already given V1 a length for.
+  const timelineClipsRef = useRef(timelineClips)
+  timelineClipsRef.current = timelineClips
+
   async function handleAddToTimeline(name) {
     // An audio file has no video stream, so it can never be a V1 clip — it
     // routes to A1 as the bed instead. Gated on V1 already having a clip: the
@@ -347,7 +356,7 @@ function AppInner() {
     // the same decision the bin's own A1 filter and the drop zone's `accept`
     // make, and it avoids a probe round-trip just to reject the file.
     if (isAudioFile(name)) {
-      if (timelineClips.length === 0) {
+      if (timelineClipsRef.current.length === 0) {
         setAnalyzeLog(prev => [
           { kind: 'warn', text: `⚠ "${name}" is audio — add a video to V1 first, then it can run underneath as the A1 bed` },
           ...prev,
@@ -739,6 +748,24 @@ function AppInner() {
       setExportQuality(data.quality || 'lossless')
     })
   }, [])
+
+  // V1 APPENDS, exactly like A1: a dropped file lands after the last clip and
+  // nothing is replaced. That's the opposite of handleAddToV2 below, and the
+  // difference is the tracks, not an inconsistency — V2 is a single-slot track
+  // (Render V2 collapses it to one file, so a second clip there has no
+  // meaning), while V1 is a sequence being built up.
+  //
+  // Routed through handleAddToTimeline rather than duplicating its body so a
+  // file dropped on V1 behaves identically to the same file added from the
+  // Media Bin's +, including the audio route: dropping music on V1 puts it on
+  // A1 instead of refusing it, since the bed is where an audio file can
+  // actually go and A1's own lane is right below.
+  async function handleAddToV1(file) {
+    const result = await upload(file)
+    if (result.error) { alert('Upload failed: ' + result.error); return }
+    await handleAddToTimeline(result.name)
+    refresh()
+  }
 
   async function handleAddToV2(file) {
     const result = await upload(file)
@@ -1235,7 +1262,7 @@ function AppInner() {
           <div className="flex-1 min-h-0 flex flex-col">
             <MediaLibrary files={inputFiles} trackTags={trackTags} inUseNames={inUseSourceNames} onAddToTimeline={handleAddToTimeline} onCleared={handleCleared} onDeleted={refresh} onRenamed={handleSourceRenamed} onUpload={handleUpload}>
               <div data-tour="mediaInfoIn">
-                <TechInfoPanel info={displayInfo} title="Media Info In" />
+                <TechInfoPanel info={displayInfo} title="Media Info In" collapsible />
               </div>
             </MediaLibrary>
           </div>
@@ -1348,6 +1375,7 @@ function AppInner() {
                 <Timeline
                   clips={timelineClips}
                   setClips={setTimelineClips}
+                  onAddToV1={handleAddToV1}
                   selectedId={selectedId}
                   selectedPart={selectedPart}
                   onSelectId={setSelectedId}

@@ -131,7 +131,7 @@ export default function OutputPanel({ files, inUseNames = null, onCleared }) {
         <video ref={videoRef} controls className="w-full h-full object-contain" />
       </div>
       <div className="shrink-0">
-        <TechInfoPanel info={info} title="Media Info Out" />
+        <TechInfoPanel info={info} title="Media Info Out" collapsible />
       </div>
       {/* Fills whatever room is left below Media Info Out, pinning its own
           bottom to the bottom of the column, rather than stopping at a

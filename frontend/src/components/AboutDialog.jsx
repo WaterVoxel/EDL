@@ -277,9 +277,12 @@ export default function AboutDialog({ onClose }) {
               The timeline is an edit <em>decision</em> list, not a working copy of the media. Each
               clip on V1 is a record — source file, IN/OUT points, hold durations, reversed flag,
               playback speed, crop box and keyframes, overlay — displayed in the EDL table below the
-              timeline with SMPTE-style source/record timecodes. <strong>Raise</strong> pulls a Media
-              Bin file onto the track, <strong>Duplicate</strong> copies a clip with every decision
-              intact, and <strong>Split</strong> divides one clip into two at the playhead.
+              timeline with SMPTE-style source/record timecodes. Add clips by clicking a Media Bin
+              file's +, or by dragging one or more files straight onto the V1 track — a multi-file
+              drop lands as clips end to end in the order dropped, the same way A1 takes audio.
+              <strong>Raise</strong> pulls a Media Bin file onto the track, <strong>Duplicate</strong>{' '}
+              copies a clip with every decision intact, and <strong>Split</strong> divides one clip
+              into two at the playhead.
             </p>
             <p>
               No timeline edit touches disk. Render compiles the whole list into one filter graph:
