@@ -230,68 +230,93 @@ export function reconstructFromV1(v1Clips, v2Clips) {
 // documents at length). Each segment keeps V2's own clip's properties and
 // differs from its neighbours only in where it starts and ends.
 
-// Where V1's clips meet, in seconds from the start of the rendered sequence:
-// N clips give N-1 internal boundaries.
+// The PIECES the V1 sequence renders as, in order: every clip's main body, plus
+// the frozen holds at the sequence's outer edges — head hold on clip 0, then
+// tail and round-up on the last clip, which is exactly where the render puts
+// them (app.py's lead_hold/trail_hold rule, mirrored client-side by
+// clipMath.sanitizeHoldPlacement).
 //
-// Holds count toward those boundaries, because they are real duplicated frames
-// in the rendered file — but only where the RENDER puts them, which is head
-// hold on clip 0 and tail/round on the last clip (app.py's lead_hold/trail_hold
-// rule, mirrored client-side by clipMath.sanitizeHoldPlacement). A stale
-// mid-sequence hold is reachable in the UI (see gotchas.md) and would push every
-// later cut point here while moving nothing in the file being cut, so it is
-// ignored rather than trusted. The last clip's tail and round-up never enter a
-// boundary at all — they lie past the final cut — so clip 0's head hold is the
-// only hold that can shift anything.
+// A hold is a PIECE in its own right here, not padding attached to a clip. In
+// the joined file it is a stretch of one frozen frame, visually and editorially
+// a different thing from the footage either side of it — and in a file that has
+// been out through an external tool it is the part most likely to want handling
+// on its own. So Batch Analyze cuts at holds too, and a 4-clip V1 with a head
+// hold and a Raise yields 4 shots plus its holds rather than 4 clips with the
+// freezes buried inside the first and last.
+//
+// Tail and round-up freeze the SAME frame but stay separate pieces, because the
+// timeline draws them separately (fuchsia TAIL, amber ROUND) and Raise owns the
+// second one — merging them would hide a round-up inside a clip the user thinks
+// of as the tail hold.
+//
+// Mid-sequence holds are deliberately absent: a stale one is reachable in the UI
+// (see gotchas.md) but the render drops it, so the file being cut does not
+// contain it, and cutting there would put every later boundary on the wrong
+// frame. A zero-length piece is never emitted, so a zero-length clip simply
+// isn't a piece.
+export function sequencePieces(v1Clips) {
+  const pieces = []
+  v1Clips.forEach((c, i) => {
+    if (i === 0 && (c.headHoldSec || 0) > 0) pieces.push({ kind: 'head', sec: c.headHoldSec })
+    const main = clipMainSec(c)
+    if (main > 0) pieces.push({ kind: 'main', sec: main })
+    if (i === v1Clips.length - 1) {
+      if ((c.tailHoldSec || 0) > 0) pieces.push({ kind: 'tail', sec: c.tailHoldSec })
+      if ((c.roundHoldSec || 0) > 0) pieces.push({ kind: 'round', sec: c.roundHoldSec })
+    }
+  })
+  return pieces
+}
+
+// Where those pieces meet, in seconds from the start of the rendered sequence:
+// P pieces give P-1 internal boundaries. The end of the sequence is not a cut.
 export function sequenceCutOffsets(v1Clips) {
+  const pieces = sequencePieces(v1Clips)
   const offsets = []
-  if (v1Clips.length === 0) return offsets
-  let elapsed = v1Clips[0].headHoldSec || 0
-  for (let i = 0; i < v1Clips.length - 1; i++) {
-    elapsed += clipMainSec(v1Clips[i])
+  let elapsed = 0
+  for (let i = 0; i < pieces.length - 1; i++) {
+    elapsed += pieces[i].sec
     offsets.push(elapsed)
   }
   return offsets
 }
 
-// Total length the V1 sequence renders to — the same first/last hold rule as
-// above, so this and sequenceCutOffsets can't disagree about where the sequence
-// ends.
-function sequenceRenderedSec(v1Clips) {
-  if (v1Clips.length === 0) return 0
-  const last = v1Clips[v1Clips.length - 1]
-  return (v1Clips[0].headHoldSec || 0)
-    + v1Clips.reduce((sum, c) => sum + clipMainSec(c), 0)
-    + (last.tailHoldSec || 0) + (last.roundHoldSec || 0)
-}
-
 const CUT_EPSILON = 0.001
 
-// Returns { segments, overflow, leftoverSec }:
-//   segments    — V2's FIRST clip replaced by one clip per V1 clip, in track
+// Which name a segment gets, by the kind of V1 piece that starts it.
+const PIECE_NAMES = { main: 'Shot', head: 'Head', tail: 'Tail', round: 'Round' }
+
+// Returns { segments, kinds, overflow, leftoverSec }:
+//   segments    — V2's FIRST clip replaced by one clip per V1 PIECE, in track
 //                 order; any further V2 clips are left exactly as they were
 //                 (same convention as reconstructFromV1 — Render V2 in `1` mode
 //                 is what's meant to collapse V2 to one clip first).
+//   kinds       — the piece kind each of those segments starts with
+//                 ('main'|'head'|'tail'|'round'), parallel to the segments, so a
+//                 caller can report "4 shots + 2 holds" without re-deriving it
+//                 or reading names back off the clips.
 //   overflow    — seconds by which V1's sequence ran past the end of V2's own
 //                 window, 0 when it fit. Cut points past that end produce no
 //                 segment at all rather than an empty one, so a V2 file shorter
-//                 than V1 yields fewer shots than V1 has clips.
+//                 than V1 yields fewer segments than V1 has pieces.
 //   leftoverSec — seconds by which V2's window outlasts V1's sequence, 0 when it
 //                 doesn't. Not trimmed off: see below.
 //
-// These are CUT POINTS, not durations. N V1 clips give N-1 boundaries and the
-// last segment runs to the END of V2's window rather than stopping at V1's
-// total, because that is what cutting a file means — no footage is discarded.
-// It also keeps whatever an external tool added (a padded frame, a slightly
-// longer generation) instead of silently dropping it; `leftoverSec` reports it
-// so the extra length is visible rather than a surprise.
+// These are CUT POINTS, not durations. P pieces give P-1 boundaries and the last
+// segment runs to the END of V2's window rather than stopping at V1's total,
+// because that is what cutting a file means — no footage is discarded. It also
+// keeps whatever an external tool added (a padded frame, a slightly longer
+// generation) instead of silently dropping it; `leftoverSec` reports it so the
+// extra length is visible rather than a surprise.
 export function batchCutAgainstV1(v1Clips, v2Clips) {
-  if (v1Clips.length === 0 || v2Clips.length === 0) {
-    return { segments: v2Clips, overflow: 0, leftoverSec: 0 }
+  const pieces = sequencePieces(v1Clips)
+  if (pieces.length === 0 || v2Clips.length === 0) {
+    return { segments: v2Clips, kinds: [], overflow: 0, leftoverSec: 0 }
   }
 
   const v2c = v2Clips[0]
   const span = v2c.outSec - v2c.inSec
-  const v1Sec = sequenceRenderedSec(v1Clips)
+  const v1Sec = pieces.reduce((sum, p) => sum + p.sec, 0)
   const overflow = Math.max(0, v1Sec - span)
   const leftoverSec = Math.max(0, span - v1Sec)
 
@@ -303,35 +328,49 @@ export function batchCutAgainstV1(v1Clips, v2Clips) {
   const fps = v2c.fps > 0 ? v2c.fps : 0
   const snap = s => (fps ? Math.round(s * fps) / fps : s)
 
-  // Only cuts that fall strictly inside V2's window and strictly after the
-  // previous surviving cut are kept. Both halves of that drop an EMPTY shot
-  // rather than a real one: a cut past the end has no footage to cut (it is
-  // counted in `overflow` instead), and a cut that repeats the previous
-  // boundary — a zero-length V1 clip, or two clips whose boundary snaps to the
-  // same frame of V2 — has no footage between them.
-  const cuts = []
-  for (const offset of sequenceCutOffsets(v1Clips).map(snap)) {
-    const prev = cuts.length > 0 ? cuts[cuts.length - 1] : 0
-    if (offset > prev + CUT_EPSILON && offset < span - CUT_EPSILON) cuts.push(offset)
+  // Segment starts, each labelled with the kind of V1 piece that begins there.
+  // Only cuts strictly inside V2's window and strictly after the previous
+  // surviving one are kept, and both halves of that exist to drop an EMPTY
+  // segment rather than a real one: a cut past the end has no footage to cut (it
+  // is counted in `overflow` instead), and a cut landing on the previous
+  // boundary — two pieces whose boundary snaps to the same frame of V2 — has no
+  // footage between them. A dropped cut merges its piece into the one before it.
+  const edges = [{ at: 0, kind: pieces[0].kind }]
+  let elapsed = 0
+  for (let i = 0; i < pieces.length - 1; i++) {
+    elapsed += pieces[i].sec
+    const at = snap(elapsed)
+    if (at > edges[edges.length - 1].at + CUT_EPSILON && at < span - CUT_EPSILON) {
+      edges.push({ at, kind: pieces[i + 1].kind })
+    }
   }
-  const edges = [0, ...cuts, span]
 
-  const shots = []
-  for (let i = 0; i < edges.length - 1; i++) {
-    shots.push({
+  // Numbered PER KIND rather than by one running count, so the shots stay
+  // Shot01…ShotN for V1's N clips however many holds sit among them, and a hold
+  // segment says which hold it is instead of being an unexplained gap in the
+  // shot numbering.
+  const counts = {}
+  const cut = edges.map((edge, i) => {
+    counts[edge.kind] = (counts[edge.kind] || 0) + 1
+    return {
       ...v2c,
       id: crypto.randomUUID(),
-      inSec: v2c.inSec + edges[i],
-      outSec: v2c.inSec + edges[i + 1],
+      inSec: v2c.inSec + edge.at,
+      outSec: v2c.inSec + (i + 1 < edges.length ? edges[i + 1].at : span),
       headHoldSec: 0,
       tailHoldSec: 0,
       roundHoldSec: 0,
       dirty: true,
-      displayName: `Shot${String(i + 1).padStart(2, '0')}`,
-    })
-  }
+      displayName: `${PIECE_NAMES[edge.kind]}${String(counts[edge.kind]).padStart(2, '0')}`,
+    }
+  })
 
-  return { segments: [...shots, ...v2Clips.slice(1)], overflow, leftoverSec }
+  return {
+    segments: [...cut, ...v2Clips.slice(1)],
+    kinds: edges.map(e => e.kind),
+    overflow,
+    leftoverSec,
+  }
 }
 
 export function analyzeAgainstV1(v1Clips, v2File) {

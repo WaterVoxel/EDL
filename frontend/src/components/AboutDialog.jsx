@@ -311,14 +311,17 @@ export default function AboutDialog({ onClose }) {
               <strong>② V2 Batch Analyzer</strong> — the plain-cut sibling, for a sequence handled as
               one file. Render V1 (or Render V2 on <em>1</em>), take that single joined file through
               an external tool in one pass, drop it back on V2, and this cuts it where V1 cuts: four
-              clips on V1 give four clips on V2, at the same places. It works in sequence time rather
-              than source time — the second shot in a joined file starts where the first one ended,
-              not at V1 clip 2's IN point, which is exactly the case ① can't describe. Nothing else
-              is copied: holds, reverse and speed are already baked into that footage as real frames,
-              so re-applying them would double them. The last shot runs to the end of the file, so
-              extra length an external tool added is kept rather than trimmed off silently — the
-              Actions log reports it, along with any cut that fell past the end of a file shorter
-              than V1.
+              clips on V1 give four clips on V2, at the same places. Holds count as cuts of their own
+              — a head hold, a tail hold and a Raise's round-up are each a stretch of one frozen
+              frame in that joined file, so each becomes its own clip (<em>Head01</em>, <em>Tail01</em>,
+              <em>Round01</em>) instead of being buried inside the shot beside it. It works in
+              sequence time rather than source time — the second shot in a joined file starts where
+              the first one ended, not at V1 clip 2's IN point, which is exactly the case ① can't
+              describe. Nothing else is copied: holds, reverse and speed are already baked into that
+              footage as real frames, so re-applying them would double them. The last clip runs to
+              the end of the file, so extra length an external tool added is kept rather than trimmed
+              off silently — the Actions log reports it, along with any cut that fell past the end of
+              a file shorter than V1.
             </p>
             <p>
               <strong>③ V2 Reconstruct</strong> — the inverse: it reads V1's decisions and undoes them,

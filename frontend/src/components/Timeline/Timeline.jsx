@@ -474,7 +474,7 @@ export default function Timeline({
         {clips.length > 0 && track2Clips.length > 0 && (
           <button
             onClick={onBatchAnalyze}
-            title="Cut the V2 file at V1's cut points — one V2 clip per V1 clip, no holds or speed copied. For a whole V1 sequence rendered as one file and handled in a single pass outside the app"
+            title="Cut the V2 file at every boundary in V1's sequence — each clip, each edge hold and the round-up becomes its own V2 clip; no holds, reverse or speed re-applied. For a whole V1 sequence rendered as one file and handled in a single pass outside the app"
             className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] rounded bg-teal-900 text-white hover:bg-teal-800"
           >
             V2 Batch Analyzer

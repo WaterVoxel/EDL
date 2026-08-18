@@ -788,9 +788,11 @@ is surfaced with the exact overflow amount.
 BATCH ANALYZE (the plain cut)
 
 The button beside it, V2 BATCH ANALYZER, answers a different question
-with a much simpler rule: it CUTS the single file on V2 at V1's cut
-points, one V2 clip per V1 clip, and copies nothing else. Four clips
-on V1 give four clips on V2, at the same places.
+with a much simpler rule: it CUTS the single file on V2 at every
+boundary in V1's sequence and copies nothing else. Four clips on V1
+give four clips on V2, at the same places -- plus one more for each
+frozen hold at the sequence's edges, since a hold is its own stretch
+of the joined file.
 
 The distinction between the two buttons is the TIME BASE, and it is
 the whole reason there are two. Analyze copies V1's own IN/OUT
@@ -808,39 +810,52 @@ return leg of a `1`-mode render, exactly as 1+ is of sending each
 shot out separately (section 7).
 
 Four decisions in the math (frontend/src/analyzeMath.js,
-batchCutAgainstV1 + sequenceCutOffsets):
+sequencePieces + batchCutAgainstV1):
 
-  - HOLDS COUNT, but only where the render puts them. A hold is real
-    duplicated frames in the rendered file, so clip 0's head hold
-    shifts every later cut point. Mid-sequence holds do NOT, because
+  - IT CUTS PIECES, NOT CLIPS. What the sequence renders as is a run
+    of PIECES: clip 0's head hold, then each clip's body, then the
+    last clip's tail hold and round-up. A hold is a piece in its own
+    right, not padding attached to a clip -- in the joined file it is
+    a stretch of one frozen frame, editorially a different thing from
+    the footage either side of it, and in a file that has been out
+    through an external tool it is the part most likely to want
+    handling on its own. So the cuts fall at holds too, and the
+    segments come back named Head01 / Shot01..ShotN / Tail01 /
+    Round01 rather than Shot01..ShotN with the freezes buried inside
+    the first and last. Tail and round-up freeze the SAME frame but
+    stay separate pieces, because the timeline draws them separately
+    and Raise owns the second one. Mid-sequence holds are NOT pieces:
     the render drops them (app.py's lead_hold/trail_hold first/last
-    rule) -- and a stale mid-sequence hold is reachable in the UI, so
-    trusting it would move every cut here while moving nothing in the
-    file being cut. The last clip's tail and round-up never enter a
-    boundary at all: they lie past the final cut.
+    rule) and a stale one is reachable in the UI, so trusting it
+    would move every later boundary here while moving nothing in the
+    file being cut.
   - NOTHING ELSE IS COPIED. Holds, reverse and speed are already
     baked into that footage as frames -- re-applying them would
     duplicate them a second time, the same reasoning Reconstruct
-    documents below. Each shot keeps V2's own clip's properties and
-    differs from its neighbours only in where it starts and ends.
-  - CUT POINTS, NOT DURATIONS. N clips give N-1 boundaries, and the
-    LAST shot runs to the end of V2's window rather than stopping at
-    V1's total, because that is what cutting a file means -- nothing
-    is discarded. Extra length an external tool added (a padded
-    frame, a longer generation) is kept on the last shot and reported
-    in the Actions log rather than trimmed off silently. A V2 file
-    too short for all of V1's cuts yields fewer shots, with the
-    overflow reported the same way.
+    documents below. Each segment keeps V2's own clip's properties
+    and differs from its neighbours only in where it starts and ends.
+  - CUT POINTS, NOT DURATIONS. P pieces give P-1 boundaries, and the
+    LAST segment runs to the end of V2's window rather than stopping
+    at V1's total, because that is what cutting a file means --
+    nothing is discarded. Extra length an external tool added (a
+    padded frame, a longer generation) is kept on the last segment
+    and reported in the Actions log rather than trimmed off silently.
+    A V2 file too short for all of V1's cuts yields fewer segments,
+    with the overflow reported the same way.
   - CUTS SNAP TO V2's OWN FPS GRID. V2's, not V1's -- these are
     source times on V2's file. Rounding each boundary to the nearest
-    frame makes the shots tile the window exactly, instead of leaving
-    a sub-frame sliver for ffmpeg's `trim` to resolve one way at the
-    end of one shot and the other way at the start of the next.
+    frame makes the segments tile the window exactly, instead of
+    leaving a sub-frame sliver for ffmpeg's `trim` to resolve one way
+    at the end of one segment and the other way at the start of the
+    next. A boundary that snaps onto the previous one -- two pieces
+    landing on the same frame of V2 -- is dropped rather than
+    emitting an empty segment.
 
 Only V2's FIRST clip is cut; any clip after it is left exactly as it
-was, the same convention Reconstruct uses. One clip on V1 means there
-are no cut points at all, and the button says so instead of doing
-nothing.
+was, the same convention Reconstruct uses. V1 being ONE PIECE means
+there are no cut points at all, and the button says so instead of
+doing nothing -- note that this is a weaker condition than one clip:
+a lone V1 clip carrying a head hold or a Raise does have boundaries.
 
 RECONSTRUCT is step 2 of a round-trip workflow, not a standalone
 inverse of Analyze. The intended sequence: Analyze conforms V2 to V1's

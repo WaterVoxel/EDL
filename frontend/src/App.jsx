@@ -29,7 +29,7 @@ import FfmpegCustomSettings from './components/FfmpegCustomSettings'
 import Timeline from './components/Timeline/Timeline'
 import { clipBaseSec, roundUpAmount } from './clipMath'
 import { loadTrackTags, tagTrack, renameTrackTag, isAudioFile } from './fileList'
-import { analyzeAgainstV1, batchCutAgainstV1, reconstructFromV1 } from './analyzeMath'
+import { analyzeAgainstV1, batchCutAgainstV1, reconstructFromV1, sequencePieces } from './analyzeMath'
 import { mergeExportPresets } from './exportPresets'
 import { matchOverlays } from './overlayMatch'
 import { shotOutputNames } from './renderNames'
@@ -845,29 +845,33 @@ function AppInner() {
   function handleBatchAnalyze() {
     if (track2Clips.length === 0) { alert('Drop a file on the V2 track first.'); return }
     if (timelineClips.length === 0) { alert('V1 has no clips to take cut points from.'); return }
-    if (timelineClips.length === 1) {
-      alert('V1 has only one clip, so there are no cut points to apply. Split V1 first, or use V2 Analyzer to conform V2 to V1\'s single clip.')
+    // Pieces, not clips: a lone V1 clip with a head hold or a Raise on it still
+    // has boundaries to cut at, and four clips with no holds have three.
+    const pieces = sequencePieces(timelineClips)
+    if (pieces.length < 2) {
+      alert('V1 is one unbroken piece — there are no clip boundaries, holds or round-up to cut V2 at. Split V1 first, or use V2 Analyzer to conform V2 to V1\'s single clip.')
       return
     }
     const v2Source = track2Clips[0]
     const name = v2Source.displayName || v2Source.sourceName
-    const { segments, overflow, leftoverSec } = batchCutAgainstV1(timelineClips, track2Clips)
-    // One shot means every cut point landed past the end of V2's footage — the
-    // file is shorter than V1's first clip, so there was nothing to cut.
-    const shotCount = segments.length - (track2Clips.length - 1)
-    if (shotCount < 2) {
-      alert(`"${name}" is shorter than V1's first clip — none of V1's cut points fall inside it.`)
+    const { segments, kinds, overflow, leftoverSec } = batchCutAgainstV1(timelineClips, track2Clips)
+    // One segment means every cut point landed past the end of V2's footage —
+    // the file is shorter than V1's first piece, so there was nothing to cut.
+    if (kinds.length < 2) {
+      alert(`"${name}" is shorter than V1's first piece — none of V1's cut points fall inside it.`)
       return
     }
     setTrack2Clips(segments)
+    const shots = kinds.filter(k => k === 'main').length
+    const holds = kinds.length - shots
     const notes = [
-      { kind: 'info', text: `▣ V2 Batch Analyzer: "${name}" cut into ${shotCount} shots at V1's cut points` },
+      { kind: 'info', text: `▣ V2 Batch Analyzer: "${name}" cut into ${kinds.length} clips at V1's ${kinds.length - 1} cut points — ${shots} shot${shots === 1 ? '' : 's'}${holds > 0 ? ` + ${holds} hold${holds === 1 ? '' : 's'}` : ''}` },
     ]
     if (overflow > 0.001) {
-      notes.push({ kind: 'warn', text: `⚠ V1's sequence runs ${overflow.toFixed(2)}s past the end of "${name}" — only ${shotCount} of V1's ${timelineClips.length} cuts could be made` })
+      notes.push({ kind: 'warn', text: `⚠ V1's sequence runs ${overflow.toFixed(2)}s past the end of "${name}" — only ${kinds.length} of V1's ${pieces.length} pieces could be cut` })
     }
     if (leftoverSec > 0.001) {
-      notes.push({ kind: 'info', text: `▣ "${name}" runs ${leftoverSec.toFixed(2)}s longer than V1's sequence — the extra footage stayed on the last shot rather than being trimmed off` })
+      notes.push({ kind: 'info', text: `▣ "${name}" runs ${leftoverSec.toFixed(2)}s longer than V1's sequence — the extra footage stayed on the last clip rather than being trimmed off` })
     }
     if (track2Clips.length > 1) {
       notes.push({ kind: 'warn', text: `⚠ V2 held ${track2Clips.length} clips — only the first was cut; the rest were left as they were` })
