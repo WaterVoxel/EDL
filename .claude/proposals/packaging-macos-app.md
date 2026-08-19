@@ -1,4 +1,4 @@
-# Proposal: package Nara Editor as a standalone macOS .app
+# Proposal: package GenAI Editor as a standalone macOS .app
 
 Status: **not implemented**. This is a design doc to pick up later — no
 application code has been touched for this. When ready to build it, read
@@ -165,7 +165,7 @@ deliberate, revisitable decision.
 1. One-time: install python.org universal2 interpreter(s); `pip install py2app pywebview` into a dedicated build venv (not the repo's `.venv`); place verified static ffmpeg/ffprobe binaries under `packaging/ffmpeg-bin/<arch>/`.
 2. `cd frontend && npm run build`.
 3. Apply the code changes above (dual-mode resolver, new routes, `CLAUDE_BIN` fix).
-4. Apple Silicon build: `python3 setup.py py2app` (arm64 interpreter) → `dist/Nara Editor.app`; move aside to `dist-arm64/`.
+4. Apple Silicon build: `python3 setup.py py2app` (arm64 interpreter) → `dist/GenAI Editor.app`; move aside to `dist-arm64/`.
 5. Intel build: `arch -x86_64 <x86_64-python.org-venv>/bin/python3 setup.py py2app` → Intel `.app`.
 6. Verify each: launches standalone, shows the React UI, completes a real render via bundled ffmpeg, chat degrades gracefully without `claude` on PATH.
 7. `ditto -c -k --sequesterRsrc --keepParent "<app>" "<name>.zip"` per architecture (not plain `zip` — preserves resource forks correctly).

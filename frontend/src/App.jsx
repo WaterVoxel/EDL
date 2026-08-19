@@ -1054,7 +1054,7 @@ function AppInner() {
   }
 
   function handleExportEdl() {
-    const lines = ['TITLE: NARA EDITOR', '']
+    const lines = ['TITLE: GENAI EDITOR', '']
     let recFrame = 0
     const fps = timelineClips[0]?.fps || 24
     function tc(seconds) {
@@ -1156,7 +1156,7 @@ function AppInner() {
             title with no affordance is a hidden control — the document-icon
             button on the right is now the only way in, and it looks like one. */}
         <div className="flex items-center gap-2">
-          <span className="text-xs font-bold text-white tracking-tight">NARA EDITOR</span>
+          <span className="text-xs font-bold text-white tracking-tight">GENAI EDITOR</span>
           <span className="text-[9px] text-neutral-600 border border-neutral-700 rounded px-1 py-0.5">EDL mode</span>
         </div>
         <div data-tour="project" className="flex items-center gap-1.5">
@@ -1231,14 +1231,14 @@ function AppInner() {
           >
             <BulbIcon />
           </button>
-          {/* The only way into the About dialog, beside the tour: the NARA
-              title used to open it too, but nothing about a title looks
+          {/* The only way into the About dialog, beside the tour: the GENAI
+              EDITOR title used to open it too, but nothing about a title looks
               clickable, so the manual keeps just this visible affordance next
               to the tour it complements — the bulb walks the UI, this one
               explains the app. */}
           <button
             onClick={() => setShowAbout(true)}
-            title="About Nara Editor — the in-app manual (pipeline, crop presets, EDL, V2, assistant)"
+            title="About GenAI Editor — the in-app manual (pipeline, crop presets, EDL, V2, assistant)"
             className="w-6 h-6 flex items-center justify-center rounded border border-neutral-700 text-neutral-400 hover:text-indigo-300 hover:border-indigo-500"
           >
             <DocIcon />

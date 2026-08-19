@@ -1,6 +1,6 @@
 # Direct ffmpeg Editing (outside the app)
 
-This workspace is also used for one-off ffmpeg edits requested in chat, independent of the Nara UI. Rules and recipes for that workflow.
+This workspace is also used for one-off ffmpeg edits requested in chat, independent of the GenAI Editor UI. Rules and recipes for that workflow.
 
 ## Rules
 

@@ -1,6 +1,6 @@
 ---
 name: run-app
-description: Start (or restart) the Nara editor locally — Flask backend + Vite frontend dev servers
+description: Start (or restart) the GenAI Editor locally — Flask backend + Vite frontend dev servers
 ---
 
 The app needs two servers. The React UI 404s on every fetch if Flask isn't up.

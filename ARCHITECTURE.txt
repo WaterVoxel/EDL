@@ -1,10 +1,11 @@
-NARA EDITOR -- TECHNICAL ARCHITECTURE
-=======================================
+GENAI EDITOR -- TECHNICAL ARCHITECTURE
+======================================
 
 This document explains HOW the app works internally, with the heaviest
-focus on the part that gives it its name: how it edits video without
-ever re-encoding a pixel unless you explicitly ask it to, and exactly
-what happens to your data at each step of a render.
+focus on the guarantee the whole design exists to protect: how it
+edits video without ever re-encoding a pixel unless you explicitly
+ask it to, and exactly what happens to your data at each step of a
+render.
 
 It assumes you already know what the app does from a user's
 perspective (see README.txt for that, or click the document icon in
@@ -34,7 +35,7 @@ CONTENTS
 1. WHAT THIS APP ACTUALLY IS
 -----------------------------
 
-Nara Editor is a local, single-user, EDL-style (Edit Decision
+GenAI Editor is a local, single-user, EDL-style (Edit Decision
 List) video editor. It is not a hosted service, has no accounts, and
 binds only to 127.0.0.1 -- it never listens on the network. It is a
 Flask JSON API backend that drives ffmpeg, paired with a React 19 +

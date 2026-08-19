@@ -1,6 +1,6 @@
 # Architecture
 
-Nara Editor is a local, macOS-only, EDL-style video editor: a Flask JSON API backend driving ffmpeg, plus a React 19 + Vite 8 + Tailwind 4 frontend. Every edit (trim, splice, duplicate, reverse, speed, holds, round-up) is staged as plain data on clip objects in React state; nothing touches media on disk until the user clicks Render, which POSTs the clip list to `/api/render_timeline` for a **single-pass ffmpeg render**. Source files in `input/` are never modified.
+GenAI Editor is a local, macOS-only, EDL-style video editor: a Flask JSON API backend driving ffmpeg, plus a React 19 + Vite 8 + Tailwind 4 frontend. Every edit (trim, splice, duplicate, reverse, speed, holds, round-up) is staged as plain data on clip objects in React state; nothing touches media on disk until the user clicks Render, which POSTs the clip list to `/api/render_timeline` for a **single-pass ffmpeg render**. Source files in `input/` are never modified.
 
 ## Backend (2 files, no database, no async queue)
 

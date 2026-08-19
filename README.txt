@@ -1,5 +1,5 @@
-NARA EDITOR
-===========
+GENAI EDITOR
+============
 
 A local, EDL-style video editor. Every edit -- trim, splice, reverse,
 slow down, hold, round-up -- is staged as a non-destructive decision and
@@ -8,12 +8,72 @@ are never changed.
 
 This guide assumes no prior experience. Follow the steps in order.
 
-Once the app is running, click "NARA EDITOR" in the top bar for
-a full explanation of its features from inside the app.
+Once the app is running, click the document icon at the far right of the
+top bar for a full explanation of its features from inside the app. The
+lightbulb next to it starts a guided tour.
+
+There are two ways to install. Pick one:
+
+    OPTION A -- let Claude do it for you (below). Fastest, and it
+                checks its own work.
+    OPTION B -- do it by hand, STEP 0 onward. No extra tools needed.
 
 
-STEP 0: OPEN THE TERMINAL APP
-------------------------------
+OPTION A: INSTALL WITH CLAUDE (THE EASY WAY)
+---------------------------------------------
+
+If you have Claude Code installed, you can skip STEP 0 through STEP 4
+completely. This project ships a setup runbook written specifically for
+it: the file "agentic_installation.MD" in this same folder. Claude reads
+that file and performs the entire installation itself.
+
+A1. Open the Terminal app: press Cmd+Space, type "Terminal", press
+    Enter.
+
+A2. Type these two commands, pressing Enter after each:
+
+    cd ~/Documents/Claude/ffmpeg
+    claude
+
+    If you see "command not found: claude", you do not have Claude Code
+    installed. Either install it (docs.claude.com/en/docs/claude-code)
+    or use OPTION B below.
+
+A3. Paste this request in, then press Enter:
+
+    Read agentic_installation.MD and perform the full install and setup
+    for this project. Then start both servers and confirm that
+    http://127.0.0.1:5001/ and http://127.0.0.1:5173/ both respond.
+
+A4. Approve the commands it asks permission to run. It will install
+    Homebrew, ffmpeg and Node.js if they are missing, create the Python
+    environment, install the interface packages, create the input/ and
+    output/ folders, start both servers, and then test both addresses to
+    prove the setup worked.
+
+A5. When it reports that both addresses respond, open this one in your
+    browser:
+
+    http://127.0.0.1:5173/
+
+That is the whole installation. Nothing else to type.
+
+Two things worth knowing:
+
+  - The servers are not permanent. They stop when you restart the Mac
+    or close the Terminal. To start them again later, either run the
+    STEP 3 and STEP 4 commands below, or ask Claude:
+
+        Start the GenAI Editor servers -- see agentic_installation.MD
+        Phase 5.
+
+  - agentic_installation.MD is written for Claude, not for you. It is
+    fine to read, but it assumes you are the one running the commands.
+    STEP 0 onward is the version written for people.
+
+
+OPTION B, STEP 0: OPEN THE TERMINAL APP
+----------------------------------------
 
 All the commands below are typed into the "Terminal" app on your Mac.
 
@@ -65,8 +125,18 @@ side by side.
 STEP 3: START THE APP (BACKEND)
 ----------------------------------
 
-In your FIRST Terminal window, type these three commands one at a time,
-pressing Enter after each:
+FIRST TIME ONLY -- run these three commands once, in your FIRST Terminal
+window, to create the app's folders and its Python environment:
+
+    cd ~/Documents/Claude/ffmpeg
+    mkdir -p input output projects
+    python3 -m venv .venv
+
+(The input/ and output/ folders must exist before the app starts, or it
+will report an error instead of listing your files.)
+
+Then, every time you want to start the app, type these three commands
+one at a time, pressing Enter after each:
 
     cd ~/Documents/Claude/ffmpeg
     source .venv/bin/activate
@@ -120,7 +190,7 @@ printed in Step 4 -- usually:
 
     http://127.0.0.1:5173/
 
-The Nara Editor should now load in your browser.
+The GenAI Editor should now load in your browser.
 
 
 STEP 6: STOPPING THE APP
@@ -133,11 +203,17 @@ stop it. It's safe to close both windows after that.
 THE NEXT TIME YOU WANT TO USE THE APP
 ----------------------------------------
 
-You don't need to repeat Step 1. Just do Steps 2 through 5 again:
-two Terminal windows, run the Step 3 commands in one (you can skip the
-"pip install" line after the first time), run the Step 4 commands in
-the other (you can skip "npm install" after the first time), then open
-the browser address from Step 5.
+You don't need to repeat Step 1, or the "FIRST TIME ONLY" commands in
+Step 3. Just do Steps 2 through 5 again: two Terminal windows, run the
+Step 3 commands in one (you can skip the "pip install" line after the
+first time), run the Step 4 commands in the other (you can skip
+"npm install" after the first time), then open the browser address from
+Step 5.
+
+If you installed with Claude (OPTION A), you can also just ask it:
+
+    Start the GenAI Editor servers -- see agentic_installation.MD
+    Phase 5.
 
 
 WHERE YOUR FILES GO
@@ -164,6 +240,15 @@ TROUBLESHOOTING
 The app says it can't find ffmpeg
     Re-run Step 1b (brew install ffmpeg), then restart Step 3.
 
+The Media Bin is empty, or the app shows an error instead of your files
+    The input/ and output/ folders are missing. Run the "FIRST TIME
+    ONLY" commands in Step 3, then restart Step 3.
+
+Something else is wrong and you have Claude Code
+    Ask it to diagnose using the runbook:
+        Something is wrong with my GenAI Editor setup -- check it
+        against agentic_installation.MD and fix it.
+
 The chat/assistant panel shows an error
     That one feature needs an extra tool (the "claude" command-line
     app) that most people won't have installed. Everything else in the
@@ -177,8 +262,8 @@ The chat/assistant panel shows an error
                 CONTACT / CREATOR
 ════════════════════════════════════════════════════════
 
-Nara Editor 
-(a local, macOS-only lossless video editor) 
+GenAI Editor
+(a local, macOS-only lossless video editor)
 
 Created and maintained by:
 

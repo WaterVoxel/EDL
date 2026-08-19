@@ -1,4 +1,4 @@
-# Nara Editor
+# GenAI Editor
 
 A local, macOS-only, EDL-style video editor: Flask + ffmpeg backend (`app.py`, `ffmpeg_utils.py`) and a React 19 + Vite + Tailwind 4 frontend (`frontend/`). Edits are staged as non-destructive decisions on a two-track timeline and applied in a single lossless ffmpeg pass at Render. Source files in `input/` are never modified. Also doubles as a workspace for one-off ffmpeg edits requested directly in chat.
 
@@ -11,6 +11,10 @@ A local, macOS-only, EDL-style video editor: Flask + ffmpeg backend (`app.py`, `
 - [gotchas.md](.claude/docs/gotchas.md) — read before touching the render pipeline, timeline math, undo, or validation: hand-verified ffmpeg facts (-qp 0 vs -crf 0, fps frame cap, hold-under-reverse) and frontend invariants.
 - [key-files.md](.claude/docs/key-files.md) — read to locate where a feature lives (file → responsibility tables).
 - [ffmpeg-recipes.md](.claude/docs/ffmpeg-recipes.md) — read when the user asks for a direct ffmpeg edit outside the app: workflow rules + command recipes.
+
+## Install / setup
+
+- [agentic_installation.MD](agentic_installation.MD) (root) — read when asked to install, set up, or repair this app on a machine: dependency install, runtime directories, both servers, and the acceptance gate (`127.0.0.1:5001` + `127.0.0.1:5173` both serving). `README.txt` OPTION A points users here. For a routine restart of an already-installed app, use the **run-app** skill instead.
 
 ## Skills (.claude/skills/)
 

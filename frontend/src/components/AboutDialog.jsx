@@ -15,7 +15,7 @@ export default function AboutDialog({ onClose }) {
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-800">
-          <h3 className="text-sm font-bold text-white tracking-tight">NARA EDITOR</h3>
+          <h3 className="text-sm font-bold text-white tracking-tight">GENAI EDITOR</h3>
           <button
             onClick={onClose}
             className="w-5 h-5 flex items-center justify-center rounded text-neutral-500 hover:text-white hover:bg-neutral-700 text-[13px]"
@@ -24,7 +24,7 @@ export default function AboutDialog({ onClose }) {
 
         <div className="flex-1 overflow-y-auto px-4 py-3 flex flex-col gap-4">
           <p className="text-[11px] text-neutral-300 leading-relaxed">
-            NARA EDITOR is a local, EDL-style video editor built on ffmpeg. Every picture edit — trim,
+            GENAI EDITOR is a local, EDL-style video editor built on ffmpeg. Every picture edit — trim,
             split, reverse, slow down, hold, round-up, crop, overlay — is staged as a non-destructive
             decision and only applied when you press Render, which compiles the entire timeline into a
             single ffmpeg filter graph (two passes, in the size-capped modes). An edit never rewrites
@@ -368,7 +368,7 @@ export default function AboutDialog({ onClose }) {
               The compositing rule is the point of the feature. Crop a moving region out of V1 (crop
               box plus ANIM keyframes), render it, run it through an external tool — an AI video
               model, a grade, a cleanup pass — and drop the result on V2. It comes back the size of
-              the crop box, not the size of V1. Nara recognizes that from the resolution difference
+              the crop box, not the size of V1. GenAI Editor recognizes that from the resolution difference
               alone, with no flag to remember, and puts it back exactly where the box was, following
               the same animated path: <strong>the crop box becomes the overlay's placement
               rectangle</strong>, and V1 itself is never cropped in a composite — the whole point is
