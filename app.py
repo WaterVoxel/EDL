@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import time
 
@@ -11,7 +12,10 @@ import ffmpeg_utils as fu
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 2 * 1024**3  # 2 GB
 
-CLAUDE_BIN = "/Users/sarmieaj/.toolbox/bin/claude"
+# Resolved from PATH so the AGENT tab works on any machine. The fallback is the
+# path this project was developed against; if neither exists the tab errors when
+# used and nothing else in the editor is affected.
+CLAUDE_BIN = shutil.which("claude") or os.path.expanduser("~/.toolbox/bin/claude")
 
 CHAT_SCHEMA = json.dumps({
     "type": "object",

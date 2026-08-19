@@ -20,10 +20,14 @@ or ffmpeg themselves.
 Confirmed directly against the current code (not assumed):
 - `app.py:939` — `app.run(host="127.0.0.1", port=5001, debug=True)`, run
   only under `if __name__ == "__main__":` (`app.py:938`).
-- `app.py:14` — `CLAUDE_BIN = "/Users/sarmieaj/.toolbox/bin/claude"`, a
-  hardcoded personal path, used only inside `ask_claude()` (`/api/chat`).
-- `ffmpeg_utils.py:10-11` — `FFMPEG`/`FFPROBE` hardcoded to
-  `/opt/homebrew/bin/{ffmpeg,ffprobe}`; `PROJECT_ROOT`/`INPUT_DIR`/
+- `CLAUDE_BIN` (`app.py`) — `shutil.which("claude")`, falling back to
+  `~/.toolbox/bin/claude`; used only inside `ask_claude()` (`/api/chat`).
+  Still unbundleable: an `.app` cannot ship the `claude` CLI, so this
+  feature has to degrade gracefully or be cut from the bundle.
+- `ffmpeg_utils._tool()` — `FFMPEG`/`FFPROBE` prefer
+  `/opt/homebrew/bin/{ffmpeg,ffprobe}` and fall back to PATH. A bundle has
+  neither guarantee: it must point these at binaries inside the
+  `.app` (see the ffmpeg-bundling section). `PROJECT_ROOT`/`INPUT_DIR`/
   `OUTPUT_DIR`/`PREVIEW_CACHE_DIR` (lines 7-9, 17) are already
   `__file__`-relative and need no change.
 - `frontend/package.json` already has `"build": "vite build"` → produces

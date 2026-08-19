@@ -5,6 +5,10 @@ description: Start (or restart) the GenAI Editor locally — Flask backend + Vit
 
 The app needs two servers. The React UI 404s on every fetch if Flask isn't up.
 
+Every command below runs from the repo root — the folder containing `app.py` — unless it says
+otherwise. The working directory resets between some invocations, so `cd` explicitly rather than
+assuming it carried over.
+
 ## Steps
 
 1. Load Homebrew paths (ffmpeg/node are NOT on PATH by default in this environment):
@@ -16,7 +20,6 @@ The app needs two servers. The React UI 404s on every fetch if Flask isn't up.
 2. Kill any stale backend, then start Flask (port 5001):
 
    ```bash
-   cd /Users/sarmieaj/Documents/Claude/ffmpeg
    lsof -ti :5001 | xargs kill 2>/dev/null; sleep 1
    source .venv/bin/activate && nohup python3 app.py > /tmp/flask_dev.log 2>&1 &
    sleep 2 && curl -s http://127.0.0.1:5001/api/files
@@ -33,7 +36,7 @@ The app needs two servers. The React UI 404s on every fetch if Flask isn't up.
    If nothing is listening:
 
    ```bash
-   cd /Users/sarmieaj/Documents/Claude/ffmpeg/frontend
+   cd frontend
    npm install   # first time only
    nohup npm run dev > /tmp/vite_dev.log 2>&1 &
    ```

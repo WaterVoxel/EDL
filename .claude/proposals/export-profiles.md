@@ -89,7 +89,7 @@ PROFILES_DIR = os.path.join(fu.PROJECT_ROOT, "profiles")
 ```json
 {
   "quality": "under50mb_hevc",
-  "output_dir": "/Users/sarmieaj/Movies/YouTubeExports",
+  "output_dir": "/Users/you/Movies/YouTubeExports",
   "description": "For channel uploads"
 }
 ```

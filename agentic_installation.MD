@@ -17,6 +17,15 @@ Both servers are foreground dev servers with no auto-start. They stop when the m
 the shell dies, so re-running **Phase 5** is a normal recurring task — see
 [Restarting later](#restarting-later).
 
+**Path convention.** `$REPO_ROOT` below means the folder holding this project — the one containing
+`app.py`, `requirements.txt` and `frontend/`. It can live anywhere. Set it once per shell while you
+are inside that folder, or substitute the literal path in each command:
+
+```bash
+REPO_ROOT=$(pwd)
+test -f "$REPO_ROOT/app.py" && test -f "$REPO_ROOT/requirements.txt" && echo "repo root OK"
+```
+
 ---
 
 ## Phase 0 — Preflight
@@ -29,7 +38,7 @@ Homebrew or ffmpeg on a working machine wastes several minutes and risks breakin
 # before ffmpeg/ffprobe/node/npm/npx resolve. Re-run it in each new shell.
 eval "$(/opt/homebrew/bin/brew shellenv)"
 
-cd /Users/sarmieaj/Documents/Claude/ffmpeg   # or wherever the repo was cloned
+cd "$REPO_ROOT"
 
 uname -m                     # expect: arm64
 brew --version               # expect: a version, else install Homebrew (Phase 1)
@@ -43,19 +52,17 @@ npm --version
 Reference state, verified on this machine: macOS arm64, Homebrew prefix `/opt/homebrew`,
 ffmpeg/ffprobe 8.1.2, node v26.5.0, npm 11.17.0, system python 3.9.6, Vite 8.1.5.
 
-### Blocking architecture constraint — read before installing anything
+### Architecture note — how ffmpeg gets found
 
-`ffmpeg_utils.py:19-20` hardcodes absolute binary paths:
+`ffmpeg_utils.py` resolves its binaries through `_tool()`, which prefers `/opt/homebrew/bin/<name>`
+(the **Apple Silicon** Homebrew prefix this project is developed against) and falls back to PATH
+when that path is absent. So an Intel Mac — where Homebrew installs to `/usr/local` — works without
+edits, provided `ffmpeg` and `ffprobe` are on PATH in the shell that starts Flask.
 
-```python
-FFMPEG  = "/opt/homebrew/bin/ffmpeg"
-FFPROBE = "/opt/homebrew/bin/ffprobe"
-```
-
-`/opt/homebrew` is the **Apple Silicon** Homebrew prefix. On an Intel Mac, Homebrew installs to
-`/usr/local` and **every render and probe in the app will fail** even though `ffmpeg -version`
-works fine in the shell. If `brew --prefix` prints anything other than `/opt/homebrew`, edit those
-two constants to match `$(brew --prefix)/bin/...` before continuing, and tell the user you did.
+The consequence to watch for: PATH is only consulted off Apple Silicon, and Flask inherits the PATH
+of whatever shell launched it. If the app reports it cannot find ffmpeg while `ffmpeg -version` works
+for you, the server was started from a shell without Homebrew's shellenv loaded. Restart it from one
+that has it.
 
 This app is macOS-only by design (see `CLAUDE.md`). Do not attempt a Linux or Windows setup.
 
@@ -76,13 +83,18 @@ brew install node     # runs Vite + the React build
 
 `brew install ffmpeg` is the slow step (many dependencies). Let it finish; do not interrupt it.
 
-Confirm before moving on — these exact paths must exist, because that is what the Python code
-calls:
+Confirm before moving on. Ask Python, not the shell — this prints the paths the app itself will
+call, which is the thing that actually has to be right:
 
 ```bash
-test -x /opt/homebrew/bin/ffmpeg  && echo "ffmpeg OK"
-test -x /opt/homebrew/bin/ffprobe && echo "ffprobe OK"
+cd "$REPO_ROOT"
+python3 -c "import ffmpeg_utils as fu, os
+print(fu.FFMPEG, os.path.exists(fu.FFMPEG))
+print(fu.FFPROBE, os.path.exists(fu.FFPROBE))"
 ```
+
+Both must print `True`. `False` means ffmpeg is neither in `/opt/homebrew/bin` nor on this shell's
+PATH — go back to `brew install ffmpeg`.
 
 ---
 
@@ -93,7 +105,7 @@ test -x /opt/homebrew/bin/ffprobe && echo "ffprobe OK"
 else to install. Use a venv — the system python has no Flask and should not be polluted.
 
 ```bash
-cd /Users/sarmieaj/Documents/Claude/ffmpeg
+cd "$REPO_ROOT"
 python3 -m venv .venv                        # skip if .venv/ already exists
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -122,7 +134,7 @@ reproducible tree. `npm install` also works but may drift from the lock.
 
 ```bash
 eval "$(/opt/homebrew/bin/brew shellenv)"
-cd /Users/sarmieaj/Documents/Claude/ffmpeg/frontend
+cd "$REPO_ROOT/frontend"
 npm ci
 ```
 
@@ -141,7 +153,7 @@ gitignored, so they are absent from a fresh clone — and `_list_dir` in `app.py
 loads to a broken shell. Creating them turns both into a clean `200 []`.
 
 ```bash
-cd /Users/sarmieaj/Documents/Claude/ffmpeg
+cd "$REPO_ROOT"
 mkdir -p input output projects
 ```
 
@@ -166,15 +178,22 @@ the app still runs — do not invent one.
 
 ### Optional: the AGENT tab
 
-`app.py:14` hardcodes a user-specific path:
+`app.py` resolves the CLI it shells out to as:
 
 ```python
-CLAUDE_BIN = "/Users/sarmieaj/.toolbox/bin/claude"
+CLAUDE_BIN = shutil.which("claude") or os.path.expanduser("~/.toolbox/bin/claude")
 ```
 
-If that path does not exist on this machine, the AGENT tab errors when used and **everything else
-in the editor works normally.** This is not a setup blocker. Either point `CLAUDE_BIN` at the
-local `claude` binary (`which claude`) or leave it and tell the user that one tab is inert.
+So it works wherever `claude` is on PATH. If it is not installed, the AGENT tab errors when used and
+**everything else in the editor works normally** — not a setup blocker. Check and tell the user
+which case they are in:
+
+```bash
+command -v claude || echo "claude not installed — AGENT tab will be inert"
+```
+
+Same PATH caveat as ffmpeg: this resolves at import time from the PATH of the shell that starts
+Flask, so start the backend from a shell where `claude` resolves.
 
 ---
 
@@ -184,13 +203,14 @@ Two processes must run at once. If Flask is down, the UI at 5173 loads but every
 
 ```bash
 # --- backend on 127.0.0.1:5001 ---
-cd /Users/sarmieaj/Documents/Claude/ffmpeg
+eval "$(/opt/homebrew/bin/brew shellenv)"   # so the app resolves ffmpeg off Apple Silicon
+cd "$REPO_ROOT"
 lsof -ti :5001 | xargs kill 2>/dev/null; sleep 1
 source .venv/bin/activate && nohup python3 app.py > /tmp/flask_dev.log 2>&1 &
 
 # --- frontend on 127.0.0.1:5173 ---
 eval "$(/opt/homebrew/bin/brew shellenv)"
-cd /Users/sarmieaj/Documents/Claude/ffmpeg/frontend
+cd "$REPO_ROOT/frontend"
 lsof -ti :5173 | xargs kill 2>/dev/null; sleep 1
 nohup npm run dev > /tmp/vite_dev.log 2>&1 &
 sleep 6
@@ -215,7 +235,6 @@ Notes that matter:
 Do not report success until all five lines below pass. This is the whole deliverable.
 
 ```bash
-cd /Users/sarmieaj/Documents/Claude/ffmpeg
 for u in http://127.0.0.1:5001/ http://127.0.0.1:5001/api/files \
          http://127.0.0.1:5173/ http://127.0.0.1:5173/api/files \
          http://127.0.0.1:5173/api/outputs; do
@@ -289,11 +308,11 @@ lsof -ti :5173 | xargs kill 2>/dev/null
 | Vite says it is on **5174** | Port 5173 was taken. Kill the old Vite and restart so the promised URL is the live one. |
 | `ModuleNotFoundError: No module named 'flask'` | The venv was not activated, or Phase 2 was skipped. `source .venv/bin/activate && pip install -r requirements.txt`. |
 | `command not found: ffmpeg` / `node` / `npx` | Homebrew's shellenv was not loaded in this shell. Re-run `eval "$(/opt/homebrew/bin/brew shellenv)"`. |
-| App reports it cannot find ffmpeg, but the shell can | Wrong Homebrew prefix vs. the hardcoded paths in `ffmpeg_utils.py:19-20`. See the Phase 0 architecture constraint. |
+| App reports it cannot find ffmpeg, but the shell can | Off Apple Silicon, `_tool()` resolves via PATH — and Flask was started from a shell without Homebrew's shellenv. Restart the backend from one that has it. See the Phase 0 architecture note. |
 | Renders fail with no obvious error | Check `/tmp/flask_dev.log` for the ffmpeg stderr the backend captured. |
 | `500` from `/api/files` | Missing `input/`. Phase 4. |
 | Media Bin empty | Correct on a fresh install — `input/` starts empty. Drop files onto the Media Bin or the V1 track to add sources. |
-| AGENT tab errors | Expected unless `CLAUDE_BIN` (`app.py:14`) points at a real `claude` binary. Not a blocker. |
+| AGENT tab errors | Expected unless the `claude` CLI is on the PATH of the shell that started Flask (`CLAUDE_BIN` in `app.py`). Not a blocker. |
 
 ---
 
@@ -305,13 +324,13 @@ the project's standard checks before declaring done:
 ```bash
 # Frontend compile check — MUST run from frontend/; from the repo root it fails with
 # [UNRESOLVED_ENTRY] Cannot resolve entry module index.html
-cd /Users/sarmieaj/Documents/Claude/ffmpeg/frontend && npx vite build
+cd "$REPO_ROOT/frontend" && npx vite build
 
 # Lint (oxlint, not eslint). Baseline is exactly 7 warnings / 0 errors — do not "fix" those 7.
 npm run lint
 
 # Backend syntax check — MUST run from the repo root
-cd /Users/sarmieaj/Documents/Claude/ffmpeg && python3 -m py_compile app.py ffmpeg_utils.py
+cd "$REPO_ROOT" && python3 -m py_compile app.py ffmpeg_utils.py
 ```
 
 For anything touching the render pipeline, follow the `verify-render` skill instead of eyeballing

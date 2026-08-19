@@ -28,7 +28,7 @@ This project's correctness bar for anything touching the render pipeline (holds,
 
    ```bash
    eval "$(/opt/homebrew/bin/brew shellenv)"
-   cd /Users/sarmieaj/Documents/Claude/ffmpeg
+   # from the repo root — the folder containing app.py
    ffmpeg -i output/verify_test.mp4 -map 0:v -f framemd5 - -loglevel error > /tmp/out.framemd5
    ffmpeg -i input/<file> -map 0:v -f framemd5 - -loglevel error > /tmp/src.framemd5
    ```

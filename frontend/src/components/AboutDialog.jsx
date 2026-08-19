@@ -530,6 +530,40 @@ export default function AboutDialog({ onClose }) {
               filtering in both media panels.
             </p>
           </Section>
+
+          {/* Colophon. Kept in the plain-text/box-rule style of README.txt's contact block
+              rather than restyled as a Section, so the credit reads the same in both places.
+              The rules are .repeat()ed so their widths can't drift (56 and 57, as in README). */}
+          <div className="pt-1 pb-1 flex flex-col items-center gap-1 font-mono text-[10px] leading-relaxed text-neutral-400">
+            <div className="text-neutral-700">{'═'.repeat(56)}</div>
+            <div className="font-semibold tracking-[0.25em] text-indigo-400">CONTACT</div>
+            <div className="text-neutral-700">{'═'.repeat(56)}</div>
+
+            <div className="pt-1.5">Created and maintained by:</div>
+
+            <div className="flex flex-col whitespace-pre text-neutral-300">
+              <span>Name .......... Julian Sarmiento</span>
+              <span>
+                Email .......... &lt;
+                <a
+                  href="mailto:sarmieaj@amazon.com"
+                  className="text-indigo-400 hover:text-indigo-300 hover:underline"
+                >sarmieaj@amazon.com</a>
+                &gt;
+              </span>
+              <span>Departament ......... VFX GenAI Specialist, PV Studio AI (7931)</span>
+              <span>Location ......... LAX22-CO (Culver City,CA,US)</span>
+            </div>
+
+            <p className="pt-1.5 text-center">
+              Questions, bug reports, and feature requests are welcome<br />
+              through any of the channels above.
+            </p>
+
+            <div className="text-neutral-700">{'─'.repeat(57)}</div>
+            <div className="text-neutral-500">&lt;08/2026&gt;</div>
+            <div className="text-neutral-700">{'═'.repeat(56)}</div>
+          </div>
         </div>
       </div>
     </div>

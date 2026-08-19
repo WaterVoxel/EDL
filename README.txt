@@ -32,8 +32,13 @@ A1. Open the Terminal app: press Cmd+Space, type "Terminal", press
 
 A2. Type these two commands, pressing Enter after each:
 
-    cd ~/Documents/Claude/ffmpeg
+    cd [PROJECT FOLDER]
     claude
+
+    [PROJECT FOLDER] means this project's folder -- the one containing
+    this README file -- wherever it lives on your Mac. You don't have to
+    type its name: type "cd" and a space, then drag the folder from
+    Finder onto the Terminal window and let go. Press Enter.
 
     If you see "command not found: claude", you do not have Claude Code
     installed. Either install it (docs.claude.com/en/docs/claude-code)
@@ -83,6 +88,28 @@ A window with a text prompt will appear. Type each command exactly as
 shown below, then press Enter to run it.
 
 
+ONE THING TO KNOW FIRST: "cd [PROJECT FOLDER]"
+
+Several commands below start with "cd", which means "go to this folder".
+[PROJECT FOLDER] means this project's folder -- the one containing
+README.txt and app.py -- wherever you put it on your Mac.
+
+You do not have to type its name. Instead:
+
+  1. Type  cd  followed by one space (do not press Enter yet).
+  2. Drag the project folder from a Finder window onto the Terminal
+     window and let go. Terminal fills in the full path for you.
+  3. Press Enter.
+
+So if you keep the project in Documents, "cd [PROJECT FOLDER]" ends up
+looking something like:
+
+    cd ~/Documents/Claude/ffmpeg
+
+Where a command says "cd [PROJECT FOLDER]/frontend", do the same thing
+but drag the "frontend" folder from inside the project instead.
+
+
 STEP 1: INSTALL THE REQUIRED TOOLS (ONE-TIME SETUP)
 -----------------------------------------------------
 
@@ -128,7 +155,7 @@ STEP 3: START THE APP (BACKEND)
 FIRST TIME ONLY -- run these three commands once, in your FIRST Terminal
 window, to create the app's folders and its Python environment:
 
-    cd ~/Documents/Claude/ffmpeg
+    cd [PROJECT FOLDER]
     mkdir -p input output projects
     python3 -m venv .venv
 
@@ -138,13 +165,13 @@ will report an error instead of listing your files.)
 Then, every time you want to start the app, type these three commands
 one at a time, pressing Enter after each:
 
-    cd ~/Documents/Claude/ffmpeg
+    cd [PROJECT FOLDER]
     source .venv/bin/activate
     python3 app.py
 
-Or
+Or, as a single line:
 
- cd ~/Documents/Claude/ffmpeg && source .venv/bin/activate && python3 app.py
+ cd [PROJECT FOLDER] && source .venv/bin/activate && python3 app.py
 
 
 If this is the very first time running the app and you see an error
@@ -164,13 +191,13 @@ STEP 4: START THE APP (INTERFACE)
 
 In your SECOND Terminal window, type these commands one at a time:
 
-    cd ~/Documents/Claude/ffmpeg/frontend
+    cd [PROJECT FOLDER]/frontend
     npm install
     npm run dev
 
-Or
+Or, as a single line:
 
- cd ~/Documents/Claude/ffmpeg/frontend && npm run dev
+ cd [PROJECT FOLDER]/frontend && npm run dev
 
 
 "npm install" only needs to run the first time (it downloads some files)

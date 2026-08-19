@@ -2,6 +2,7 @@ import json
 import math
 import os
 import shlex
+import shutil
 import subprocess
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -16,8 +17,23 @@ ASSETS_DIR = os.path.join(PROJECT_ROOT, "frontend", "assets")
 # leave in the audio track (see build_timeline_filter's fill_noise). It is only
 # ~3 s long, so every use aloops it and atrims to the exact gap length.
 NOISE_ASSET = os.path.join(ASSETS_DIR, "Audio_NOISE.wav")
-FFMPEG = "/opt/homebrew/bin/ffmpeg"
-FFPROBE = "/opt/homebrew/bin/ffprobe"
+
+
+def _tool(name):
+    """Resolve an ffmpeg-family binary.
+
+    Prefers the Apple Silicon Homebrew prefix this project is developed against,
+    so a stray conda/system ffmpeg on PATH can never take precedence here. Falls
+    back to PATH for an Intel Mac (`/usr/local`) or any other brew prefix, where
+    the hardcoded path would make every render and probe fail even though
+    `ffmpeg -version` works fine in the shell.
+    """
+    brewed = "/opt/homebrew/bin/" + name
+    return brewed if os.path.exists(brewed) else (shutil.which(name) or brewed)
+
+
+FFMPEG = _tool("ffmpeg")
+FFPROBE = _tool("ffprobe")
 
 ALLOWED_EXTENSIONS = (".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm")
 

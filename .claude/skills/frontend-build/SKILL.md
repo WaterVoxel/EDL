@@ -10,7 +10,7 @@ This project has no test suite for the frontend; the build is the compile check.
 1. Must run from `frontend/` — running from the repo root fails with `[UNRESOLVED_ENTRY] Cannot resolve entry module index.html`:
 
    ```bash
-   cd /Users/sarmieaj/Documents/Claude/ffmpeg/frontend
+   cd frontend   # i.e. from the repo root, the folder containing app.py
    eval "$(/opt/homebrew/bin/brew shellenv)"
    npx vite build 2>&1 | tail -8
    ```
@@ -25,11 +25,11 @@ This project has no test suite for the frontend; the build is the compile check.
 
 ## Testing pure logic modules
 
-`clipMath.js`, `analyzeMath.js`, `timecode.js`, and `fileList.js` are import-clean ES modules — unit-test them directly with node, no build needed:
+`clipMath.js`, `analyzeMath.js`, `timecode.js`, and `fileList.js` are import-clean ES modules — unit-test them directly with node, no build needed. Run from the repo root; relative specifiers in `--input-type=module -e` resolve against the working directory (verified):
 
 ```bash
 node --input-type=module -e "
-import { clipMainSec } from '/Users/sarmieaj/Documents/Claude/ffmpeg/frontend/src/clipMath.js'
+import { clipMainSec } from './frontend/src/clipMath.js'
 console.assert(clipMainSec({inSec: 0.5, outSec: 2.5, speed: 0.5}) === 4.0)
 console.log('PASS')
 "
