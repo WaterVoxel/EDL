@@ -14,18 +14,21 @@ import { sequencePosToPx, sequenceClipBounds, sequenceVideoStartSec } from '../.
  * sequence, which is the one thing the user can't otherwise see and the one
  * thing that changes what they hear:
  *
- *   shorter  → the clips, then a hatched remainder that renders as silence
+ *   shorter  → the clips, then a hatched remainder with nothing of A1's own in it
  *   longer   → the overhang past the sequence edge, hatched red and never heard
  *   equal    → flush, no annotation
  *
  * `noiseEnabled` (the A1 Room Tone toggle) relabels both annotated gaps — the
  * head hold and the short-lane remainder — to amber "noise", so the lane tracks
- * the button. Only the FIRST of those is literally room tone in the render:
- * build_timeline_filter's noise_gaps rule is {"head_hold"} as soon as A1 has
- * any content, so the remainder stays apad silence however the toggle is set.
- * That nuance lives in the remainder's tooltip (product decision — the label
- * follows the toggle, the tooltip states what actually renders); don't take the
- * shared word as evidence the render fills both.
+ * the button. Both labels are exactly true: room tone fills silence and only
+ * silence, and these two annotations are precisely the stretches where this lane
+ * has no sound. The remainder in particular is measured against how far the
+ * lane's AUDIO reaches, which is what the render measures too, so a bed whose
+ * file is padded with silence gets tone from where the sound stops.
+ *
+ * What the lane cannot draw is the silence on V1's side — a clip whose source
+ * has no audio stream, or a slow-motion body — which room tone also fills. This
+ * bar annotates A1's own gaps; the render's fill is the union of both tracks'.
  *
  * A1 is LINKED to V1 twice over. Geometrically: every horizontal measurement
  * goes through sequencePosToPx, the same per-clip-width + inter-clip-gap layout
@@ -128,11 +131,10 @@ export default function AudioBedBar({ beds, clips, sequenceSec, pps, gapPx, mute
         </div>
       ))}
 
-      {/* Silence the render pads on when the lane runs out early. Reads "noise"
-          with A1 Room Tone on to match the button, but the render pads this
-          stretch with apad silence either way (noise_gaps fills holds only, and
-          with anything on A1 only the head one) — which is why the tooltip keeps
-          saying "silence" and spells the exception out. */}
+      {/* What the render pads on when the lane runs out early: silence with the
+          toggle off, room tone with it on. Nothing of A1's is playing here, so
+          this is exactly the kind of stretch the fill is for and the label can
+          say so without qualification. */}
       {state === 'short' && (
         <div
           className="absolute top-0 bottom-0 rounded-r border border-l-0 border-emerald-900/60 overflow-hidden flex items-center justify-center"
@@ -143,8 +145,9 @@ export default function AudioBedBar({ beds, clips, sequenceSec, pps, gapPx, mute
               'repeating-linear-gradient(45deg, rgba(16,185,129,0.14) 0 3px, transparent 3px 6px)',
           }}
           title={
-            `Silence — A1 is ${(availSec - totalBedSec).toFixed(2)}s shorter than the space it has to fill`
-            + (noiseEnabled ? '. This stretch still renders as pure silence with A1 Room Tone on: room tone fills holds only, and with a clip on A1 only the head hold' : '')
+            (noiseEnabled ? 'Room tone' : 'Silence')
+            + ` — A1 is ${(availSec - totalBedSec).toFixed(2)}s shorter than the space it has to fill`
+            + (noiseEnabled ? ', so room tone fills it instead of digital silence' : '')
           }
         >
           <span className={`text-[7px] font-mono uppercase tracking-wide truncate px-1 ${noiseEnabled ? 'text-amber-500/90' : 'text-emerald-600/90'}`}>
@@ -156,16 +159,17 @@ export default function AudioBedBar({ beds, clips, sequenceSec, pps, gapPx, mute
       {/* The head hold, which A1 is delayed PAST — labelled, because an empty
           gap at the head of the lane otherwise reads as a bug rather than as
           the audio waiting for the picture to start. With A1 Room Tone on it
-          reads "noise", since this gap is exactly what the toggle fills; the
-          block stays fuchsia (it is still structurally the head hold, matching
-          V1's hold segments and the tail-hold marks below) and only the word
-          goes amber, the color the toggle itself uses. */}
+          reads "noise": A1 has not started and the held frame brings no sound of
+          its own, so the fill reaches here. The block stays fuchsia (it is still
+          structurally the head hold, matching V1's hold segments and the
+          tail-hold marks below) and only the word goes amber, the color the
+          toggle itself uses. */}
       {startPx > 0 && (
         <div
           className="absolute top-0 bottom-0 left-0 rounded-l border border-r-0 border-fuchsia-500/40 bg-fuchsia-500/10 overflow-hidden flex items-center justify-center"
           style={{ width: startPx }}
           title={noiseEnabled
-            ? `Room tone — A1 waits out V1's ${startSec.toFixed(2)}s head hold and starts with the picture, and A1 Room Tone fills the gap it leaves`
+            ? `Room tone — A1 waits out V1's ${startSec.toFixed(2)}s head hold and starts with the picture, so the hold has no sound of its own and room tone fills it`
             : `A1 waits out V1's ${startSec.toFixed(2)}s head hold and starts with the picture`}
         >
           <span className={`text-[7px] font-mono uppercase tracking-wide truncate px-1 ${noiseEnabled ? 'text-amber-400/90' : 'text-fuchsia-400/90'}`}>

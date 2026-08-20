@@ -407,15 +407,18 @@ export default function AboutDialog({ onClose }) {
               whole V1 sequence at <span className="font-mono text-neutral-400">volume=0.35</span>,
               summed with the clips' own audio by{' '}
               <span className="font-mono text-neutral-400">
-                amix=inputs=2:duration=first:dropout_transition=0:normalize=0
-              </span>.
+                amix=inputs=N:duration=first:dropout_transition=0:normalize=0
+              </span>{' '}
+              — two inputs for a bed, three once room tone is on.
             </p>
             <p>
               <span className="font-mono text-neutral-400">normalize=0</span> is the load-bearing part.
               amix's default divides every input by the number of inputs, which would quietly drop your
               clip audio 6 dB the moment a bed was added; with normalization off it's an exact
-              unity-gain sum — verified to a residual of 7.45e-09 across 485,100 samples. So clip audio
-              passes through at precisely its own level and the bed is the only thing attenuated.{' '}
+              unity-gain sum — verified to a residual of 7.45e-09 across 485,100 samples with two
+              inputs, and 3.73e-09 across 286,650 sample-frames with three (clips, a bed and room
+              tone), both far under one float32 LSB. So clip audio passes through at precisely its
+              own level and the bed is the only thing attenuated.{' '}
               <span className="font-mono text-neutral-400">duration=first</span> ends the mix with the
               picture, however long the bed happens to be.
             </p>
@@ -437,22 +440,84 @@ export default function AboutDialog({ onClose }) {
             </p>
             <p>
               <strong>Room tone.</strong> A hold has no audio of its own, and digital silence in the
-              middle of a cut is audible as a hole. The gap a head hold creates is filled instead with
-              a 3.003s, 48 kHz stereo room-tone asset, conformed by{' '}
-              <span className="font-mono text-neutral-400">aformat</span> to the graph's rate and
-              layout and cut to the gap's exact length. With no bed loaded the trailing gap gets the
-              same treatment; once a bed is present the bed covers the tail and only the head gap is
-              filled. Verified across 84 frames in four combinations.
+              middle of a cut is audible as a hole. The toggle fills those holes and nothing else:
+              wherever the sequence carries sound, it comes out untouched at its own level; wherever
+              it carries silence — holds, round-ups, slow-motion bodies, a source with no audio
+              stream, the tail past the end of a short A1 track — room tone plays instead. The
+              material is a 3.003s, 48 kHz stereo asset looped by{' '}
+              <span className="font-mono text-neutral-400">aloop=loop=-1</span>, lifted{' '}
+              <span className="font-mono text-neutral-400">+12 dB</span> to −27.0 dB RMS / −12.8 dB
+              peak, conformed by <span className="font-mono text-neutral-400">aformat</span> to the
+              graph's rate and layout, and summed in as one more amix input at the very end.
+            </p>
+            <p>
+              Which stretches those are is <em>measured</em>, not guessed from layout. Python walks the
+              same per-clip pieces the audio graph itself emits — lead hold, body, trail hold, the
+              sub-frame slack a non-frame-aligned trim leaves — marks each as sound or silence, then
+              subtracts how far the A1 track's own audio actually reaches, taken from the probed
+              duration of its audio <em>stream</em> rather than its container. The complement is the
+              fill. This is what the first attempt got wrong: eligibility was decided by a gap's{' '}
+              <em>position</em>, which narrowed to the head hold alone as soon as anything sat on A1,
+              so a timeline with a bed and no head hold — the ordinary case — had no eligible gap and
+              the toggle emitted nothing at all. Measuring coverage also retires an old limitation: a
+              bed padded with silence, or shorter than the sequence, now gets tone from the point its
+              sound stops.
+            </p>
+            <p>
+              Three details are load-bearing and all three came out of measurement. The asset ends with
+              856 frames (17.8ms) of pure zero, so looping the file whole put a silence dropout in the
+              noise floor once every 3.003s — 39 of them in a two-minute render, a 0.333 Hz pulse that
+              reads as pumping. A 50ms RMS scan can't see it; a 5ms scan shows −∞. The fix is to cut
+              the asset's dead tail before looping, at its own 48 kHz sample 143174, where the material
+              is still at full level. Second, the fill is built <em>per clip</em> and padded to each
+              clip's own frame-quantized length, so it quantizes exactly the way the picture's audio
+              does; one <span className="font-mono text-neutral-400">anullsrc</span> of the total
+              duration would not, because at 24 fps a frame is 44100/24 = 1837.5 samples and a 10.0s
+              three-clip timeline measures 441,001 samples against 441,000 for a single span. Third,
+              merging adjacent runs still shifts the last boundary by a half-sample, and{' '}
+              <span className="font-mono text-neutral-400">amix</span> reads an input that ends early
+              as silence — which left one literal (0, 0) sample-frame at the very end of the render.
+              So the last clip's fill is built 50ms long and{' '}
+              <span className="font-mono text-neutral-400">duration=first</span> cuts it, rather than
+              the graph trying to land the rounding exactly.
+            </p>
+            <p>
+              Switching the toggle cannot move a sample of existing audio or change a video frame: it
+              adds one chain and widens the final amix by one input, and every other chain in the graph
+              is textually identical either way. Verified by subtraction rather than by ear — on a real
+              project, 240 frames with identical{' '}
+              <span className="font-mono text-neutral-400">framemd5</span> on and off, the same audio
+              sample count, the bed's whole 9.4167s reach differing by exactly 0.000e+00, and the only
+              samples that changed being the 0.583s round-up at the end. Across a matrix of ten
+              timeline shapes — no-audio sources, holds, slow-motion, reversed clips, unaligned trims,
+              beds shorter and longer than the picture — not one sample-frame of tone ever landed over
+              existing sound, and every silent 5ms window went to zero. Because tone plays only where
+              nothing else does, it costs no headroom: the render's peak is the greater of what was
+              already there and −12.8 dBFS. One caveat: room tone is applied at <em>render</em> time
+              only. The in-app preview does not emulate it, so the toggle changes nothing you can hear
+              until you render. The render response reports how much was filled —{' '}
+              <span className="font-mono text-neutral-400">noise_fill_sec</span> against{' '}
+              <span className="font-mono text-neutral-400">sequence_sec</span> — and the log line shows
+              it, so &ldquo;nothing happened&rdquo; is distinguishable from &ldquo;nothing needed
+              filling&rdquo;.
             </p>
             <p>
               <strong>Render A1</strong> writes the timeline's audio alone as a{' '}
               <span className="font-mono text-neutral-400">.wav</span> —{' '}
               <span className="font-mono text-neutral-400">-c:a pcm_s16le</span>, uncompressed, the
               same length as the V1 render, opening no clip as a video input at all. It rebuilds the
-              bed chain node for node, and the result was measured against the V1 render's own audio:
-              identical duration to the microsecond, bit-identical at the head, within 1 LSB through
-              the body, with only the last 6 of 44,100 tail samples differing by a single LSB
-              (≈ −90 dBFS). That's a usable stem, not an approximation of one.
+              bed chain node for node and runs the same fill plan against the same clip list, so it
+              places tone in exactly the stretches the V1 render does — which is why it reads each
+              clip's <span className="font-mono text-neutral-400">has_audio</span> even though it
+              renders no clip audio: that is what tells it where the picture's own sound would be, and
+              therefore where tone must stay out. Measured by subtraction against the V1 render's own
+              audio — a timeline with clip audio, a head hold, a trailing hold, a silent source and a
+              slow-motion clip, all three passes exactly 286,650 sample-frames long — the stem matched
+              the render's A1 contribution to 3.73e-09, one thirty-second of a float32 LSB and
+              therefore bit-identical once quantized. That's a usable stem, not an approximation of
+              one. Asking for a stem that would be silent — room tone on, no A1 track, and every
+              stretch of the sequence already carrying sound — is refused with that explanation rather
+              than writing an empty file.
             </p>
           </Section>
 

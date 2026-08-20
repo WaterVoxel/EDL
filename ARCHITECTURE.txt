@@ -428,8 +428,9 @@ loop's size=1 means its buffer holds exactly one frame; N is
 round(hold_seconds * fps) - 1, because trim's own output already
 counts as the first occurrence of that frame, so only N additional
 repeats are needed to reach the target frame count. The hold's audio
-is a gap of the hold's exact duration -- pure digital silence by
-default, or room tone if A1 Room Tone is on (see below).
+is a gap of the hold's exact duration -- always pure digital silence.
+Room tone, when on, is summed over that gap from a separate track
+rather than substituted into it (see below).
 
 WHICH TIMESTAMP A HOLD FREEZES ON FLIPS UNDER REVERSAL
 
@@ -583,29 +584,82 @@ AudioBedPlayer slaves a hidden <audio> to the transport clock minus
 that offset (parked paused at 0 while the offset is negative), and
 AudioBedBar measures its geometry against V1's actual per-clip pixels.
 
-ROOM TONE IN THE GAPS (the A1 Room Tone toggle)
+ROOM TONE FILLS THE MEASURED SILENCE (the A1 Room Tone toggle)
 
-By default every gap the graph creates is anullsrc -- pure digital
-silence. With the toggle on, the HOLD gaps are filled with room tone
-from a fixed asset instead (frontend/assets/Audio_NOISE.wav; the path
-is server-side, the request sends only a boolean). Two rules, both about
-room tone never being audible alongside real audio:
+Every gap the graph creates is anullsrc -- pure digital silence -- and
+that never changes. What the toggle adds is a separate track that
+fills the silence and nothing else: wherever the sequence already
+carries sound, that sound comes out untouched at its own level;
+wherever it carries silence, room tone plays from a fixed asset
+(frontend/assets/Audio_NOISE.wav; the path is server-side, the request
+sends only a boolean). It is summed as one more amix input at the very
+end of the graph, like the bed.
 
-  - Hold gaps only. A slowed segment's gap and a silent source's body
-    are gaps too, but each runs as long as the picture it carries, so
-    filling them would make the tone a bed under moving video rather
-    than a patch over a frozen frame. Those stay silent.
-  - With an A1 bed loaded, the TRAIL gap drops back to silence as
-    well, because the bed is summed over the sequence's end. The head
-    gap needs no such guard -- the bed is delayed past it by
-    construction.
+WHICH stretches those are is measured, not inferred from layout, and
+that distinction is the whole feature. clip_audio_pieces() walks the
+same per-clip pieces the audio graph itself emits -- lead gap, body,
+trail gap, and the sub-frame slack a non-frame-aligned trim leaves --
+and marks each one as sound or silence, with the body silent when the
+clip is slowed or its source has no audio stream. noise_fill_plan()
+then subtracts the span the A1 track's own audio actually covers,
+taken from bed_span() over the probed duration of the audio STREAM (a
+container's duration reports its longest stream, which would credit a
+file with sound it does not have). The complement is the fill.
 
-One generator (gap_chain) emits every gap, so silence and room tone
-can never disagree about a gap's LENGTH, only about its contents. The
-asset is ~3s and 48k stereo, so each gap aloops it, atrims to the
-exact quantized gap length, and aformats to the graph's rate/layout
-last. Switching the toggle cannot move a single sample of real
-dialogue or change one video frame.
+Both earlier designs are worth remembering, because they failed in
+opposite directions:
+
+  - Gap-scoped by POSITION. Eligibility was a set of gap positions,
+    narrowing to the head hold alone as soon as anything sat on A1 --
+    so a timeline with a bed and no head hold, which is the ordinary
+    case, had no eligible gap and the toggle emitted nothing at all.
+    Reported twice as "Room Tone does nothing".
+  - One endless layer under EVERYTHING. That filled every hole, and
+    was reported immediately as "it's playing over the entire audio
+    track" -- a real project's bed covers the sequence end to end, so
+    tone under the bed is tone everywhere.
+
+The rule that survives both: decide by measured coverage. Never by
+position, and never by giving up on measuring.
+
+One pair of generators (noise_fill_plan/noise_track) serves both the
+V1 render and the A1 stem, so the two can never disagree about where
+the tone is or how loud it is. Per run the chain is: atrim the asset's
+dead tail off, aloop endlessly, volume +12 dB, aformat to the graph's
+rate/layout, atrim to the run's length. Runs are concatenated per clip
+and padded to that clip's own frame-quantized length. Three parts of
+that are counter-intuitive and all three came out of measurement.
+
+  - The leading atrim is not an optimization. The asset's last 856
+    frames (17.8 ms) are literal zeros, so looping the file whole puts
+    a silence dropout in the tone once every 3.003s -- 39 of them in a
+    two-minute render, a 0.333 Hz pulse that reads as pumping. A 50 ms
+    RMS scan cannot see it; a 5 ms scan shows -inf.
+  - The fill is built PER CLIP, not as one span of the total. The
+    sequence is a sum of per-clip roundings and a frame at 24fps is
+    1837.5 samples, so a 10.0s three-clip timeline measures 441001
+    samples of picture audio against 441000 for a single trim of 10.0.
+  - The LAST clip's fill is built 50 ms long (NOISE_TAIL_MARGIN_SEC)
+    and amix's duration=first cuts it. Merging adjacent same-kind runs
+    shifts the final boundary by a half-sample, and amix reads an
+    input that ends early as silence -- which left one literal (0,0)
+    sample-frame at the very end of the render. Landing that rounding
+    exactly is not worth attempting; overshooting and being cut is.
+
+Switching the toggle adds one chain group and widens the final amix by
+one input. Every other chain in the graph is textually identical, so
+it cannot move a sample of existing audio or change one video frame --
+verified by subtraction, not by ear: on a real project the bed's whole
+9.4167s reach differs by exactly 0.000e+00 with the toggle on, and
+across ten timeline shapes not one sample-frame of tone ever landed
+over existing sound. If there is nothing to fill, the graph emitted is
+byte-identical to the toggle-off graph.
+
+It applies at RENDER time only -- the in-app preview does not emulate
+it, so the toggle is inaudible until you render. Because that makes
+"nothing happened" and "nothing needed filling" sound the same, both
+render routes report noise_fill_sec against sequence_sec and the
+frontend logs it.
 
 
 6. FRAME-ACCURATE MATH: EPSILONS, FRAME BUDGETS, AND WHY THEY MATTER
@@ -739,6 +793,12 @@ shapes differ deliberately:
     x, y, w, h, keyframes}) -- see section 8.
   - audioBed, fillNoise and noAudio ride BESIDE the clip list, not
     inside it: they are sequence-level, not per-clip.
+  - With fillNoise on, both render responses carry noise_fill_sec and
+    sequence_sec -- how much silence the fill actually found, against
+    the sequence it measured. Room tone is render-only and inaudible
+    in the preview, so this is the only signal that distinguishes
+    "nothing happened" from "nothing needed filling"; the frontend
+    logs both cases.
 
 
 8. THREE TRACKS: V1, V2, A1 -- ANALYZE, RECONSTRUCT, OVERLAY, BED
@@ -1002,9 +1062,15 @@ a parallel implementation: clip_timing() (section 6) supplies the
 length, and the bed chain is reproduced node for node from
 build_timeline_filter -- adelay -> aformat -> apad -> atrim -> asetpts
 -> volume, summed with the same amix settings -- then mixed against a
-gap layer of head/middle/tail pieces that follows the identical room
-tone rule (head hold always eligible, trail hold only when there is no
-bed).
+silence skeleton built PER CLIP (not as one anullsrc of the total), so
+it quantizes exactly the way the V1 graph's own [aseq] does. The
+skeleton carries no sound; it is there for the LENGTH. Room tone, when
+on, comes from the same noise_fill_plan() run against the same clip
+list, so the stem places tone in exactly the stretches the V1 render
+fills -- which is why each clip's has_audio is load-bearing here even
+though no clip audio is rendered. A stem that would be entirely
+silent (tone on, no A1 track, nothing to fill) is refused with that
+explanation rather than written.
 
 NO CLIP IS OPENED AS AN FFMPEG INPUT. The clips are probed for fps and
 video_duration and nothing else; only the bed and the room tone asset
@@ -1014,12 +1080,17 @@ timeline that takes minutes to render as video.
 Verified against the equivalent V1 render: identical sample count
 (3.500000s single clip; 7.000000s on a 3-clip mixed-fps timeline with
 a reversal, a 0.5x slow-down, a 0.51s head hold and a tail+round
-hold), head room tone BIT-IDENTICAL, body equal to
-V1(with bed) - V1(without bed) within 1 LSB, and with room tone only
-(no bed) both holds bit-identical to V1's. One measured imperfection:
-with a bed, the last 6 of 44100 tail samples differ by 1 LSB (about
--90 dBFS) -- the resampler's end-of-stream flush landing in a shorter
-graph, not an alignment error.
+hold), and by subtraction: ((V1+A1+tone) - V1plain) - A1stem leaves
+3.73e-09 on a timeline carrying clip audio, holds at both ends, a
+silent source and a slow-motion clip, with all three passes at exactly
+286650 sample-frames -- well under one float32 LSB and therefore
+bit-identical once quantized. One measured imperfection, pre-existing
+and unrelated to room tone: where per-clip frame counts are odd the
+half-sample roundings accumulate and the stem can come out a sample or
+two SHORTER than the render's audio (536549 against 536551 on a
+12.1667s three-clip timeline, identically with the toggle off and on),
+where the anullsrc skeleton and the real-audio path round differently
+-- about 45 microseconds, not an alignment error.
 
 
 10. REFORMAT: THE ONE-SHOT RESIZE OUTSIDE THE TIMELINE
@@ -1281,10 +1352,14 @@ Every client-supplied filename is resolved through a traversal guard
     its cap on the first attempt and pay for a full two-pass retry.
     Lower the safety headroom for those.
 
-  - Room tone in the trail gap is silenced whenever a bed is loaded,
-    by gap POSITION rather than by measuring how far the bed actually
-    reaches. A bed shorter than the sequence therefore leaves its own
-    tail silent, and that tail is not room-tone-filled either.
+  - amix normalize=0 is an exact sum, so headroom is the caller's
+    problem. Clip audio at full scale plus a 0.35 bed already reaches
+    +2.61 dBFS with no tone at all, and AAC does not clamp it (a hot
+    test measured +3.44 dB surviving the encode). Room tone adds
+    nothing to that, since it plays only where nothing else does: the
+    render peak is max(existing peak, -12.83 dBFS), measured unchanged
+    at -9.06 dBFS with the toggle off and on. The bed's exposure is
+    real; the tone's is not.
 
   - Which routes honor a custom export directory is not uniform.
     Writing: render_timeline, render_a1 and reformat use

@@ -637,8 +637,10 @@ export default function Timeline({
             them. Amber for the same reason — indigo is V1's and teal is V2's,
             and amber is already the A1 Room Tone toggle's color, so the audio
             actions read as one family. Shown only when there is something on
-            A1 to render — a loaded track, or A1 Room Tone on (room tone in the
-            holds is A1 content too) — the same "appears with its track" rule
+            A1 to render — a loaded track, or A1 Room Tone on (the fill is A1
+            content too, and on a sequence with any silence in it that alone
+            makes a usable stem; when there is none, the server says so instead
+            of writing an empty file) — the same "appears with its track" rule
             Render V2 follows. */}
         {(audioBeds.length > 0 || noiseEnabled) && (
           <button

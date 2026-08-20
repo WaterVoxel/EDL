@@ -13,10 +13,64 @@ OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output")
 # listable, or deletable through any route — assets are referenced by the code
 # that needs them, never by name from the client.
 ASSETS_DIR = os.path.join(PROJECT_ROOT, "frontend", "assets")
-# Room tone used to fill the silent gaps a hold/round/slow-down would otherwise
-# leave in the audio track (see build_timeline_filter's fill_noise). It is only
-# ~3 s long, so every use aloops it and atrims to the exact gap length.
+# Room tone: a continuous noise floor laid under the ENTIRE rendered sequence,
+# so nothing in the audio track is ever pure digital silence (see
+# build_timeline_filter's fill_noise). It is only ~3 s long, so every use aloops
+# it endlessly and lets amix cut it to length.
 NOISE_ASSET = os.path.join(ASSETS_DIR, "Audio_NOISE.wav")
+# Where to cut the asset before looping it, in its OWN 48 kHz sample domain.
+#
+# Hand-measured on this exact file (144144 frames = 3.003000 s): the recording
+# fades out and then dies. Frames 143174..144143 are the dead tail — a fade
+# through a -100 dBFS window into 856 frames (17.83 ms) of literal (0, 0) — while
+# everything before 143174 holds the material's normal level (5 ms windows run
+# -36.9 to -42.0 dBFS, and it re-enters the loop at -39.5). Loop the whole file
+# and that tail becomes a 17.8 ms digital-silence DROPOUT once every 3.003 s: a
+# 0.333 Hz pulse in the noise floor, 78 of them in a two-minute render, which is
+# audible as pumping and defeats the entire point of the layer. A 50 ms RMS scan
+# cannot see it (min -29 dBFS, no -inf windows); it takes a 5 ms scan.
+#
+# Cutting here makes the seam a small step between -42 and -39.5 dBFS material,
+# i.e. inside the noise's own window-to-window variation, and the loop period
+# 2.982792 s. The trim MUST stay ahead of the aformat resample, since this index
+# counts the asset's own 48 kHz frames. Re-measure if the asset is ever replaced:
+# a different file's tail is a different number, and a wrong one either restores
+# the dropout or truncates good material.
+NOISE_LOOP_END_SAMPLE = 143174
+
+# How much extra room tone to generate past the end of the sequence, for the
+# final amix to throw away.
+#
+# The tone track is built per clip and pinned to each clip's expected_sec, but
+# it cannot be relied on to come out the SAME number of samples as the clips'
+# own audio: that stream is a different concat of the same durations (real
+# atrim'd audio, or three anullsrc pieces where this has one merged run), and
+# apad/atrim can settle a half-sample differently on each. Measured on
+# projects/Batch02_v2: the clips' audio came out 441001 sample-frames where the
+# tone track came out 441000, and amix (which treats an input that has ended as
+# silence, by design, with normalize=0) then left the render's very last
+# sample-frame a literal (0, 0) — the toggle ON and a digital-silence hole in
+# the output anyway.
+#
+# Rather than chase a rounding match that would have to hold for every possible
+# piece structure, the last clip's tone segment is simply built this much longer
+# and `amix=duration=first` cuts it back. That makes the tone track's own length
+# a non-issue by construction. 50 ms is enormous next to the error it absorbs
+# (at most one sample per clip, so ~2.3 ms even at 100 clips) and costs nothing:
+# it is trimmed before it reaches the encoder. Two rules follow, and both
+# callers obey them: the tone layer must never be amix's FIRST input, and must
+# never be mapped straight to an output.
+NOISE_TAIL_MARGIN_SEC = 0.05
+# The asset is quiet: it measures -39.0 dB RMS / -24.9 dB peak on its own, and
+# against pure digital silence that is easy to miss entirely on laptop speakers
+# — which is why the fill kept reading as "not working" when it was in fact
+# there at full asset level. The tone layer lifts it by this much. Applied in
+# exactly ONE place — noise_layer(), which both build_timeline_filter and
+# build_a1_filter call — so the two can never disagree about level: the A1
+# stem's sample-for-sample equivalence with the V1 render depends on it. The
+# layer is SUMMED in at the end of the graph and changes no gap's length, so no
+# video frame and no dialogue sample moves whether the toggle is on or off.
+NOISE_GAIN_DB = 12.0
 
 
 def _tool(name):
@@ -103,6 +157,7 @@ def get_video_info(path):
     audio_sample_rate = None
     audio_channels = None
     audio_bit_rate = None
+    audio_duration = None
     nb_frames = None
     video_duration = None
     video_profile = None
@@ -139,6 +194,16 @@ def get_video_info(path):
             audio_sample_rate = stream.get("sample_rate")
             audio_channels = stream.get("channels")
             audio_bit_rate = stream.get("bit_rate")
+            # The audio stream's own duration, for the same reason
+            # video_duration is tracked: the container duration reflects the
+            # LONGEST stream. How far an A1 clip's sound actually reaches is
+            # what decides where room tone may be laid (see noise_fill_plan),
+            # and a file whose video runs past its audio would otherwise be
+            # credited with sound it does not have.
+            try:
+                audio_duration = float(stream["duration"])
+            except (KeyError, ValueError, TypeError):
+                audio_duration = None
     browser_playable = (
         video_codec in BROWSER_SAFE_VIDEO_CODECS
         and audio_codec in BROWSER_SAFE_AUDIO_CODECS
@@ -163,6 +228,7 @@ def get_video_info(path):
         "audio_sample_rate": int(audio_sample_rate) if audio_sample_rate else None,
         "audio_channels": audio_channels,
         "audio_bit_rate": int(audio_bit_rate) if audio_bit_rate else None,
+        "audio_duration": audio_duration if audio_duration is not None else (duration if has_audio else 0.0),
         "browser_playable": browser_playable,
         "format_name": fmt.get("format_long_name") or fmt.get("format_name"),
         "size_bytes": int(fmt.get("size")) if fmt.get("size") else os.path.getsize(path),
@@ -1048,9 +1114,12 @@ def a1_bed_source(bed_indices, sample_rate, channel_layout, prefix, chains):
     concat is what makes that literal — it butt-joins the streams with no gap
     and no overlap, so the lane's length is the plain sum of its clips and
     everything downstream still sees a single stream. Placing each clip with its
-    own adelay and summing them instead would have needed amix=inputs=N+1, which
-    would run V1's own audio through a different sum than the hand-verified
-    unity-gain two-input one. A1 is the part that changed; the mix must not.
+    own adelay and summing them instead would have grown the final amix to one
+    input per bed file, making the render's level depend on how many files happen
+    to sit on A1. Keeping the lane a single stream keeps that mix at a fixed
+    width — one clip layer, one bed, and room tone when it is on — which is what
+    the unity-gain sum was verified at (measured max error 1.5e-08 across three
+    inputs, well under a float32 LSB, with normalize=0 doing the work).
 
     Each input is aformat-ed to the graph's rate/layout BEFORE the concat, since
     concat requires its inputs to agree and an A1 lane routinely holds a 48 kHz
@@ -1074,8 +1143,250 @@ def a1_bed_source(bed_indices, sample_rate, channel_layout, prefix, chains):
     return f"[{prefix}cat]"
 
 
+def noise_slice(index, duration, label, sample_rate, channel_layout):
+    """Exactly `duration` seconds of room tone into `label`.
+
+    `index` is an ffmpeg input index pointing at NOISE_ASSET. The single place
+    the tone chain and its level are written — noise_track calls it for every
+    stretch of silence it fills, in both the V1 render and the A1 stem, so the
+    two carry bit-identical tone samples.
+
+    The SAME input pad may be sliced any number of times: ffmpeg auto-splits a
+    raw input pad across consumers, so each slice gets its own independent
+    aloop and its own atrim. Verified by hand — five slices of one asset
+    concatenated with silence between them came out at exactly the requested
+    5.25 s, with each region's RMS landing where the plan said it would
+    (-27 dBFS in the tone stretches, digital zero in the others).
+
+    The leading atrim drops the asset's dead tail so the loop has no dropout in
+    it (see NOISE_LOOP_END_SAMPLE — without it the tone goes silent for 17.8 ms
+    every 3.003 s, which is exactly the pumping the fill is supposed to
+    prevent). It comes FIRST, before the resample, because that index counts
+    the asset's own 48 kHz frames.
+
+    size is the per-iteration sample count aloop buffers; the asset is far
+    shorter than this cap, so one iteration holds all of it and loop=-1 repeats
+    it forever. volume lifts the quiet asset to something audible
+    (NOISE_GAIN_DB), and aformat conforms it to the graph's rate/layout (the
+    asset is 48k stereo while the graph runs at sample_rate) before the closing
+    atrim, so that atrim's `end` is measured in the graph's own seconds.
+    """
+    return (f"[{index}:a]atrim=end_sample={NOISE_LOOP_END_SAMPLE},asetpts=PTS-STARTPTS,"
+            f"aloop=loop=-1:size=2147483647,asetpts=PTS-STARTPTS,"
+            f"volume={NOISE_GAIN_DB}dB,"
+            f"aformat=sample_rates={sample_rate}:channel_layouts={channel_layout},"
+            f"atrim=end={duration},asetpts=PTS-STARTPTS{label}")
+
+
+def clip_audio_pieces(spec, timing, sample_rate):
+    """One clip's audio timeline as ordered (has_sound, duration) pieces.
+
+    A mirror of the audio pieces build_timeline_filter actually emits for this
+    clip, in the same order and with the same durations — lead-hold silence,
+    the body, trail-hold silence (which already includes any Raise round-up,
+    folded in by the caller) — labelled with whether that piece carries the
+    clip's OWN sound. It is the input to noise_fill_plan, and it is a separate
+    function so the "where is there sound?" question has exactly one answer
+    shared by the V1 render and the A1 stem.
+
+    Three ways a body ends up silent, all of them real cases from the UI:
+      * speed != 1: a slow-down is a pure PTS stretch with no audio (see
+        build_timeline_filter), so the body is a gap of the stretched length.
+      * has_audio false: the source has no audio stream at all.
+      * otherwise the body is the clip's own audio, atrim'd to the trim window.
+
+    The final piece is the SLACK: build_timeline_filter pads each clip's
+    concatenated audio to expected_sec with apad, which appends silence, and
+    the pieces above can sum to less than expected_sec because expected_sec
+    counts the body in whole FRAMES (n_main/fps) while the body piece spans the
+    raw trim window. On a trim that is not frame-aligned that leaves up to one
+    frame of apad silence at the clip's tail — 41 ms at 24 fps, audible as a
+    hole — so it is accounted for here rather than left for the fill to miss.
+    Negative slack needs no piece: the per-clip atrim cuts it either way.
+    """
+    lead_frames, trail_frames, expected_sec = timing
+    fps = spec["fps"] or 30.0
+    speed = spec.get("speed") or 1.0
+    pieces = []
+    if lead_frames > 0:
+        pieces.append((False, lead_frames / fps))
+    body = spec["outSec"] - spec["inSec"]
+    if speed != 1.0:
+        pieces.append((False, body / speed))
+    else:
+        pieces.append((bool(spec.get("has_audio")), body))
+    if trail_frames > 0:
+        pieces.append((False, trail_frames / fps))
+    slack = expected_sec - sum(d for _, d in pieces)
+    if slack > 0.5 / sample_rate:
+        pieces.append((False, slack))
+    return pieces
+
+
+def noise_fill_plan(clip_specs, timings, sample_rate,
+                    bed_start_sec=0.0, bed_end_sec=0.0):
+    """Where room tone goes: per clip, an ordered list of [is_tone, duration].
+
+    Room tone fills silence and ONLY silence. A stretch is silent when neither
+    the V1 clip's own audio nor the A1 bed reaches it, so this subtracts both:
+    clip_audio_pieces says where each clip's sound is, and [bed_start_sec,
+    bed_end_sec) says how far the bed's sound actually reaches (measured from
+    its probed audio-stream duration by the caller, NOT assumed from its
+    position on the lane).
+
+    That is the whole point of this function. The first version of the toggle
+    decided eligibility by gap POSITION — `{"head_hold"} if audio_beds else
+    {"head_hold", "trail_hold", "body"}` — and since every real project here
+    has an A1 bed and no head hold, the eligible set came out EMPTY and the
+    toggle silently did nothing. The version after that went to the opposite
+    extreme, one continuous layer under the entire sequence, which did fill
+    every gap but also laid tone over dialogue and over the bed. Measuring the
+    coverage is what satisfies both: no silence left, nothing played over.
+
+    Returned per clip rather than as one flat list because noise_track has to
+    rebuild the same per-clip apad/atrim quantization the audio branch uses; a
+    single flat span of total_sec rounds differently and leaves a hole at the
+    end (a 10.0 s three-clip timeline measures 441001 samples of clip audio
+    against 441000 for one atrim=end=10.0).
+
+    Runs of the same kind are merged, so the graph carries one node per audible
+    boundary rather than one per piece. A sub-piece shorter than half a sample
+    is dropped: it would round to zero samples anyway, and the per-clip
+    apad/atrim in noise_track pins the segment's length regardless.
+    """
+    half_sample = 0.5 / sample_rate
+    plan = []
+    seq_pos = 0.0
+    for spec, timing in zip(clip_specs, timings):
+        runs = []
+        for has_sound, dur in clip_audio_pieces(spec, timing, sample_rate):
+            start, end = seq_pos, seq_pos + dur
+            seq_pos = end
+            if has_sound:
+                spans = [(False, start, end)]
+            else:
+                # The bed's reach clipped into this piece, splitting it into at
+                # most tone / bed / tone. min-of-max clamps keep both cut
+                # points inside [start, end] however the bed span falls.
+                cut_a = min(max(bed_start_sec, start), end)
+                cut_b = min(max(bed_end_sec, start), end)
+                spans = [(True, start, cut_a), (False, cut_a, cut_b), (True, cut_b, end)]
+            for is_tone, a, b in spans:
+                if b - a <= half_sample:
+                    continue
+                if runs and runs[-1][0] == is_tone:
+                    runs[-1][1] += b - a
+                else:
+                    runs.append([is_tone, b - a])
+        plan.append(runs)
+    return plan
+
+
+def noise_fill_seconds(plan):
+    """How much room tone `plan` actually lays, in seconds. Zero means the
+    timeline has no silence to fill, which both builders treat as "emit no tone
+    layer at all" and the routes report back so the toggle cannot look broken
+    when it is merely unnecessary."""
+    return sum(dur for runs in plan for is_tone, dur in runs if is_tone)
+
+
+def noise_fill_summary(clip_specs, sample_rate=44100, bed_reach_sec=0.0, has_bed=False):
+    """(tone_sec, total_sec) for a timeline: how much silence room tone would
+    fill, and how long the sequence runs.
+
+    For the routes to report back, so "I turned it on and heard nothing" has an
+    answer in the response instead of needing a render to diagnose. It recomputes
+    the plan rather than having the builders hand it back — the plan is pure and
+    cheap (no ffmpeg, no probing beyond the specs the caller already has), and a
+    second return value threaded out of two builders would be paid for on every
+    render including the ones with the toggle off.
+    """
+    timings = [clip_timing(spec) for spec in clip_specs]
+    plan = noise_fill_plan(
+        clip_specs, timings, sample_rate,
+        *(bed_span(clip_specs, timings, bed_reach_sec) if has_bed else (0.0, 0.0))
+    )
+    return noise_fill_seconds(plan), sum(t[2] for t in timings)
+
+
+def noise_track(index, plan, timings, sample_rate, channel_layout, prefix, chains):
+    """Room tone as ONE stream, exactly as long as the sequence, silent
+    wherever something else is already playing. Returns its label and appends
+    its nodes to `chains`; returns None when `plan` fills nothing.
+
+    Built per clip, from `plan`, and normalized with the SAME
+    aformat → apad=whole_dur → atrim=end → asetpts the clip-audio branch and the
+    bed branch use, so every internal boundary lands on the audio it belongs to.
+
+    The LAST clip's segment is deliberately built NOISE_TAIL_MARGIN_SEC too long
+    (the margin extends its final run, so a tail that should be tone gets tone
+    rather than silence) and amix cuts it back — see that constant for the
+    one-sample hole this exists to close. So this layer must never be amix's
+    first input and must never be mapped straight to an output.
+    """
+    seg_labels = []
+    last = len(plan) - 1
+    for i, runs in enumerate(plan):
+        # The margin lands on the final run's duration AND on this segment's own
+        # target length, so it is generated rather than padded away.
+        margin = NOISE_TAIL_MARGIN_SEC if i == last else 0.0
+        expected_sec = timings[i][2] + margin
+        runs = [[t, d] for t, d in runs]
+        runs[-1][1] += margin
+        parts = []
+        for k, (is_tone, dur) in enumerate(runs):
+            label = f"[{prefix}{i}_{k}]"
+            if is_tone:
+                chains.append(noise_slice(index, dur, label, sample_rate, channel_layout))
+            else:
+                chains.append(
+                    f"anullsrc=channel_layout={channel_layout}:sample_rate={sample_rate}:"
+                    f"duration={dur}{label}"
+                )
+            parts.append(label)
+        if len(parts) > 1:
+            chains.append(f"{''.join(parts)}concat=n={len(parts)}:v=0:a=1[{prefix}cat{i}]")
+            seg_src = f"[{prefix}cat{i}]"
+        else:
+            seg_src = parts[0]
+        chains.append(
+            f"{seg_src}aformat=sample_rates={sample_rate}:channel_layouts={channel_layout},"
+            f"apad=whole_dur={expected_sec},atrim=end={expected_sec},"
+            f"asetpts=PTS-STARTPTS[{prefix}seg{i}]"
+        )
+        seg_labels.append(f"[{prefix}seg{i}]")
+
+    if len(seg_labels) > 1:
+        chains.append(f"{''.join(seg_labels)}concat=n={len(seg_labels)}:v=0:a=1[{prefix}out]")
+        return f"[{prefix}out]"
+    return seg_labels[0]
+
+
+def bed_span(clip_specs, timings, bed_reach_sec):
+    """The stretch of the rendered sequence the A1 bed's own sound covers, as
+    (start_sec, end_sec) — what noise_fill_plan subtracts.
+
+    Start is the first clip's head hold, because that is what the bed is
+    adelay'd by (see build_timeline_filter). End is start plus how much audio
+    the lane actually carries, clamped to the sequence: the render pads a short
+    bed with silence and cuts a long one, so neither extends its sound.
+
+    bed_reach_sec must be the summed AUDIO-STREAM duration of the lane's files
+    (get_video_info's audio_duration), not their container durations. A file
+    whose container runs past its audio would otherwise be credited with sound
+    it does not have, and the tone would leave that stretch silent — the exact
+    failure this replaced. The two agree for ordinary audio files; where they
+    differ the container is the longer one, so an error here costs a few ms of
+    unfilled silence rather than tone over music.
+    """
+    fps0 = clip_specs[0]["fps"] or 30.0
+    total_sec = sum(t[2] for t in timings)
+    start = min(timings[0][0] / fps0, total_sec)
+    return start, min(start + max(bed_reach_sec or 0.0, 0.0), total_sec)
+
+
 def build_a1_filter(clip_specs, sample_rate=44100, channel_layout="stereo",
-                    audio_beds=None, fill_noise=None):
+                    audio_beds=None, fill_noise=None, bed_reach_sec=0.0):
     """Build a filter_complex that renders the A1 track ALONE as [outa].
 
     This is the audio-only counterpart to build_timeline_filter: same A1
@@ -1090,19 +1401,22 @@ def build_a1_filter(clip_specs, sample_rate=44100, channel_layout="stereo",
     frame-quantized truth the V1 graph pads its bed to) and the same adelay →
     aformat → apad/atrim → volume=BED_GAIN bed chain, node for node.
 
-    clip_specs only needs the timing keys (inSec, outSec, fps, speed,
-    lead_hold_sec, trail_hold_sec, video_duration) — crop, overlay, reverse and
-    has_audio cannot change a length, so they are ignored here. NO clip input is
-    referenced by the returned graph at all: the only inputs are the bed and the
+    clip_specs needs the timing keys (inSec, outSec, fps, speed, lead_hold_sec,
+    trail_hold_sec, video_duration); crop, overlay and reverse cannot change a
+    length, so they are ignored here. has_audio IS read, even though this render
+    contains no clip audio: it is one of the things that decides where room tone
+    may go, and the answer has to match the V1 render's exactly. NO clip input is
+    referenced by the returned graph at all — the only inputs are the bed and the
     noise asset, which is what makes an A1 render cheap (no video decode).
 
     audio_beds / fill_noise are input indices, as in build_timeline_filter, and
-    obey the same noise rule: room tone fills a HOLD gap only, and never where
-    the bed can be heard — so with a bed the head hold is room tone and the rest
-    of the track is bed, and with no bed at all the head and trail holds are
-    room tone over silence. At least one of the two must be given; with neither
-    there is no A1 track to render and the caller gets a ValueError rather than
-    a silent file.
+    bed_reach_sec is how much audio the lane carries; all three obey the same
+    room-tone rule (see noise_fill_plan). Room tone fills the silence this stem
+    would otherwise have AND the silence the V1 render would otherwise have, which
+    is the same set: the stem's job is to be the A1 contribution to that render.
+    At least one of bed/noise must be given, and if room tone is the only one
+    asked for on a timeline with nothing to fill the caller gets a ValueError
+    rather than a silent file.
     """
     if not audio_beds and fill_noise is None:
         raise ValueError("build_a1_filter needs an audio_beds, a fill_noise, or both")
@@ -1110,84 +1424,129 @@ def build_a1_filter(clip_specs, sample_rate=44100, channel_layout="stereo",
         raise ValueError("build_a1_filter needs at least one clip to take its timing from")
 
     timings = [clip_timing(spec) for spec in clip_specs]
+    # The bed's delay, and the whole stem's length: clip 0's head hold (the only
+    # clip a lead hold may live on) and the sum of every clip's expected_sec.
+    # Individual gap durations come from the per-clip loop below, not from here.
     fps0 = clip_specs[0]["fps"] or 30.0
     head_sec = timings[0][0] / fps0
     total_sec = sum(t[2] for t in timings)
-    # The trail hold lives on the LAST clip (the caller contract the V1 graph
-    # relies on too), and its gap is the last trail_frames/fps of the sequence.
-    fps_last = clip_specs[-1]["fps"] or 30.0
-    tail_sec = timings[-1][1] / fps_last
+
+    # Room tone's placement, decided before anything is emitted: an empty plan
+    # means no tone layer, which can leave nothing to render at all.
+    tone_chains = []
+    tone_label = None
+    if fill_noise is not None:
+        plan = noise_fill_plan(
+            clip_specs, timings, sample_rate,
+            *(bed_span(clip_specs, timings, bed_reach_sec) if audio_beds else (0.0, 0.0))
+        )
+        if noise_fill_seconds(plan) > 0:
+            tone_label = noise_track(fill_noise, plan, timings, sample_rate,
+                                     channel_layout, "a1nt", tone_chains)
+        elif not audio_beds:
+            raise ValueError(
+                "room tone has nothing to fill on this timeline: every part of the "
+                "sequence already carries audio, so an A1 render would be silent"
+            )
 
     chains = []
 
-    def noise_piece(duration, label):
-        """Room tone cut to `duration` — the same chain build_timeline_filter emits."""
-        return (f"[{fill_noise}:a]aloop=loop=-1:size=2147483647,"
-                f"atrim=end={duration},asetpts=PTS-STARTPTS,"
-                f"aformat=sample_rates={sample_rate}:channel_layouts={channel_layout}{label}")
-
-    def silence_piece(duration, label):
+    def gap_piece(duration, label):
         return (f"anullsrc=channel_layout={channel_layout}:sample_rate={sample_rate}:"
                 f"duration={duration}{label}")
 
-    # The gap layer: room tone where a hold is eligible for it, silence
-    # everywhere else, assembled head → middle → tail so the pieces total
-    # exactly total_sec. With a bed, only the head is eligible (the bed covers
-    # the tail — see build_timeline_filter's noise_gaps), so the tail piece is
-    # silence and the layer is just "room tone, then silence".
-    head_noise = fill_noise is not None and head_sec > 0
-    tail_noise = fill_noise is not None and not audio_beds and tail_sec > 0
-    pieces = []
-    if head_sec > 0:
-        chains.append((noise_piece if head_noise else silence_piece)(head_sec, "[a1head]"))
-        pieces.append("[a1head]")
-    middle_sec = total_sec - head_sec - (tail_sec if tail_noise else 0)
-    if middle_sec > 1e-9:
-        chains.append(silence_piece(middle_sec, "[a1mid]"))
-        pieces.append("[a1mid]")
-    if tail_noise:
-        chains.append(noise_piece(tail_sec, "[a1tail]"))
-        pieces.append("[a1tail]")
+    # The silence skeleton, built clip by clip as the SAME pieces
+    # build_timeline_filter emits for the same timeline — same order, same
+    # durations, same per-clip apad/atrim to expected_sec. It carries no sound of
+    # its own (this stem holds no clip audio, and room tone is a layer mixed in
+    # below); what it carries is the LENGTH, and it is built per clip rather than
+    # as one anullsrc of total_sec so the stem is quantized exactly the way the
+    # V1 render's [aseq] is — per clip, then summed. That is what makes the two
+    # files the same number of samples long, which is the whole point of an A1
+    # stem.
+    seg_labels = []
+    for i, spec in enumerate(clip_specs):
+        lead_frames, trail_frames, expected_sec = timings[i]
+        fps = spec["fps"] or 30.0
+        speed = spec.get("speed") or 1.0
+        pieces = []
+        if lead_frames > 0:
+            chains.append(gap_piece(lead_frames / fps, f"[a1lead{i}]"))
+            pieces.append(f"[a1lead{i}]")
+        # The body's length is the raw trim window stretched by speed — the same
+        # value build_timeline_filter's own body piece spans, which differs from
+        # the frame-quantized n_main/fps by up to one frame on a non-frame-aligned
+        # trim. The per-clip apad/atrim below settles that difference the same way
+        # in both functions, which is why it is written the same way in both.
+        chains.append(gap_piece((spec["outSec"] - spec["inSec"]) / speed, f"[a1body{i}]"))
+        pieces.append(f"[a1body{i}]")
+        if trail_frames > 0:
+            chains.append(gap_piece(trail_frames / fps, f"[a1trail{i}]"))
+            pieces.append(f"[a1trail{i}]")
 
-    if len(pieces) > 1:
-        chains.append(f"{''.join(pieces)}concat=n={len(pieces)}:v=0:a=1[a1gaps]")
+        if len(pieces) > 1:
+            chains.append(f"{''.join(pieces)}concat=n={len(pieces)}:v=0:a=1[a1cat{i}]")
+            seg_src = f"[a1cat{i}]"
+        else:
+            seg_src = pieces[0]
+        chains.append(
+            f"{seg_src}aformat=sample_rates={sample_rate}:channel_layouts={channel_layout},"
+            f"apad=whole_dur={expected_sec},atrim=end={expected_sec},asetpts=PTS-STARTPTS[a1seg{i}]"
+        )
+        seg_labels.append(f"[a1seg{i}]")
+
+    if len(seg_labels) > 1:
+        chains.append(f"{''.join(seg_labels)}concat=n={len(seg_labels)}:v=0:a=1[a1gaps]")
         gaps_label = "[a1gaps]"
     else:
-        gaps_label = pieces[0]
+        gaps_label = seg_labels[0]
 
-    if not audio_beds:
-        # Room tone alone: pad/trim so the length is the sequence's, exactly as
-        # the bed branch below would.
+    # Layers summed into [outa], skeleton first — the same order and the same
+    # amix settings the V1 mix uses, so a layer can never lengthen the stem.
+    layers = [gaps_label]
+
+    if audio_beds:
+        # The bed branch, node for node as build_timeline_filter builds it — same
+        # sequential concat of the lane's clips, same adelay (prepends silence, so
+        # the pad below still measures from 0), same frame-quantized offset, same
+        # BED_GAIN — so this render and the V1 one carry bit-identical bed samples.
+        bed_src = a1_bed_source(audio_beds, sample_rate, channel_layout, "a1b", chains)
+        if head_sec > 0:
+            delay_ms = round(head_sec * 1000)
+            chains.append(f"{bed_src}adelay=delays={delay_ms}:all=1[a1bdel]")
+            bed_src = "[a1bdel]"
         chains.append(
-            f"{gaps_label}aformat=sample_rates={sample_rate}:channel_layouts={channel_layout},"
-            f"apad=whole_dur={total_sec},atrim=end={total_sec},asetpts=PTS-STARTPTS[outa]"
+            f"{bed_src}aformat=sample_rates={sample_rate}:channel_layouts={channel_layout},"
+            f"apad=whole_dur={total_sec},atrim=end={total_sec},asetpts=PTS-STARTPTS,"
+            f"volume={BED_GAIN}[a1bed]"
         )
-        return ";".join(chains)
+        layers.append("[a1bed]")
 
-    # The bed branch, node for node as build_timeline_filter builds it — same
-    # sequential concat of the lane's clips, same adelay (prepends silence, so
-    # the pad below still measures from 0), same frame-quantized offset, same
-    # BED_GAIN — so this render and the V1 one carry bit-identical bed samples.
-    bed_src = a1_bed_source(audio_beds, sample_rate, channel_layout, "a1b", chains)
-    if head_sec > 0:
-        delay_ms = round(head_sec * 1000)
-        chains.append(f"{bed_src}adelay=delays={delay_ms}:all=1[a1bdel]")
-        bed_src = "[a1bdel]"
+    if tone_label:
+        # Room tone in exactly the stretches the V1 render puts it in, from the
+        # same plan and the same slice helper, so this file carries the V1
+        # render's tone sample for sample. Every stretch it fills is one the V1
+        # render has nothing else in either — the clips' audio is absent from
+        # this graph, but the plan was built from the clip specs, so it knows
+        # where that audio would have been and stays out of it.
+        chains.extend(tone_chains)
+        layers.append(tone_label)
+
+    # duration=first keeps the skeleton in charge of the length, and normalize=0
+    # makes the sum unity-gain: the same two settings the V1 mix uses. Every
+    # layer is independently built to total_sec, so no layer can move the length
+    # whatever order they come in. A lone skeleton never reaches here — a caller
+    # with neither a bed nor anything to fill was rejected above.
     chains.append(
-        f"{bed_src}aformat=sample_rates={sample_rate}:channel_layouts={channel_layout},"
-        f"apad=whole_dur={total_sec},atrim=end={total_sec},asetpts=PTS-STARTPTS,"
-        f"volume={BED_GAIN}[a1bed]"
+        f"{''.join(layers)}amix=inputs={len(layers)}:duration=first:"
+        f"dropout_transition=0:normalize=0[outa]"
     )
-    # duration=first keeps the gap layer (already exactly total_sec) in charge of
-    # the length, and normalize=0 makes the sum unity-gain — the same two
-    # settings the V1 mix uses.
-    chains.append(f"{gaps_label}[a1bed]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[outa]")
     return ";".join(chains)
 
 
 def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
                            sample_rate=44100, channel_layout="stereo", no_audio=False,
-                           audio_beds=None, fill_noise=None):
+                           audio_beds=None, fill_noise=None, bed_reach_sec=0.0):
     """Build one filter_complex string that renders an entire timeline (a
     sequence of trimmed clips, each optionally extended by a frozen-frame
     hold at its lead and/or trail edge, and optionally played backwards)
@@ -1253,32 +1612,44 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
     into) and raises ValueError rather than silently dropping one of them.
 
     fill_noise is an input index (like an audio_beds entry) pointing at NOISE_ASSET.
-    When given, the HOLD gaps this function would otherwise fill with anullsrc
-    silence are filled with room tone from that input instead: the head hold,
-    and the trail hold (which already includes the Raise round-up extension,
-    folded in by the caller). Room tone is a patch over a frozen frame, so it
-    fills nothing else — a slowed main segment and a silent source's main
-    segment are gaps too, but each runs the full length of the picture it
-    carries, which would make the room tone a bed under moving video rather
-    than a patch; both stay pure silence.
+    When given, room tone FILLS THE SILENCE AND NOTHING ELSE: one layer as long as
+    the sequence, carrying tone wherever neither a clip's own audio nor the A1 bed
+    reaches and digital silence wherever one of them does, summed into the mix as
+    one more amix input exactly the way the bed is. So the head hold, the trail
+    hold (which already includes the Raise round-up extension, folded in by the
+    caller), a slowed segment's stretched body, the body of a clip whose source
+    has no audio stream, the sub-frame apad sliver at a clip's tail, and the
+    stretch past the end of a short A1 lane all come out as room tone — while
+    dialogue and the bed play at exactly the level they would with the toggle off.
 
-    Noise is also never audible at the same time as the A1 bed. The head hold
-    is inherently safe (the bed is delayed past it — see audio_beds above), but
-    the trail hold sits at the sequence's end with the bed still summed over
-    it, so passing audio_beds and fill_noise TOGETHER silences the trail gap:
-    with a bed loaded, only the head hold gets room tone. (Consequence worth
-    knowing: a bed shorter than the sequence leaves its own tail silent, and
-    that tail is not noise-filled either — the rule is enforced by gap
-    position, not by measuring how far the bed actually reaches.)
+    bed_reach_sec is how many seconds of audio the A1 lane actually carries (the
+    summed audio-stream durations of its files), and it is what keeps tone off the
+    bed. It is MEASURED rather than inferred from the lane's position, which is the
+    whole history of this feature: eligibility used to be decided by gap POSITION —
+    `{"head_hold"} if audio_beds else {...}` — so a timeline with a bed and no head
+    hold, the ordinary case here, had no eligible gap at all and the toggle emitted
+    nothing while the UI claimed it was filling every gap. Going to one continuous
+    layer under everything fixed the silence but laid tone over the dialogue and
+    the music, which is not what a fill is. Measuring the coverage is what does
+    both, and it also handles the case position never could: a bed SHORTER than the
+    sequence now gets tone from where its sound stops, not from where its lane ends.
 
-    Nothing else changes — a clip's real audio is never touched, and the gap
-    LENGTHS are identical either way, so switching noise on or off cannot move
-    a single sample of dialogue or change any video frame.
-    The asset is only ~3s, so each gap aloops it and atrims to the exact
-    quantized gap length; a 10s hold works. Every gap reads the SAME input
-    pad, which ffmpeg auto-splits (verified) — unlike a filter-produced
-    label, a raw input pad needs no explicit asplit. Requires no_audio to be
-    False for the same reason a bed does: there is no audio graph to fill.
+    See noise_fill_plan for the placement and noise_track for the graph. Because
+    the layer is summed at the very end, it changes no gap's LENGTH: every gap is
+    still anullsrc silence of exactly the duration it always was, so switching
+    noise on or off cannot move a single sample of dialogue or change any video
+    frame (hand-verified by framemd5 with and without it). Where it does play it
+    raises the mix by its own level, so a full-scale source in a gap-free stretch
+    is unaffected but a bed under a silent clip body sums with it — amix
+    normalize=0 is a plain unity-gain sum.
+
+    A timeline with no silence at all (every clip carrying audio at speed 1, no
+    holds, a bed at least as long as the sequence) has nothing for the toggle to
+    do. That emits NO tone layer — the graph comes out identical to the same
+    render with the toggle off, rather than carrying a layer of pure silence.
+
+    Requires no_audio to be False for the same reason a bed does: there is no
+    audio graph to mix into.
 
     clip_specs[i] is a dict: {inSec, outSec, fps, has_audio, lead_hold_sec,
     trail_hold_sec, reversed, video_duration, crop}. lead_hold_sec should only be
@@ -1372,46 +1743,19 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
     if no_audio and fill_noise is not None:
         raise ValueError("fill_noise cannot be used with no_audio=True: there is no audio graph to fill")
 
-    # Which KINDS of gap room tone is allowed to fill. Two rules, both about
-    # noise never being heard alongside real audio:
-    #
-    #  * "hold" gaps only. A slowed segment's gap and a silent source's body
-    #    are gaps too, but they run as long as the picture they carry, so
-    #    filling them turns room tone into a bed under the video instead of a
-    #    patch over a frozen frame. Those stay pure silence.
-    #  * With an A1 bed, the TRAIL gap drops back to silence as well. The bed
-    #    is summed over the whole sequence (amix, at the end of this function),
-    #    and the trail hold — tail hold plus the Raise round-up, folded
-    #    together by the caller — sits at the sequence's END, under the bed;
-    #    that is the one place noise and the bed would sound at once. The HEAD
-    #    gap needs no such guard: the bed is delayed past it by construction
-    #    (bed_offset_sec below), so the head hold is bed-free. Both halves of
-    #    that rely on the same caller contract the bed offset already does —
-    #    lead holds only on clip 0, trail holds only on the last clip.
-    noise_gaps = {"head_hold"} if audio_beds else {"head_hold", "trail_hold"}
-
-    def gap_chain(duration, label, kind):
+    def gap_chain(duration, label):
         """Emit the chain filling one `duration`-second audio gap into `label`.
 
-        The one place gap audio is generated, so silence and noise can never
-        disagree about a gap's LENGTH — only about what it contains. `duration`
-        is always an already-frame-quantized value from the caller. `kind` is
-        "head_hold", "trail_hold", or "body", and decides only whether this gap
-        is eligible for room tone (see noise_gaps above); the emitted length is
-        identical either way.
+        Always plain digital silence, whatever the room-tone toggle says. Room
+        tone is a separate full-length layer summed in at the end of this
+        function (see fill_noise in the docstring), which is what lets it be
+        placed by measured coverage instead of by which gap this happens to be —
+        and it means a gap's contents no longer depend on the toggle at all,
+        while its LENGTH never did. `duration` is always an already
+        frame-quantized value from the caller.
         """
-        if fill_noise is None or kind not in noise_gaps:
-            return (f"anullsrc=channel_layout={channel_layout}:sample_rate={sample_rate}:"
-                    f"duration={duration}{label}")
-        # size is the per-iteration sample count aloop buffers; the asset is
-        # far shorter than this cap, so one iteration holds all of it and
-        # loop=-1 repeats it forever. atrim then cuts the stream to the exact
-        # gap length, and aformat conforms it to the graph's rate/layout (the
-        # asset is 48k stereo while the graph runs at sample_rate) — aformat
-        # LAST, matching the per-clip and bed chains.
-        return (f"[{fill_noise}:a]aloop=loop=-1:size=2147483647,"
-                f"atrim=end={duration},asetpts=PTS-STARTPTS,"
-                f"aformat=sample_rates={sample_rate}:channel_layouts={channel_layout}{label}")
+        return (f"anullsrc=channel_layout={channel_layout}:sample_rate={sample_rate}:"
+                f"duration={duration}{label}")
 
     chains = []
     norm_v_labels = []
@@ -1419,6 +1763,9 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
     # Per-clip frame-quantized durations; their sum is the bed's exact target
     # length (see the audio_bed notes in the docstring).
     expected_secs = []
+    # The full clip_timing() triples, kept because room tone's placement needs
+    # the holds as well as the totals (see noise_fill_plan).
+    timings = []
     # How far into the sequence the first clip's VIDEO actually starts — i.e.
     # its head hold, frame-quantized. The bed is delayed by exactly this so it
     # starts on the first real frame rather than on the frozen one. Set in the
@@ -1527,6 +1874,7 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
         lead_frames, trail_frames, expected_sec = clip_timing(spec)
         n_norm_frames = max(int(round(expected_sec * target_fps)), 1)
         expected_secs.append(expected_sec)
+        timings.append((lead_frames, trail_frames, expected_sec))
         if i == 0:
             bed_offset_sec = lead_frames / fps
 
@@ -1559,7 +1907,7 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
             )
             v_pieces.append(f"[vlead{i}]")
             if not no_audio:
-                chains.append(gap_chain(lead_frames / fps, f"[alead{i}]", "head_hold"))
+                chains.append(gap_chain(lead_frames / fps, f"[alead{i}]"))
                 a_pieces.append(f"[alead{i}]")
 
         v_reverse_step = ",reverse" if is_reversed else ""
@@ -1576,9 +1924,9 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
                 # Stretched video has no natural audio (playing it slowed
                 # would shift pitch/tempo — out of scope for a lossless time
                 # stretch), so the main segment gets a gap of the stretched
-                # duration, same as hold segments do — but always a SILENT one:
-                # a body-length gap is not a hold (see noise_gaps).
-                chains.append(gap_chain((out_sec - in_sec) / speed, f"[amain{i}]", "body"))
+                # duration, same as hold segments do — and the room-tone layer
+                # runs over it like it runs over everything else.
+                chains.append(gap_chain((out_sec - in_sec) / speed, f"[amain{i}]"))
             elif has_audio:
                 # The aformat here is load-bearing, not belt-and-braces:
                 # concat negotiates its output format from its FIRST input, so
@@ -1593,7 +1941,7 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
                     f"aformat=sample_rates={sample_rate}:channel_layouts={channel_layout}[amain{i}]"
                 )
             else:
-                chains.append(gap_chain(out_sec - in_sec, f"[amain{i}]", "body"))
+                chains.append(gap_chain(out_sec - in_sec, f"[amain{i}]"))
             a_pieces.append(f"[amain{i}]")
 
         if trail_hold > 0:
@@ -1604,7 +1952,7 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
             )
             v_pieces.append(f"[vtrail{i}]")
             if not no_audio:
-                chains.append(gap_chain(trail_frames / fps, f"[atrail{i}]", "trail_hold"))
+                chains.append(gap_chain(trail_frames / fps, f"[atrail{i}]"))
                 a_pieces.append(f"[atrail{i}]")
 
         if len(v_pieces) > 1:
@@ -1632,44 +1980,75 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
             )
             norm_a_labels.append(f"[anorm{i}]")
 
+    # Room tone's placement, worked out before the mix is wired: an empty plan
+    # (a timeline with no silence in it) means no tone layer at all, and with no
+    # bed either that puts the render back on the plain single-concat path — the
+    # same graph the toggle-off render produces, rather than one carrying a
+    # silent layer.
+    tone_chains = []
+    tone_label = None
+    if not no_audio and fill_noise is not None:
+        plan = noise_fill_plan(
+            clip_specs, timings, sample_rate,
+            *(bed_span(clip_specs, timings, bed_reach_sec) if audio_beds else (0.0, 0.0))
+        )
+        if noise_fill_seconds(plan) > 0:
+            tone_label = noise_track(fill_noise, plan, timings, sample_rate,
+                                     channel_layout, "nt", tone_chains)
+
     if no_audio:
         chains.append(f"{''.join(norm_v_labels)}concat=n={len(clip_specs)}:v=1:a=0[outv]")
     else:
         interleaved = "".join(f"{v}{a}" for v, a in zip(norm_v_labels, norm_a_labels))
-        if not audio_beds:
+        if not audio_beds and tone_label is None:
             chains.append(f"{interleaved}concat=n={len(clip_specs)}:v=1:a=1[outv][outa]")
         else:
             # The clips' own concatenated audio becomes an intermediate
-            # ([aseq]) so the bed can be summed into it; [outa] is still the
-            # label the caller maps, so nothing downstream changes.
-            total_sec = sum(expected_secs)
+            # ([aseq]) so the bed and the room-tone layer can be summed into it;
+            # [outa] is still the label the caller maps, so nothing downstream
+            # changes. [aseq] stays the FIRST amix input, which with
+            # duration=first makes the clips' own audio the length authority —
+            # neither a bed nor room tone can lengthen the render.
             chains.append(f"{interleaved}concat=n={len(clip_specs)}:v=1:a=1[outv][aseq]")
-            # The lane's clips are butt-joined into one stream first (see
-            # a1_bed_source), so everything below treats "A1" as a single bed
-            # however many files are on it.
-            #
-            # The bed starts where V1's PICTURE starts: adelay by the first
-            # clip's head hold so a hold pushes the bed forward with the video
-            # instead of playing over the frozen frame. adelay prepends silence
-            # rather than shifting PTS, so the padded length below is measured
-            # from 0 and the bed still ends flush with the sequence — a 1s hold
-            # means 1s of leading silence and 1s less bed heard, never a render
-            # that runs 1s long.
-            bed_src = a1_bed_source(audio_beds, sample_rate, channel_layout, "ab", chains)
-            if bed_offset_sec > 0:
-                delay_ms = round(bed_offset_sec * 1000)
-                # all=1 delays every channel by the one value (without it
-                # adelay only shifts the channels it was given delays for, so a
-                # stereo bed would come out with one channel early).
-                chains.append(f"{bed_src}adelay=delays={delay_ms}:all=1[abdel]")
-                bed_src = "[abdel]"
+            layers = ["[aseq]"]
+            total_sec = sum(expected_secs)
+            if audio_beds:
+                # The lane's clips are butt-joined into one stream first (see
+                # a1_bed_source), so everything below treats "A1" as a single bed
+                # however many files are on it.
+                #
+                # The bed starts where V1's PICTURE starts: adelay by the first
+                # clip's head hold so a hold pushes the bed forward with the video
+                # instead of playing over the frozen frame. adelay prepends silence
+                # rather than shifting PTS, so the padded length below is measured
+                # from 0 and the bed still ends flush with the sequence — a 1s hold
+                # means 1s of leading silence and 1s less bed heard, never a render
+                # that runs 1s long.
+                bed_src = a1_bed_source(audio_beds, sample_rate, channel_layout, "ab", chains)
+                if bed_offset_sec > 0:
+                    delay_ms = round(bed_offset_sec * 1000)
+                    # all=1 delays every channel by the one value (without it
+                    # adelay only shifts the channels it was given delays for, so a
+                    # stereo bed would come out with one channel early).
+                    chains.append(f"{bed_src}adelay=delays={delay_ms}:all=1[abdel]")
+                    bed_src = "[abdel]"
+                chains.append(
+                    f"{bed_src}aformat=sample_rates={sample_rate}:channel_layouts={channel_layout},"
+                    f"apad=whole_dur={total_sec},atrim=end={total_sec},asetpts=PTS-STARTPTS,"
+                    f"volume={BED_GAIN}[abed]"
+                )
+                layers.append("[abed]")
+            if tone_label:
+                # Room tone in the gaps the plan found and nowhere else,
+                # unattenuated: it is a noise floor standing in for silence, so
+                # it plays at its own level rather than under something. Appended
+                # AFTER the bed so a bed-only render still emits the exact
+                # two-input mix it always did.
+                chains.extend(tone_chains)
+                layers.append(tone_label)
             chains.append(
-                f"{bed_src}aformat=sample_rates={sample_rate}:channel_layouts={channel_layout},"
-                f"apad=whole_dur={total_sec},atrim=end={total_sec},asetpts=PTS-STARTPTS,"
-                f"volume={BED_GAIN}[abed]"
-            )
-            chains.append(
-                "[aseq][abed]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[outa]"
+                f"{''.join(layers)}amix=inputs={len(layers)}:duration=first:"
+                f"dropout_transition=0:normalize=0[outa]"
             )
     return ";".join(chains)
 

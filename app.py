@@ -794,16 +794,16 @@ def render_timeline():
         bed_paths.append(bed_path)
         bed_infos.append(bed_info)
 
-    # Gap-fill room tone: one more "-i", after every clip, overlay, and the
-    # bed, so its index is stable only once those are all counted. The client
-    # sends a plain boolean — the PATH is fixed server-side (fu.NOISE_ASSET),
-    # never a client-supplied name, so this adds no new file-reference surface.
+    # Room tone: one more "-i", after every clip, overlay, and the bed, so its
+    # index is stable only once those are all counted. The client sends a plain
+    # boolean — the PATH is fixed server-side (fu.NOISE_ASSET), never a
+    # client-supplied name, so this adds no new file-reference surface.
     noise_paths = []
     noise_index = None
     if data.get("fillNoise"):
         if not os.path.isfile(fu.NOISE_ASSET):
             return jsonify({
-                "error": f"noise fill: asset missing at {fu.NOISE_ASSET}"
+                "error": f"room tone: asset missing at {fu.NOISE_ASSET}"
             }), 400
         noise_index = len(in_paths) + len(overlay_paths) + len(bed_paths)
         noise_paths.append(fu.NOISE_ASSET)
@@ -1052,7 +1052,7 @@ def render_timeline():
     if no_audio and bed_indexes:
         return jsonify({"error": "cannot mix an audio bed into a render with audio disabled"}), 400
     if no_audio and noise_index is not None:
-        return jsonify({"error": "cannot fill gaps with noise in a render with audio disabled"}), 400
+        return jsonify({"error": "cannot lay room tone under a render with audio disabled"}), 400
     # A1 counts as an audio source for the encoder's own settings: with a bed
     # under an entirely silent V1, it is the ONLY real audio in the render, and
     # leaving it out here would degenerate audio_sample_rate to 0.
@@ -1079,14 +1079,20 @@ def render_timeline():
     out_name = candidate
     out_path = os.path.join(export_dir, out_name)
 
+    # How far the A1 lane's SOUND reaches, which is what keeps room tone off it
+    # (see fu.noise_fill_plan). Summed from each file's audio-stream duration, not
+    # its container duration: a file whose video runs past its audio would
+    # otherwise be credited with sound it does not have.
+    bed_reach_sec = sum(i.get("audio_duration") or 0.0 for i in bed_infos)
+
     filt = fu.build_timeline_filter(
         clip_specs, target_w, target_h, target_fps, no_audio=no_audio, audio_beds=bed_indexes,
-        fill_noise=noise_index
+        fill_noise=noise_index, bed_reach_sec=bed_reach_sec
     )
 
     # Overlay sources come after every clip input, matching the input_index
     # each overlay spec was assigned above; then the A1 lane in lane order
-    # (bed_indexes), then the gap-fill noise asset (noise_index) — this order is
+    # (bed_indexes), then the room-tone asset (noise_index) — this order is
     # what every one of those indices was computed from, so it must not be
     # rearranged.
     input_args = []
@@ -1096,6 +1102,18 @@ def render_timeline():
     if not no_audio:
         filter_args += ["-map", "[outa]"]
 
+    # Reported back so the toggle is never a black box: room tone fills only what
+    # is actually silent, so on a fully covered timeline it correctly does
+    # nothing, and without this the only symptom is "I turned it on and heard no
+    # difference" — the original bug's symptom exactly.
+    noise_report = {}
+    if noise_index is not None:
+        tone_sec, seq_sec = fu.noise_fill_summary(
+            clip_specs, bed_reach_sec=bed_reach_sec, has_bed=bool(bed_indexes)
+        )
+        noise_report = {"noise_fill_sec": round(tone_sec, 3),
+                        "sequence_sec": round(seq_sec, 3)}
+
     quality = get_export_quality()
     if quality in fu.MULTIPASS_QUALITIES:
         total_sec = sum(_clip_total_sec(spec) for spec in clip_specs)
@@ -1103,7 +1121,7 @@ def render_timeline():
             multipass_export_render(input_args, filter_args, combined_info, out_path, total_sec)
         except RuntimeError as e:
             return jsonify({"error": "ffmpeg failed", "detail": str(e)[-4000:]}), 500
-        return jsonify({"output": out_name})
+        return jsonify({"output": out_name, **noise_report})
 
     args = input_args + filter_args
     args += fu.encode_args(combined_info, quality)
@@ -1114,7 +1132,7 @@ def render_timeline():
     result = fu.run_ffmpeg(args, timeout=1800)
     if result.returncode != 0:
         return jsonify({"error": "ffmpeg failed", "detail": result.stderr[-4000:]}), 500
-    return jsonify({"output": out_name})
+    return jsonify({"output": out_name, **noise_report})
 
 
 @app.route("/api/render_a1", methods=["POST"])
@@ -1143,7 +1161,7 @@ def render_a1():
     raw_beds = _a1_request_beds(data)
     fill_noise_on = bool(data.get("fillNoise"))
     if not raw_beds and not fill_noise_on:
-        return jsonify({"error": "nothing on A1 to render: load an audio track or turn on A1 Noise"}), 400
+        return jsonify({"error": "nothing on A1 to render: load an audio track or turn on A1 Room Tone"}), 400
 
     in_paths = []
     try:
@@ -1198,6 +1216,11 @@ def render_a1():
             "fps": info["fps"] or 30.0,
             "video_duration": video_dur,
             "speed": speed,
+            # Load-bearing even though this render contains no clip audio: it is
+            # what tells build_a1_filter where the V1 render's own sound would be,
+            # and therefore where room tone must stay out. Getting it wrong here
+            # would desync the stem from the render it is meant to match.
+            "has_audio": info["has_audio"],
             "lead_hold_sec": float(c.get("headHoldSec") or 0) if is_first else 0.0,
             "trail_hold_sec": (float(c.get("tailHoldSec") or 0) + float(c.get("roundHoldSec") or 0)) if is_last else 0.0,
         })
@@ -1208,6 +1231,7 @@ def render_a1():
     # opaque exit 234.
     input_paths = []
     bed_indexes = []
+    bed_infos = []
     for n, raw_bed in enumerate(raw_beds):
         try:
             bed_name = raw_bed["input"]
@@ -1228,17 +1252,23 @@ def render_a1():
         if not bed_info["has_audio"]:
             return jsonify({"error": f"A1 clip {n + 1}: {bed_name} has no audio stream"}), 400
         bed_indexes.append(len(input_paths))
+        bed_infos.append(bed_info)
         input_paths.append(bed_path)
 
     noise_index = None
     if fill_noise_on:
         if not os.path.isfile(fu.NOISE_ASSET):
-            return jsonify({"error": f"noise fill: asset missing at {fu.NOISE_ASSET}"}), 400
+            return jsonify({"error": f"room tone: asset missing at {fu.NOISE_ASSET}"}), 400
         noise_index = len(input_paths)
         input_paths.append(fu.NOISE_ASSET)
 
+    # Same measured lane reach render_timeline computes, from the same key, so the
+    # stem's room tone lands in exactly the same stretches as the render's.
+    bed_reach_sec = sum(i.get("audio_duration") or 0.0 for i in bed_infos)
+
     try:
-        filt = fu.build_a1_filter(clip_specs, audio_beds=bed_indexes, fill_noise=noise_index)
+        filt = fu.build_a1_filter(clip_specs, audio_beds=bed_indexes,
+                                  fill_noise=noise_index, bed_reach_sec=bed_reach_sec)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
@@ -1259,7 +1289,14 @@ def render_a1():
     result = fu.run_ffmpeg(args)
     if result.returncode != 0:
         return jsonify({"error": "ffmpeg failed", "detail": result.stderr[-4000:]}), 500
-    return jsonify({"output": candidate})
+    noise_report = {}
+    if noise_index is not None:
+        tone_sec, seq_sec = fu.noise_fill_summary(
+            clip_specs, bed_reach_sec=bed_reach_sec, has_bed=bool(bed_indexes)
+        )
+        noise_report = {"noise_fill_sec": round(tone_sec, 3),
+                        "sequence_sec": round(seq_sec, 3)}
+    return jsonify({"output": candidate, **noise_report})
 
 
 def _clip_total_sec(spec):

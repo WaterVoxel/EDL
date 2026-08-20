@@ -21,4 +21,5 @@ A local, macOS-only, EDL-style video editor: Flask + ffmpeg backend (`app.py`, `
 - **run-app** — start/restart the Flask backend + Vite frontend for local dev or live API testing.
 - **frontend-build** — compile-check (`npx vite build` from `frontend/`) and lint after any frontend change; includes node-based unit testing of the pure math modules.
 - **verify-render** — the project's standard frame-hash verification procedure; use after any change to `build_timeline_filter`, `encode_args`, or `/api/render_timeline`.
+- **share-project** — build a verified, media-free share copy + zip to hand the project to another person or machine; never mutates the working tree.
 - **checkpoint** — save the current session state to current-work.md before clearing context.

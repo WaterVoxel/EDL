@@ -144,17 +144,17 @@ function AppInner() {
   }, [])
   const [rendering, setRendering] = useState(false)
   const [showRenderDialog, setShowRenderDialog] = useState(false)
-  // Room-tone gap fill (the Speed row's "A1 Room Tone" toggle — `noiseEnabled`
-  // and the `fillNoise`/`noise_*` wire names are the older spelling of the same
-  // thing): when on, the silent gap a
-  // HOLD or round-up leaves in the audio is filled with room tone from the
-  // checked-in asset instead of pure silence. Holds/rounds only — a slow-down's
-  // gap runs the whole length of its picture, so the server leaves it silent
-  // rather than laying room tone under moving video — and never at the same time
-  // as the A1 bed: with a bed loaded the server drops the trail gap back to
-  // silence, since that gap sits under the bed. A render-wide switch, not a
-  // per-clip decision — it never marks a clip dirty and never changes a video
-  // frame. Session-only, like v2RenderMode: not persisted in the .nara.
+  // Room tone (the Speed row's "A1 Room Tone" toggle — `noiseEnabled` and the
+  // `fillNoise`/`noise_*` wire names are the older spelling of the same thing):
+  // when on, the server measures which stretches of the rendered sequence carry
+  // no sound — a hold, a round-up, a slow-down, a source with no audio stream,
+  // the tail past the end of a short A1 track — and fills exactly those from the
+  // checked-in asset. It never plays over audio that is already there: clip
+  // audio and the bed come out bit-identical at their own level, and no length
+  // and no video frame changes either way (all three verified by subtraction).
+  // A render-wide switch, not a per-clip decision — it never marks a clip dirty.
+  // Render-time only: the preview does not emulate it. Session-only, like
+  // v2RenderMode: not persisted in the .nara.
   const [noiseEnabled, setNoiseEnabled] = useState(false)
   const toggleNoise = useCallback(() => setNoiseEnabled(v => !v), [])
   // Shared timecode/frames display mode — lifted here (rather than local to
@@ -605,6 +605,23 @@ function AppInner() {
     return true
   }
 
+  // Room tone is render-only and the preview can't play it, so the ONE thing
+  // that tells the user it did anything is the server's own measurement of how
+  // much silence it found. Reporting zero is the point: "nothing to fill" and
+  // "the toggle is broken" sounded identical before this line existed, and the
+  // first version of the feature was in fact broken in exactly that way.
+  function logNoiseFill(result, label) {
+    if (result?.noise_fill_sec == null) return
+    const fill = result.noise_fill_sec
+    const seq = result.sequence_sec
+    setAnalyzeLog(prev => [
+      fill > 0
+        ? { kind: 'info', text: `♪ ${label}: room tone filled ${fill.toFixed(2)}s of silence in a ${seq.toFixed(2)}s sequence` }
+        : { kind: 'warn', text: `♪ ${label}: room tone found no silence to fill — all ${seq.toFixed(2)}s already carries audio, so the render is unchanged` },
+      ...prev,
+    ])
+  }
+
   async function handleRenderConfirm(outputName, noAudio = false) {
     setShowRenderDialog(false)
     setRendering(true)
@@ -654,6 +671,7 @@ function AppInner() {
       const payload = clipsToPayload(sourceClips, overlays)
       const result = await renderTimeline(payload, outputName, noAudio, beds, noise)
       if (result.error) { alert('Render failed: ' + result.error + (result.detail ? '\n' + result.detail : '')); return }
+      logNoiseFill(result, isV2 ? 'V2' : isComposite ? 'A/B' : 'V1')
       if (!isV2) {
         setTimelineClips(prev => prev.map(c => ({ ...c, dirty: false })))
       } else {
@@ -668,8 +686,11 @@ function AppInner() {
 
   // Render A1 — the audio counterpart to Render V1: writes the A1 track alone
   // to a .wav, timed to the V1 sequence (head-hold delay, padded/cut to the
-  // sequence length, bed gain, room tone in the head hold when A1 Room Tone is on),
-  // so it lines up with the V1 file in another tool. No render dialog: there is
+  // sequence length, bed gain, and — with A1 Room Tone on — tone in exactly the
+  // stretches the V1 render fills, which is why V1's clips are sent even though
+  // none of their audio is rendered: they are what says where the picture's own
+  // sound would be, and so where tone must stay out), so it lines up with the V1
+  // file in another tool. No render dialog: there is
   // no quality or audio choice to make, so the button just renders. It reads
   // V1's clips because V1's edits are what give the track its length — an A1
   // render is meaningless without them, which is why the button is gated on
@@ -695,6 +716,7 @@ function AppInner() {
         { kind: 'info', text: `♪ A1 rendered → ${result.output}` },
         ...prev,
       ])
+      logNoiseFill(result, 'A1')
       refresh()
     } finally {
       setRendering(false)
