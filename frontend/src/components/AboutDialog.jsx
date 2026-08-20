@@ -294,8 +294,14 @@ export default function AboutDialog({ onClose }) {
             <p>
               Because decisions stay data until render time, the timeline is saveable to the project
               Library (.nara JSON) and exportable as a CMX-style .edl file. Undo (Cmd/Ctrl+Z) covers
-              V1, up to 50 steps back, with no redo — the V2 track and the A1 bed sit outside that
-              history, so removing them is a manual step rather than an undo.
+              every track from one history — V1, V2, A1, and crop keyframes on either video track —
+              up to 50 steps back, with no redo. One history rather than one per track, because a
+              single keystroke should mean "step back my last edit" wherever that edit was, not
+              something different depending on which lane you last clicked. A whole drag (an
+              edge-drag trim, a crop-box move) is one step, not one per mouse movement, and a
+              render costs no step at all. Opening a project or deleting the source files clears
+              the history rather than adding to it: undoing across either would restore clips
+              pointing at media that is gone.
             </p>
           </Section>
 

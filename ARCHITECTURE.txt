@@ -110,8 +110,8 @@ This matters technically for two reasons:
 
   - Undo is free and instant, because "undo" just means popping a
     JavaScript object off a history stack (see
-    frontend/src/hooks/useUndoableState.js) -- there is no file state
-    to roll back.
+    frontend/src/hooks/useUndoableTracks.js) -- there is no file state
+    to roll back. One stack covers every track at once; see section 8.
 
 The on-screen Edit Decision List (EdlTable.jsx) is a literal rendering
 of this philosophy: source file, IN/OUT points, hold durations,
@@ -805,20 +805,64 @@ shapes differ deliberately:
 --------------------------------------------------------------------
 
 V1 is the timeline of record: it drives the playhead, the transport
-controls, the ruler, and the undo history. V2 is a scratch reference
-lane, deliberately kept OUTSIDE the undo history, because its usual
-job is to hold a single freshly-dropped file until Analyze reshapes it
--- it's meant to be rebuilt from a rule, not hand-edited step by step.
-"Outside undo" means only that Cmd/Ctrl+Z never reaches it: V2 is
-otherwise a fully editable clip list, with Trim/Hold/Reverse/Speed/
-Crop/Duplicate/Splice/Raise, drag-to-reorder and per-hold-segment
-delete all working exactly as they do on V1. One shared toolbar serves
-both, redirected by `focusedTrack` (which track was last clicked) --
-the nine toolbar components never learn which track they are editing;
-App.jsx hands them whichever track's clips, setter and selection are
-current. When both tracks have content, V2 composites "on top" of V1
-for preview purposes, the way a video track sits on top of another in
-a conventional NLE; V1's own timing is unaffected either way.
+controls, and the ruler. V2 is a scratch reference lane, because its
+usual job is to hold a single freshly-dropped file until Analyze
+reshapes it -- it's meant to be rebuilt from a rule, not hand-edited
+step by step. V2 is nonetheless a fully editable clip list, with
+Trim/Hold/Reverse/Speed/Crop/Duplicate/Splice/Raise, drag-to-reorder
+and per-hold-segment delete all working exactly as they do on V1. One
+shared toolbar serves both, redirected by `focusedTrack` (which track
+was last clicked) -- the nine toolbar components never learn which
+track they are editing; App.jsx hands them whichever track's clips,
+setter and selection are current. When both tracks have content, V2
+composites "on top" of V1 for preview purposes, the way a video track
+sits on top of another in a conventional NLE; V1's own timing is
+unaffected either way.
+
+ONE UNDO HISTORY COVERS ALL THREE TRACKS, not one stack per track.
+Undo is a single button and a single Cmd/Ctrl+Z, so it can only
+sensibly mean "step back the last thing I did" -- wherever that was.
+Per-track stacks would make the same keystroke do different things
+depending on which lane happened to be focused, which is the exact
+confusion the shortcut exists to avoid. So V1, V2 and A1 are three
+named slices of ONE state object (useUndoableTracks), and a history
+entry is a snapshot of all three at once: undoing an edit restores
+every lane to the moment before it, and no interleaving of lanes can
+produce an entry that half-applies. ANIM has no slice of its own --
+crop keyframes live on the clips, so they ride whichever list they
+were written to, and are undoable on V1 and V2 alike.
+
+V2 spent a while deliberately OUTSIDE that history, on the reasoning
+above -- rebuilt from a rule, so why record hand-edits. That was wrong
+in practice for one reason: the toolbar makes V2 hand-editable with
+the same nine tools as V1, so users do edit it by hand, and there the
+shortcut silently did nothing. A tool that works on a track but whose
+undo doesn't is worse than no tool.
+
+Two details make the single stack behave the way a person expects:
+
+  - A pointer DRAG is one history entry, not one per pointermove. An
+    edge-drag trim or a crop-box drag fires an update per mouse
+    sample, so without this a single drag pushed dozens of entries and
+    shoved everything else off the 50-entry stack -- undo then cost
+    one press per mouse sample, and the edit before the drag was
+    simply gone. Each gesture mints a token (nextGesture) that its
+    updates carry as `coalesce`; consecutive updates bearing the token
+    that is already on top of the stack fold into it. Tokens are
+    unique per gesture, so two successive drags of the same edge stay
+    two entries. Undo clears the token, so a resumed drag can never
+    fold into an entry that was just popped.
+
+  - Bookkeeping the USER did not perform is written with `silent`:
+    the present updates, no history step is consumed. Clearing the
+    per-clip `dirty` flags after a successful render is the case that
+    matters; without it, the first Cmd/Ctrl+Z after every render just
+    re-dirtied the clips instead of undoing the last real edit.
+
+Loading a project and `handleCleared` (the source files were deleted
+from disk) both RESET the history instead of pushing to it -- undoing
+across either would restore clips pointing at media that is gone or
+belongs to a different project.
 
 A1 is a third lane under V1 holding exactly ONE audio file -- the bed
 (music or voice-over). "Smart" means it owns no timing of its own: it

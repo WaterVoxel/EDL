@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { listFiles, listOutputs, probe, upload, renderTimeline, renderA1, saveProject, getExportSettings, setExportSettings } from './api'
-import { useUndoableState } from './hooks/useUndoableState'
+import { useUndoableTracks } from './hooks/useUndoableTracks'
 import { MediaProvider, useMedia } from './context/MediaContext'
 import { TourProvider, useTour } from './context/TourContext'
 import TourOverlay from './components/TourOverlay'
@@ -85,13 +85,18 @@ function AppInner() {
   // stamped the first time a file is placed on a track, drives the Media
   // Bin's V1/V2 filter. See fileList.tagTrack / filterByTrack.
   const [trackTags, setTrackTags] = useState(() => loadTrackTags())
+  // All three tracks share ONE undo history (see useUndoableTracks): Undo and
+  // Cmd/Ctrl+Z step back the last edit on any lane — a V1 trim, a V2 Analyze,
+  // an A1 clip removal, an ANIM keyframe — rather than only V1's. The slices are
+  // destructured back into the names the rest of the file already uses, so every
+  // call site keeps the plain `setX(prev => …)` shape it had as useState.
   const {
-    state: timelineClips,
-    set: setTimelineClips,
-    undo: undoTimeline,
-    reset: resetTimeline,
+    tracks: { v1: timelineClips, v2: track2Clips, a1: audioBeds },
+    setters: { v1: setTimelineClips, v2: setTrack2Clips, a1: setAudioBeds },
+    undo: undoEdit,
+    reset: resetTracks,
     canUndo,
-  } = useUndoableState([])
+  } = useUndoableTracks({ v1: [], v2: [], a1: [] })
   const [selectedId, setSelectedId] = useState(null)
   // Which part of the selected clip is selected: the clip body itself
   // ('main') or one of its frozen-frame extensions ('head'|'tail'|'round').
@@ -118,13 +123,14 @@ function AppInner() {
   const toggleV2Visible = useCallback(() => setV2Visible(v => !v), [])
 
   // A1 — the "smart" audio track: an ordered lane of audio clips locked under
-  // the whole V1 sequence. Sequential like V1 (each clip starts where the
-  // previous one ends), but still NOT part of focusedTrack/activeClips: no clip
-  // on it owns editable timing (the lane starts at V1's picture start and the
-  // render pads or cuts the whole run to V1's length), so there is nothing for
-  // the clip toolbar to trim or select. Order IS the lane, so this is an array
-  // and the render sends it in order. Shape: [{ name, dir, durationSec }].
-  const [audioBeds, setAudioBeds] = useState([])
+  // the whole V1 sequence (the `a1` slice above). Sequential like V1 (each clip
+  // starts where the previous one ends), but still NOT part of focusedTrack/
+  // activeClips: no clip on it owns editable timing (the lane starts at V1's
+  // picture start and the render pads or cuts the whole run to V1's length), so
+  // there is nothing for the clip toolbar to trim or select. Order IS the lane,
+  // so this is an array and the render sends it in order. Undoable like the
+  // other two — add and remove are the only edits it has, and both are as
+  // destructive as any V1 edit. Shape: [{ name, dir, durationSec }].
   // Eye = show the bar on the timeline. It does not affect the render — the
   // bed is either loaded or it isn't. a1Muted silences the bed in the PREVIEW
   // only; it has no UI control (the gutter is just A1 + the eye), so it stays
@@ -234,14 +240,14 @@ function AppInner() {
     else if ((stepId === 'timeline' || stepId === 'editToolbar' || stepId === 'renderBar') && centerTab !== 'timeline') setCenterTab('timeline')
   }
 
-  // Track 2 ("Analyze") is a scratch lane, not part of the undo history —
-  // it holds a single dropped file (unmodified) until Analyze cuts it to
-  // match V1's structure, so it's rebuilt on demand rather than hand-edited
-  // step by step. Full editing (Trim/Hold/Reverse/Speed/Crop/Duplicate/
-  // Splice/Raise) is still allowed on it via the shared toolbar below —
-  // "outside undo" only means Cmd/Ctrl+Z never reaches it, not that it's
-  // read-only.
-  const [track2Clips, setTrack2Clips] = useState([])
+  // Track 2 ("Analyze") is the `v2` slice above. It was deliberately left OUT
+  // of the undo history for a while, on the reasoning that it's a scratch lane
+  // rebuilt from a rule (drop a file, let Analyze cut it to match V1) rather
+  // than hand-edited step by step. That reasoning was wrong in practice: the
+  // same toolbar edits V2 that edits V1 (Trim/Hold/Reverse/Speed/Crop/Duplicate/
+  // Splice/Raise), Analyze/Reconstruct/Batch REPLACE the whole lane in one
+  // click, and "rebuildable in principle" is no comfort after a mis-click. It
+  // shares V1's history now.
 
   const selectedClip = timelineClips.find(c => c.id === selectedId) || null
   const selectedClip2 = track2Clips.find(c => c.id === selectedId2) || null
@@ -398,12 +404,12 @@ function AppInner() {
 
   function handleCleared() {
     // Source files were just deleted from disk — undoing back to clips that
-    // reference them would break, so clear the undo history too. V2 isn't
-    // undoable, but its clips reference the same deleted input/ files, so
-    // it needs clearing for the identical reason.
-    resetTimeline([])
+    // reference them would break, so this clears the history rather than
+    // pushing onto it. All three lanes go, because all three point at the same
+    // deleted input/ files: V2's clips by sourceName, A1's by name (A1 used to
+    // survive this and keep bars referencing media that no longer existed).
+    resetTracks({ v1: [], v2: [], a1: [] })
     setSelectedId(null)
-    setTrack2Clips([])
     setSelectedId2(null)
     refresh()
   }
@@ -661,10 +667,12 @@ function AppInner() {
         }
         const ok = await renderShots(sourceClips, overlays, outputName, noAudio, noise)
         // Clean only when the whole series landed: a stopped series left some
-        // of the track unrendered, and the dot is what says so.
+        // of the track unrendered, and the dot is what says so. `silent` —
+        // clearing dirty dots is bookkeeping the user didn't do, so it must not
+        // consume the undo step their last real edit is waiting on.
         if (ok) {
-          if (isV2) setTrack2Clips(prev => prev.map(c => ({ ...c, dirty: false })))
-          else setTimelineClips(prev => prev.map(c => ({ ...c, dirty: false })))
+          if (isV2) setTrack2Clips(prev => prev.map(c => ({ ...c, dirty: false })), { silent: true })
+          else setTimelineClips(prev => prev.map(c => ({ ...c, dirty: false })), { silent: true })
         }
         return
       }
@@ -672,10 +680,11 @@ function AppInner() {
       const result = await renderTimeline(payload, outputName, noAudio, beds, noise)
       if (result.error) { alert('Render failed: ' + result.error + (result.detail ? '\n' + result.detail : '')); return }
       logNoiseFill(result, isV2 ? 'V2' : isComposite ? 'A/B' : 'V1')
+      // silent for the same reason as the 1+ path above.
       if (!isV2) {
-        setTimelineClips(prev => prev.map(c => ({ ...c, dirty: false })))
+        setTimelineClips(prev => prev.map(c => ({ ...c, dirty: false })), { silent: true })
       } else {
-        setTrack2Clips(prev => prev.map(c => ({ ...c, dirty: false })))
+        setTrack2Clips(prev => prev.map(c => ({ ...c, dirty: false })), { silent: true })
       }
       refresh()
     } finally {
@@ -1018,11 +1027,16 @@ function AppInner() {
   }, [timelineClips.length, showRenderDialog, showLibrary, showAbout, showFfmpegSettings])
 
   function handleLibraryOpen(name, project) {
-    resetTimeline(project.clips)
-    setTrack2Clips(project.track2Clips || [])
-    // A pre-version-5 project has a single `audioBed` object; it becomes a
-    // one-clip lane, which renders the graph it always did.
-    setAudioBeds(project.audioBeds || (project.audioBed ? [project.audioBed] : []))
+    // One reset for all three lanes, so the freshly-loaded project starts with
+    // an empty history — Cmd+Z must not walk back into the project that was
+    // open before this one.
+    resetTracks({
+      v1: project.clips,
+      v2: project.track2Clips || [],
+      // A pre-version-5 project has a single `audioBed` object; it becomes a
+      // one-clip lane, which renders the graph it always did.
+      a1: project.audioBeds || (project.audioBed ? [project.audioBed] : []),
+    })
     setSelectedId(project.selectedId || null)
     setProjectName(name)
     setShowLibrary(false)
@@ -1137,15 +1151,16 @@ function AppInner() {
   const editToolbar = (
     <div data-tour="editToolbar" className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
       {/* Undo leads the row — moved out of the action bar's left group so it
-          sits with the tools whose effects it reverses. Note it is NOT
-          focusedTrack-aware like the rest of the row: the undo stack is V1's
-          own useUndoableState, so this only ever steps V1 back, which is what
-          the title says. Cmd/Ctrl+Z still fires from Timeline.jsx's key
-          handler (same onUndo prop), so the shortcut is unaffected. */}
+          sits with the tools whose effects it reverses. Unlike the rest of the
+          row it is deliberately NOT focusedTrack-aware, and that is the point:
+          one shared history across V1/V2/A1 means this steps back the last edit
+          wherever it happened, so it never depends on which lane the user
+          happens to have clicked last. Cmd/Ctrl+Z fires from Timeline.jsx's key
+          handler (same onUndo prop), so the two paths can't diverge. */}
       <button
-        onClick={undoTimeline}
+        onClick={undoEdit}
         disabled={!canUndo}
-        title="Undo last V1 edit (Cmd/Ctrl+Z)"
+        title="Undo last edit — any track (Cmd/Ctrl+Z)"
         className="w-5 h-5 flex items-center justify-center rounded text-[12px] text-neutral-400 hover:text-white hover:bg-neutral-700 disabled:opacity-40"
       >↩</button>
       <div className="w-px h-3.5 bg-neutral-700" />
@@ -1403,7 +1418,7 @@ function AppInner() {
                   onSelectId={setSelectedId}
                   onSelectItem={selectItem}
                   hasDirty={hasDirty}
-                  onUndo={undoTimeline}
+                  onUndo={undoEdit}
                   canUndo={canUndo}
                   track2Clips={track2Clips}
                   setTrack2Clips={setTrack2Clips}

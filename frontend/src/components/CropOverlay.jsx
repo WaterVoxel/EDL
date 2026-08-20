@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { useMedia } from '../context/MediaContext'
 import { clampCropOrigin, resizeCropBox } from '../cropMath'
 import { sampleCropOrigin, addKeyframe, maxKeyframeOrigin } from '../cropAnimation'
+import { nextGesture } from '../hooks/useUndoableTracks'
 
 const STAGE_PADDING_PX = 12 // matches the stage's p-3
 
@@ -176,6 +177,10 @@ export default function CropOverlay({ selectedClip, setClips, stageRef, animateE
     const startCropX = base ? base.x : crop.x
     const startCropY = base ? base.y : crop.y
     draggingRef.current = true
+    // One undo step for the whole drag rather than one per pointermove. Without
+    // this a single pan writes dozens of history entries — undo would cost a
+    // press per mouse sample AND push every earlier edit off the 50-entry stack.
+    const gesture = nextGesture('crop-move')
 
     function onMove(ev) {
       const dx = (ev.clientX - startX) / scale
@@ -197,12 +202,12 @@ export default function CropOverlay({ selectedClip, setClips, stageRef, animateE
         setClips(prev => prev.map(c => c.id === selectedClip.id
           ? { ...c, cropKeyframes: addKeyframe(c.cropKeyframes || [], dragT, next.x, next.y), dirty: true }
           : c
-        ))
+        ), { coalesce: gesture })
         return
       }
       setClips(prev => prev.map(c =>
         c.id === selectedClip.id ? { ...c, crop: { ...c.crop, x: next.x, y: next.y }, dirty: true } : c
-      ))
+      ), { coalesce: gesture })
     }
     function onUp() {
       draggingRef.current = false
@@ -224,6 +229,7 @@ export default function CropOverlay({ selectedClip, setClips, stageRef, animateE
     e.preventDefault()
     const anchorX = displayX
     const anchorY = displayY
+    const gesture = nextGesture('crop-resize')  // one undo step per drag, as above
     // One box size is shared by every keyframe, so the size the user drags
     // here has to remain legal at the FURTHEST keyframe too, not just at
     // the one under the playhead. Clamping against the max origin is what
@@ -253,7 +259,7 @@ export default function CropOverlay({ selectedClip, setClips, stageRef, animateE
       const next = { w: Math.min(grown.w, capped.w), h: Math.min(grown.h, capped.h) }
       setClips(prev => prev.map(c =>
         c.id === selectedClip.id ? { ...c, crop: { ...c.crop, w: next.w, h: next.h }, dirty: true } : c
-      ))
+      ), { coalesce: gesture })
     }
     function onUp() {
       document.removeEventListener('pointermove', onMove)

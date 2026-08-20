@@ -268,13 +268,16 @@ export default function Timeline({
     }
   }
 
-  function handleTrim(id, inSec, outSec) {
-    setClips(prev => prev.map(c => c.id === id ? trimClip(c, inSec, outSec) : c))
+  // `gesture` arrives from TimelineClip's edge drag and folds that drag's whole
+  // stream of pointermove updates into one undo step. Undefined for any other
+  // caller, which then behaves as a normal single edit.
+  function handleTrim(id, inSec, outSec, gesture) {
+    setClips(prev => prev.map(c => c.id === id ? trimClip(c, inSec, outSec) : c), { coalesce: gesture })
   }
 
-  function handleTrim2(id, inSec, outSec) {
+  function handleTrim2(id, inSec, outSec, gesture) {
     if (!setTrack2Clips) return
-    setTrack2Clips(prev => prev.map(c => c.id === id ? trimClip(c, inSec, outSec) : c))
+    setTrack2Clips(prev => prev.map(c => c.id === id ? trimClip(c, inSec, outSec) : c), { coalesce: gesture })
   }
 
   function handleDelete(id) {

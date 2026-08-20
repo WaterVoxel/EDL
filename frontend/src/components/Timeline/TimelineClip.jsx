@@ -1,4 +1,5 @@
 import { clipHeadPx, clipMainPx, clipTailPx, clipRoundPx, clipTotalPx, clipColor, clipMainSec, clipSpeed } from '../../clipMath'
+import { nextGesture } from '../../hooks/useUndoableTracks'
 
 const MIN_CLIP_SEC = 0.1
 
@@ -22,6 +23,11 @@ export default function TimelineClip({ clip, pps, selected, selectedPart, onSele
     const startX = e.clientX
     const startIn = clip.inSec
     const startOut = clip.outSec
+    // One token for the whole drag, so the dozens of pointermove updates below
+    // collapse into a SINGLE undo step (see useUndoableTracks). Minted per
+    // gesture, not per clip: two successive drags of the same edge have to be
+    // two separate entries.
+    const gesture = nextGesture('trim')
 
     function onMove(ev) {
       const dx = ev.clientX - startX
@@ -30,10 +36,10 @@ export default function TimelineClip({ clip, pps, selected, selectedPart, onSele
       const deltaSec = (dx / pps) * speed
       if (edge === 'left') {
         const newIn = Math.max(0, Math.min(startIn + deltaSec, clip.outSec - MIN_CLIP_SEC))
-        onTrim(clip.id, newIn, clip.outSec)
+        onTrim(clip.id, newIn, clip.outSec, gesture)
       } else {
         const newOut = Math.min(clip.sourceDurationSec, Math.max(startOut + deltaSec, clip.inSec + MIN_CLIP_SEC))
-        onTrim(clip.id, clip.inSec, newOut)
+        onTrim(clip.id, clip.inSec, newOut, gesture)
       }
     }
 
