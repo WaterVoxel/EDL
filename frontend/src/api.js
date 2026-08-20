@@ -23,14 +23,19 @@ export const deleteOutputFile = (name) => fetch(`/api/outputs/${encodeURICompone
 // is the order the server concatenates them in.
 // fillNoise is a plain boolean: the server owns the asset path, so there is
 // nothing for the client to name.
-export const renderTimeline = (clips, output, noAudio = false, audioBeds = [], fillNoise = false) =>
-  postJSON('/api/render_timeline', { clips, output, noAudio, audioBeds, fillNoise })
+// `settings` is the open-ended tail for render-wide knobs (today: noiseGainDb),
+// spread flat into the body. Positional parameters ran out at five, and each new
+// one made the call sites read as a row of anonymous booleans; a named object
+// also lets a caller omit a knob entirely, which is what makes the server's
+// "key absent → the graph an older client always got" default reachable.
+export const renderTimeline = (clips, output, noAudio = false, audioBeds = [], fillNoise = false, settings = {}) =>
+  postJSON('/api/render_timeline', { clips, output, noAudio, audioBeds, fillNoise, ...settings })
 // Render A1 alone to a .wav. Takes the SAME clip payload a V1 render does — the
 // server reads only the timing keys off it, but sending the whole thing keeps
 // the two calls interchangeable at the call site. The extension is the server's
 // to decide, so `output` is a base name.
-export const renderA1 = (clips, output, audioBeds = [], fillNoise = false) =>
-  postJSON('/api/render_a1', { clips, output, audioBeds, fillNoise })
+export const renderA1 = (clips, output, audioBeds = [], fillNoise = false, settings = {}) =>
+  postJSON('/api/render_a1', { clips, output, audioBeds, fillNoise, ...settings })
 export const reformat = (input, dir, resolution, ratio, output) => postJSON('/api/reformat', { input, dir, resolution, ratio, output })
 export const listProjects = () => fetch('/api/projects').then(r => r.json())
 export const saveProject = (name, project) => postJSON('/api/projects', { name, project })

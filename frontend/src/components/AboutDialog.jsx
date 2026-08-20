@@ -280,7 +280,8 @@ export default function AboutDialog({ onClose }) {
               timeline with SMPTE-style source/record timecodes. Add clips by clicking a Media Bin
               file's +, or by dragging one or more files straight onto the V1 track — a multi-file
               drop lands as clips end to end in the order dropped, the same way A1 takes audio.
-              <strong>Raise</strong> pulls a Media Bin file onto the track, <strong>Duplicate</strong>{' '}
+              <strong>Round Up</strong> holds the last frame to land the sequence on a whole
+              second, <strong>Duplicate</strong>{' '}
               copies a clip with every decision intact, and <strong>Split</strong> divides one clip
               into two at the playhead.
             </p>
@@ -445,16 +446,49 @@ export default function AboutDialog({ onClose }) {
               105 frames in four configurations.
             </p>
             <p>
+              <strong>Several clips, and the gaps between them.</strong> A1 holds an ordered lane, not
+              one file, and every clip on it keeps its own position. Remove one with its × and nothing
+              else moves: the gap it leaves plays as silence, or as room tone if the toggle is on.
+              That is done by interleaving silence into the <em>single</em>{' '}
+              <span className="font-mono text-neutral-400">concat</span> that joins the lane, rather
+              than delaying each clip separately — which would make the mix one input wider per clip,
+              and so make the level depend on how many clips A1 happens to hold. The width stays at
+              three for 1, 2 or 3 clips. The silence is cut by sample count, not seconds (
+              <span className="font-mono text-neutral-400">anullsrc</span>'s duration floors, while{' '}
+              <span className="font-mono text-neutral-400">atrim=end_sample</span> is exact), and the
+              clip after a gap was measured landing one sample-frame (~23 µs) from where it sat
+              before — <em>bit-identical</em> at that offset across 130,459 frames, against a control
+              that showed the whole 86,362-frame shift the old behaviour would have caused.
+            </p>
+            <p>
               <strong>Room tone.</strong> A hold has no audio of its own, and digital silence in the
               middle of a cut is audible as a hole. The toggle fills those holes and nothing else:
               wherever the sequence carries sound, it comes out untouched at its own level; wherever
               it carries silence — holds, round-ups, slow-motion bodies, a source with no audio
-              stream, the tail past the end of a short A1 track — room tone plays instead. The
+              stream, the tail past the end of a short A1 track, a gap left by a removed A1 clip —
+              room tone plays instead. The
               material is a 3.003s, 48 kHz stereo asset looped by{' '}
-              <span className="font-mono text-neutral-400">aloop=loop=-1</span>, lifted{' '}
-              <span className="font-mono text-neutral-400">+12 dB</span> to −27.0 dB RMS / −12.8 dB
-              peak, conformed by <span className="font-mono text-neutral-400">aformat</span> to the
-              graph's rate and layout, and summed in as one more amix input at the very end.
+              <span className="font-mono text-neutral-400">aloop=loop=-1</span>, lifted by the{' '}
+              <strong>dB</strong> arrows next to the toggle, conformed by{' '}
+              <span className="font-mono text-neutral-400">aformat</span> to the graph's rate and
+              layout, and summed in as one more amix input at the very end.
+            </p>
+            <p>
+              <strong>Tone level.</strong> Gain on the asset, in dB, from −12 to +24 with +12 the default
+              — the level the toggle used to be fixed at, so a project made before the control
+              existed renders identically. 0 dB is the asset as recorded, −24.9 dBFS peak / −39.0 dB
+              RMS; +12 puts it at −12.9 / −27.0. The ceiling is measured rather than chosen: at{' '}
+              <span className="font-mono text-neutral-400">+24 dB</span> the tone peaks at −0.8 dBFS,
+              so it is the loudest setting at which tone alone still cannot clip. The number reaches
+              ffmpeg as one <span className="font-mono text-neutral-400">volume=NdB</span> token in
+              the tone chain, and the whole control is verified to be exactly that: at any level the
+              graph differs from the default only in that token, every tone sample scales by the
+              requested factor to within 1e-4, and the samples that carry clip audio or A1 audio
+              differ by exactly zero — the gain cannot leak onto sound that was already there. No
+              video frame changes at any level (identical{' '}
+              <span className="font-mono text-neutral-400">framemd5</span> across off / −12 / +12 /
+              +24), and neither does the length. Both the level and the toggle are saved in the
+              project file.
             </p>
             <p>
               Which stretches those are is <em>measured</em>, not guessed from layout. Python walks the
@@ -499,13 +533,14 @@ export default function AboutDialog({ onClose }) {
               beds shorter and longer than the picture — not one sample-frame of tone ever landed over
               existing sound, and every silent 5ms window went to zero. Because tone plays only where
               nothing else does, it costs no headroom: the render's peak is the greater of what was
-              already there and −12.8 dBFS. One caveat: room tone is applied at <em>render</em> time
+              already there and the tone's own peak at the chosen level (−12.9 dBFS at the default
+              +12, −0.8 at the +24 ceiling). One caveat: room tone is applied at <em>render</em> time
               only. The in-app preview does not emulate it, so the toggle changes nothing you can hear
               until you render. The render response reports how much was filled —{' '}
               <span className="font-mono text-neutral-400">noise_fill_sec</span> against{' '}
               <span className="font-mono text-neutral-400">sequence_sec</span> — and the log line shows
-              it, so &ldquo;nothing happened&rdquo; is distinguishable from &ldquo;nothing needed
-              filling&rdquo;.
+              it along with the level that was applied, so &ldquo;nothing happened&rdquo; is
+              distinguishable from &ldquo;nothing needed filling&rdquo;.
             </p>
             <p>
               <strong>Render A1</strong> writes the timeline's audio alone as a{' '}

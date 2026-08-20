@@ -15,11 +15,16 @@ const BED_GAIN = 0.35
  * exactly what the render produces, where A1 is apad-ed flat past its start and
  * never sees a per-clip transform.
  *
- * The lane is sequential, so clip N's stretch of the timeline begins at
- * `startSec` plus the durations of the clips before it — the same running sum
- * the render's concat produces and the same one AudioBedBar draws. An element
- * whose stretch isn't under the playhead parks at 0 and stays paused, so only
- * ever one is heard: the elements are the mix, and the position decides which.
+ * Clip N's stretch of the timeline begins at `startSec` plus that clip's own
+ * `bed.startSec` — the position the render places it at, and the one AudioBedBar
+ * draws. An element whose stretch isn't under the playhead parks at 0 and stays
+ * paused, so only ever one is heard: the elements are the mix, and the position
+ * decides which. That is also why a HOLE left by a removed clip needs no code of
+ * its own here — inside a hole no element's stretch is under the playhead, so
+ * every one of them is paused and the preview goes silent, which is what the
+ * render does with the toggle off. With A1 Room Tone ON the render fills the hole
+ * and the preview still doesn't: room tone is applied at render time and has
+ * never been previewed.
  *
  * One element per clip rather than one element re-pointed at each source: a src
  * swap drops the decoder and re-buffers, which would put a hole in playback at
@@ -38,22 +43,15 @@ const BED_GAIN = 0.35
  * stutter the decode far worse than the drift it fixes).
  */
 export default function AudioBedPlayer({ beds, transport, muted = false, startSec = 0 }) {
-  let cursor = 0
-  const placed = beds.map((bed, index) => {
-    const at = cursor
-    cursor += bed.durationSec || 0
-    return { bed, index, at }
-  })
-
   return (
     <>
-      {placed.map(({ bed, index, at }) => (
+      {beds.map((bed, index) => (
         <A1ClipAudio
           key={`${index}-${bed.name}`}
           bed={bed}
           transport={transport}
           muted={muted}
-          startSec={startSec + at}
+          startSec={startSec + (bed.startSec || 0)}
         />
       ))}
     </>

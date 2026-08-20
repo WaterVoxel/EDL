@@ -15,16 +15,11 @@ export default function RaiseButton({ clips, setClips }) {
     ))
   }
 
+  // No "Raise" text label: the button's own "Round Up" says what it does, and
+  // the readout sits AFTER the button so the amber "+0.83s → 11s" reads as the
+  // result of pressing it rather than as a heading in front of it.
   return (
     <div className="flex items-center gap-1.5">
-      <span className="text-[9px] font-semibold uppercase tracking-wide text-neutral-500 whitespace-nowrap">Raise</span>
-      {clips.length === 0 ? (
-        <span className="text-[9px] text-neutral-600">no clips</span>
-      ) : amount <= 0 ? (
-        <span className="text-[9px] text-neutral-600">whole ({base.toFixed(1)}s)</span>
-      ) : (
-        <span className="text-[9px] text-amber-400">+{amount.toFixed(2)}s → {(base + amount).toFixed(0)}s</span>
-      )}
       <button
         onClick={apply}
         disabled={amount <= 0}
@@ -33,6 +28,13 @@ export default function RaiseButton({ clips, setClips }) {
       >
         Round Up
       </button>
+      {clips.length === 0 ? (
+        <span className="text-[9px] text-neutral-600">no clips</span>
+      ) : amount <= 0 ? (
+        <span className="text-[9px] text-neutral-600">whole ({base.toFixed(1)}s)</span>
+      ) : (
+        <span className="text-[9px] text-amber-400 whitespace-nowrap">+{amount.toFixed(2)}s → {(base + amount).toFixed(0)}s</span>
+      )}
     </div>
   )
 }

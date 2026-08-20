@@ -289,3 +289,57 @@ export function clipColor(clipId) {
   }
   return CLIP_PALETTE[hash % CLIP_PALETTE.length]
 }
+
+// Room-tone level, from the stepper's raw text to a number the server will
+// accept. The field holds a string so an in-progress "-" or "" survives typing;
+// clamping happens once, at payload time.
+//
+// The empty/unparseable case returns `dflt`, but a parsed 0 is returned AS 0 —
+// 0 dB (the asset at its recorded level) is a legal setting, so this can never
+// be written as `parseFloat(text) || dflt`, which is the `speed || 1` bug.
+export function clampNoiseGainDb(text, dflt, min, max) {
+  const n = parseFloat(text)
+  if (!Number.isFinite(n)) return dflt
+  // Rounded to the server's own precision (round(gain, 1)) so the level shown
+  // in the toolbar is exactly the level that reaches the filtergraph.
+  return Math.round(Math.min(max, Math.max(min, n)) * 10) / 10
+}
+
+// A1 lane positions. A bed's `startSec` is LANE seconds — 0 is where V1's
+// picture starts, excluding V1's head hold (the render adelays the whole lane by
+// that hold), so a bed's start survives every V1 head-hold edit untouched.
+//
+// Back-fills `startSec` from the cumulative sum for beds that predate the field
+// (every .nara through version 5, where position was implicit in array order),
+// which is what makes an old project open exactly as it rendered before. Also
+// clamps a start that would overlap the previous bed forward to that bed's end:
+// the render's counterpart (ffmpeg_utils.normalize_bed_placements) does the same
+// clamp, because a negative gap would mean a negative anullsrc duration. Neither
+// is reachable by removing a clip — it exists for a re-probed or hand-edited
+// duration that grew.
+//
+// Idempotent, and returns the SAME array when nothing changed so React's
+// referential equality holds and the undo history doesn't record a no-op.
+export function normalizeBeds(beds) {
+  if (!Array.isArray(beds) || beds.length === 0) return beds
+  let changed = false
+  let cursor = 0
+  const out = beds.map(bed => {
+    const dur = Number.isFinite(bed.durationSec) ? Math.max(bed.durationSec, 0) : 0
+    const raw = Number.isFinite(bed.startSec) ? bed.startSec : cursor
+    const start = Math.max(raw, cursor)
+    cursor = start + dur
+    if (start === bed.startSec) return bed
+    changed = true
+    return { ...bed, startSec: start }
+  })
+  return changed ? out : beds
+}
+
+// Where the A1 lane's last bed ends, in lane seconds. Not the sum of durations:
+// with a hole in the lane those differ, and every consumer (the bar's
+// short/long/exact state, the trailing hatch) means the end, not the total.
+export function bedLaneEndSec(beds) {
+  return (beds || []).reduce(
+    (end, b) => Math.max(end, (b.startSec || 0) + (b.durationSec || 0)), 0)
+}

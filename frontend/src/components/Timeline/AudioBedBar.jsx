@@ -1,14 +1,41 @@
-import { sequencePosToPx, sequenceClipBounds, sequenceVideoStartSec } from '../../clipMath'
+import { sequencePosToPx, sequenceClipBounds, sequenceVideoStartSec, normalizeBeds, bedLaneEndSec } from '../../clipMath'
+
+/* A stretch of the lane with nothing of A1's own in it: silence with A1 Room Tone
+ * off, room tone with it on. One component for all three kinds — the head hold,
+ * a hole left by a removed clip, and the remainder past a short lane — because
+ * the render treats them identically (it fills MEASURED silence, wherever it
+ * falls), so drawing them differently would suggest a distinction that isn't
+ * there. Only the caller's border/rounding differs, to match what it abuts. */
+function GapBlock({ left, width, noiseEnabled, title, className = '' }) {
+  return (
+    <div
+      className={`absolute top-0 bottom-0 overflow-hidden flex items-center justify-center ${className}`}
+      style={{
+        left,
+        width: Math.max(width, 0),
+        backgroundImage:
+          'repeating-linear-gradient(45deg, rgba(16,185,129,0.14) 0 3px, transparent 3px 6px)',
+      }}
+      title={title}
+    >
+      <span className={`text-[7px] font-mono uppercase tracking-wide truncate px-1 ${noiseEnabled ? 'text-amber-500/90' : 'text-emerald-600/90'}`}>
+        {noiseEnabled ? 'noise' : 'silence'}
+      </span>
+    </div>
+  )
+}
 
 /* The A1 audio lane, drawn as one bar per clip on it, laid end to end under V1.
  *
- * A1 is SEQUENTIAL like V1: clip 2 starts exactly where clip 1's audio ends,
- * and the render concatenates them in this same order. What no clip on it has
- * is editable timing of its own — the whole run starts where V1's PICTURE
- * starts, and the render pads it with silence or cuts it at the sequence's end.
- * So these deliberately aren't TimelineClips: there are no head/tail/round
- * segments, no edge-drag trim, and no reorder. Order is the order they were
- * added, and the only per-clip edit is remove.
+ * Each clip sits at its own `startSec` — LANE seconds, measured from where V1's
+ * picture starts. Clips are added end to end, so a lane normally reads as one
+ * continuous run, but the positions are EXPLICIT: removing a clip leaves the
+ * others exactly where they were and opens a hole, drawn hatched like any other
+ * stretch the render has to fill. What no clip on it has is editable timing of
+ * its own — the whole run starts where V1's PICTURE starts, and the render pads
+ * it with silence or cuts it at the sequence's end. So these deliberately aren't
+ * TimelineClips: there are no head/tail/round segments, no edge-drag trim, no
+ * drag-to-reposition and no reorder. The only per-clip edit is remove.
  *
  * What the lane DOES have to show is how its total length compares to the
  * sequence, which is the one thing the user can't otherwise see and the one
@@ -18,13 +45,17 @@ import { sequencePosToPx, sequenceClipBounds, sequenceVideoStartSec } from '../.
  *   longer   → the overhang past the sequence edge, hatched red and never heard
  *   equal    → flush, no annotation
  *
- * `noiseEnabled` (the A1 Room Tone toggle) relabels both annotated gaps — the
- * head hold and the short-lane remainder — to amber "noise", so the lane tracks
- * the button. Both labels are exactly true: room tone fills silence and only
- * silence, and these two annotations are precisely the stretches where this lane
- * has no sound. The remainder in particular is measured against how far the
- * lane's AUDIO reaches, which is what the render measures too, so a bed whose
- * file is padded with silence gets tone from where the sound stops.
+ * All three compare against where the lane ENDS, not the sum of its durations:
+ * with a hole in it those differ, and a lane that ends flush with the sequence
+ * would otherwise be called "short" and grow a remainder it doesn't have.
+ *
+ * `noiseEnabled` (the A1 Room Tone toggle) relabels every annotated gap — the
+ * head hold, each interior hole, and the short-lane remainder — to amber "noise",
+ * so the lane tracks the button. Each label is exactly true: room tone fills
+ * silence and only silence, and these annotations are precisely the stretches
+ * where this lane has no sound. The remainder in particular is measured against
+ * how far the lane's AUDIO reaches, which is what the render measures too, so a
+ * bed whose file is padded with silence gets tone from where the sound stops.
  *
  * What the lane cannot draw is the silence on V1's side — a clip whose source
  * has no audio stream, or a slow-motion body — which room tone also fills. This
@@ -41,23 +72,27 @@ import { sequencePosToPx, sequenceClipBounds, sequenceVideoStartSec } from '../.
  * markers come from the same bounds, making the link visible rather than merely
  * asserted.
  *
- * Each clip's span comes from its probed container duration, which is what the
- * lane's running offsets are built from. The render instead joins the decoded
- * audio streams, so a file whose audio stream is shorter than its container
- * puts the bars a few ms off what is rendered. The bar is a reference, not the
- * authority; the total is clamped by apad/atrim either way.
+ * Each clip's span comes from its probed container duration, which is also what
+ * placed the clip after it when it was added. The render instead measures each
+ * clip's own audio stream, so a file whose audio stream is shorter than its
+ * container puts the bars a few ms off what is rendered. The bar is a reference,
+ * not the authority; the total is clamped by apad/atrim either way.
  */
 export default function AudioBedBar({ beds, clips, sequenceSec, pps, gapPx, muted = false, noiseEnabled = false, onRemove }) {
   // Where V1's picture starts — A1 is delayed to here by the render, so the
   // space it has to fill is the sequence MINUS the head hold.
   const startSec = sequenceVideoStartSec(clips)
   const availSec = Math.max(sequenceSec - startSec, 0)
-  const totalBedSec = beds.reduce((sum, b) => sum + (b.durationSec || 0), 0)
+  // Normalized here as well as at add/load time: idempotent and identity-
+  // preserving, so it costs nothing on an already-positioned lane and it means
+  // this bar can draw a project written before startSec existed.
+  const lane = normalizeBeds(beds)
+  const laneEndSec = bedLaneEndSec(lane)
   // 1 frame at 60fps of slack — a file cut to length by an external tool lands
   // a few ms off and shouldn't be labelled "shorter" over rounding dust.
   const EPS = 0.017
-  const state = totalBedSec < availSec - EPS ? 'short'
-    : totalBedSec > availSec + EPS ? 'long'
+  const state = laneEndSec < availSec - EPS ? 'short'
+    : laneEndSec > availSec + EPS ? 'long'
       : 'exact'
 
   // Lane width and every internal edge measured in V1's own coordinate space.
@@ -79,14 +114,11 @@ export default function AudioBedBar({ beds, clips, sequenceSec, pps, gapPx, mute
   // a 0.2s sting still has a clickable × ); the left edge stays true, exactly
   // as V1 floors a clip's box without moving the clips after it.
   const MIN_SEG_PX = 16
-  const segs = []
-  let cursor = 0
-  beds.forEach((bed, index) => {
+  const segs = lane.map((bed, index) => {
     const durSec = bed.durationSec || 0
-    const fromSec = startSec + cursor
+    const fromSec = startSec + (bed.startSec || 0)
     const left = posToPx(fromSec)
-    cursor += durSec
-    segs.push({
+    return {
       bed,
       index,
       durSec,
@@ -95,10 +127,25 @@ export default function AudioBedBar({ beds, clips, sequenceSec, pps, gapPx, mute
       width: Math.max(posToPx(fromSec + durSec) - left, MIN_SEG_PX),
       // Any part of this clip past the sequence edge is cut at render.
       cut: fromSec + durSec > sequenceSec + EPS,
-    })
+    }
   })
 
-  const bedPx = Math.max(posToPx(Math.min(startSec + totalBedSec, sequenceSec)) - startPx, 0)
+  // Holes INSIDE the lane — what a removed clip leaves behind. Measured between
+  // consecutive clips rather than tracked as their own objects, so there is
+  // nothing to keep in sync: the positions are the source of truth and a hole is
+  // just the space they don't cover. The stretch before the first clip counts
+  // too (removing clip 1 puts the hole at the head), and it is a hole in the LANE
+  // — distinct from the head-hold block, which is the space before the lane
+  // starts at all.
+  const holes = []
+  segs.forEach((seg, i) => {
+    const prevEndSec = i === 0 ? startSec : segs[i - 1].fromSec + segs[i - 1].durSec
+    if (seg.fromSec - prevEndSec > EPS) {
+      holes.push({ key: `hole-${i}`, fromSec: prevEndSec, toSec: seg.fromSec })
+    }
+  })
+
+  const bedPx = Math.max(posToPx(Math.min(startSec + laneEndSec, sequenceSec)) - startPx, 0)
   const laneEndPx = segs.length > 0 ? segs[segs.length - 1].left + segs[segs.length - 1].width : seqPx
   const lanePx = Math.max(seqPx, laneEndPx, 24)
   const bounds = sequenceClipBounds(clips, pps, gapPx)
@@ -125,10 +172,27 @@ export default function AudioBedBar({ beds, clips, sequenceSec, pps, gapPx, mute
           </div>
           <button
             onClick={e => { e.stopPropagation(); onRemove?.(seg.index) }}
-            title="Remove this clip from A1 — the clips after it move up"
+            title="Remove this clip from A1 — every other clip stays where it is, and the gap this leaves plays as silence (or as room tone, with A1 Room Tone on)"
             className="absolute top-0 right-0 w-3.5 h-3.5 flex items-center justify-center bg-black/50 hover:bg-red-600 text-white text-[9px] leading-none opacity-0 group-hover:opacity-100 z-20"
           >×</button>
         </div>
+      ))}
+
+      {/* Each hole a removed clip left. Same hatched treatment as the remainder
+          past a short lane, because the render fills both the same way. */}
+      {holes.map(hole => (
+        <GapBlock
+          key={hole.key}
+          left={posToPx(hole.fromSec)}
+          width={posToPx(hole.toSec) - posToPx(hole.fromSec)}
+          noiseEnabled={noiseEnabled}
+          className="border-y border-emerald-900/60"
+          title={
+            (noiseEnabled ? 'Room tone' : 'Silence')
+            + ` — a ${(hole.toSec - hole.fromSec).toFixed(2)}s gap where an A1 clip was removed; the clips around it kept their positions`
+            + (noiseEnabled ? ', and room tone fills it instead of digital silence' : '')
+          }
+        />
       ))}
 
       {/* What the render pads on when the lane runs out early: silence with the
@@ -136,24 +200,17 @@ export default function AudioBedBar({ beds, clips, sequenceSec, pps, gapPx, mute
           this is exactly the kind of stretch the fill is for and the label can
           say so without qualification. */}
       {state === 'short' && (
-        <div
-          className="absolute top-0 bottom-0 rounded-r border border-l-0 border-emerald-900/60 overflow-hidden flex items-center justify-center"
-          style={{
-            left: startPx + bedPx,
-            width: Math.max(seqPx - startPx - bedPx, 0),
-            backgroundImage:
-              'repeating-linear-gradient(45deg, rgba(16,185,129,0.14) 0 3px, transparent 3px 6px)',
-          }}
+        <GapBlock
+          left={startPx + bedPx}
+          width={seqPx - startPx - bedPx}
+          noiseEnabled={noiseEnabled}
+          className="rounded-r border border-l-0 border-emerald-900/60"
           title={
             (noiseEnabled ? 'Room tone' : 'Silence')
-            + ` — A1 is ${(availSec - totalBedSec).toFixed(2)}s shorter than the space it has to fill`
+            + ` — A1 is ${(availSec - laneEndSec).toFixed(2)}s shorter than the space it has to fill`
             + (noiseEnabled ? ', so room tone fills it instead of digital silence' : '')
           }
-        >
-          <span className={`text-[7px] font-mono uppercase tracking-wide truncate px-1 ${noiseEnabled ? 'text-amber-500/90' : 'text-emerald-600/90'}`}>
-            {noiseEnabled ? 'noise' : 'silence'}
-          </span>
-        </div>
+        />
       )}
 
       {/* The head hold, which A1 is delayed PAST — labelled, because an empty
@@ -215,7 +272,7 @@ export default function AudioBedBar({ beds, clips, sequenceSec, pps, gapPx, mute
             backgroundImage:
               'repeating-linear-gradient(45deg, rgba(239,68,68,0.45) 0 3px, rgba(10,10,10,0.72) 3px 6px)',
           }}
-          title={`Cut — A1 runs ${(totalBedSec - availSec).toFixed(2)}s past the end of the sequence and this much is never heard`}
+          title={`Cut — A1 runs ${(laneEndSec - availSec).toFixed(2)}s past the end of the sequence and this much is never heard`}
         >
           <span className="text-[7px] font-mono uppercase tracking-wide truncate px-1 text-red-300">cut</span>
         </div>

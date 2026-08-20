@@ -570,6 +570,18 @@ Every parameter there is measured rather than assumed:
     channels it was given delays for, so a stereo bed comes out with
     one channel early.
 
+A lane of several A1 clips is butt-joined by a SINGLE concat before
+that branch, and a hole is an anullsrc silence piece interleaved into
+that same concat -- deliberately not a per-bed adelay, which would grow
+amix to one input per bed and make the mixed level depend on how many
+clips A1 happens to hold. The mix width therefore stays fixed at three
+(clip layer, bed layer, tone layer), verified for 1, 2 and 3 clips.
+Silence pieces are pinned by SAMPLE COUNT, not seconds: anullsrc's
+duration= floors to int(D*sr), while a following atrim=end_sample=N is
+exact, and the piece's aformat must precede that atrim because concat
+negotiates its output format from its FIRST input -- which a silence
+piece becomes as soon as clip 0 is the one removed.
+
 The delay is the first clip's head hold, frame-quantized exactly like
 the hold's own gap. A hold freezes a frame BEFORE the clip proper
 begins, so a bed starting at 0 would play music over that frozen frame
@@ -601,10 +613,13 @@ same per-clip pieces the audio graph itself emits -- lead gap, body,
 trail gap, and the sub-frame slack a non-frame-aligned trim leaves --
 and marks each one as sound or silence, with the body silent when the
 clip is slowed or its source has no audio stream. noise_fill_plan()
-then subtracts the span the A1 track's own audio actually covers,
-taken from bed_span() over the probed duration of the audio STREAM (a
-container's duration reports its longest stream, which would credit a
-file with sound it does not have). The complement is the fill.
+then subtracts the spans the A1 track's own audio actually covers,
+taken from bed_spans() -- one span per A1 clip, each from the probed
+duration of the audio STREAM (a container's duration reports its
+longest stream, which would credit a file with sound it does not
+have). Those spans are merged into a disjoint list and subtracted
+interval-wise, so a HOLE between two A1 clips is fill-eligible exactly
+like a head hold is. The complement is the fill.
 
 Both earlier designs are worth remembering, because they failed in
 opposite directions:
@@ -624,11 +639,26 @@ position, and never by giving up on measuring.
 
 One pair of generators (noise_fill_plan/noise_track) serves both the
 V1 render and the A1 stem, so the two can never disagree about where
-the tone is or how loud it is. Per run the chain is: atrim the asset's
-dead tail off, aloop endlessly, volume +12 dB, aformat to the graph's
-rate/layout, atrim to the run's length. Runs are concatenated per clip
-and padded to that clip's own frame-quantized length. Three parts of
-that are counter-intuitive and all three came out of measurement.
+the tone is. Per run the chain is: atrim the asset's dead tail off,
+aloop endlessly, volume <level> dB, aformat to the graph's rate/layout,
+atrim to the run's length. Runs are concatenated per clip and padded to
+that clip's own frame-quantized length. Three parts of that are
+counter-intuitive and all three came out of measurement.
+
+The level is the toolbar's dB stepper beside the toggle, -12 to +24, defaulting to
+NOISE_GAIN_DB = 12.0 -- the value the toggle used to be fixed at, so a
+project made before the control existed renders identically, and a
+request that omits noiseGainDb gets that same graph. +24 is the
+measured ceiling: the asset peaks at -24.92 dBFS, so it is the loudest
+setting at which tone alone cannot clip (it renders at -0.83 dBFS).
+Because the level now arrives per request rather than as a constant,
+"the two can never disagree about how loud it is" is no longer true by
+construction -- both routes read it through the ONE shared parser
+app.py::_a1_noise_gain_db, for the same reason _a1_request_beds exists.
+A third caller must go through it too. Verified: at any level the graph
+differs from the default's only in that volume token, every tone sample
+scales by the requested factor, and the samples carrying clip audio or
+bed differ by exactly zero -- the gain cannot leak off the tone layer.
 
   - The leading atrim is not an optimization. The asset's last 856
     frames (17.8 ms) are literal zeros, so looping the file whole puts
@@ -791,8 +821,11 @@ shapes differ deliberately:
   - An overlaid clip is sent with crop and cropKeyframes NULLED, and
     an `overlay` object attached instead ({input, dir, inSec, outSec,
     x, y, w, h, keyframes}) -- see section 8.
-  - audioBed, fillNoise and noAudio ride BESIDE the clip list, not
-    inside it: they are sequence-level, not per-clip.
+  - audioBeds, fillNoise, noiseGainDb and noAudio ride BESIDE the
+    clip list, not inside it: they are sequence-level, not per-clip.
+    Each bed carries { input, dir, startSec } -- its lane position is
+    a client edit decision, while how far its audio REACHES is a
+    server-owned media fact taken from the probe.
   - With fillNoise on, both render responses carry noise_fill_sec and
     sequence_sec -- how much silence the fill actually found, against
     the sequence it measured. Room tone is render-only and inaudible
@@ -864,11 +897,16 @@ from disk) both RESET the history instead of pushing to it -- undoing
 across either would restore clips pointing at media that is gone or
 belongs to a different project.
 
-A1 is a third lane under V1 holding exactly ONE audio file -- the bed
-(music or voice-over). "Smart" means it owns no timing of its own: it
-is linked to V1, starting where V1's PICTURE starts, padded with
-silence if shorter than the sequence and cut if longer, so it cannot
-drift out of sync no matter how V1 is re-edited. It MIXES with V1's
+A1 is a third lane under V1 holding an ORDERED LANE of audio files --
+the bed (music, voice-over, effects). "Smart" means it owns no timing
+of its own: the lane is linked to V1, starting where V1's PICTURE
+starts, padded with silence if shorter than the sequence and cut if
+longer, so it cannot drift out of sync no matter how V1 is re-edited.
+Each A1 clip carries its own lane-relative startSec, so removing one
+with its x leaves every other clip exactly where it was and the HOLE
+that opens plays as silence -- or as room tone, if the toggle is on.
+That position is lane-relative (0 = V1's picture start, EXCLUDING the
+head hold) precisely so a head-hold edit never has to rewrite it. It MIXES with V1's
 own audio rather than replacing it, attenuated by a fixed gain since
 there is no volume control. Section 5 covers the graph and every
 measured parameter. The bed is not clip-shaped -- no head/tail/round
@@ -1272,11 +1310,19 @@ session, all of them plain JSON or plain files:
                                      pcm_s16le, 48 kHz stereo, 3.003s)
     localStorage                    per-bin favorites, sticky track tags
 
-A .nara project is { version: 4, clips, track2Clips, audioBed,
-selectedId, exportPresets }. Version 3 added audioBed, 4 added
-exportPresets. Nothing READS the version field -- it is a marker for
-humans, and older files load unchanged because every addition degrades
-to a sensible empty value (no bed, no presets). The
+A .nara project is { version: 6, clips, track2Clips, audioBeds,
+selectedId, exportPresets, noiseEnabled, noiseGainDb }. Version 3
+added audioBed, 4 added exportPresets, 5 replaced the single audioBed
+with the ordered audioBeds array (each entry gaining a lane-relative
+startSec), 6 added the two room-tone settings. Nothing READS the
+version field -- it is a marker for humans, and older files load
+unchanged because every addition degrades to a sensible empty value
+(no beds, no presets, tone off). The two room-tone fields are
+back-filled by KEY PRESENCE, not truthiness: 0 dB is a legal level, so
+`noiseGainDb || 12` would be the `speed`-`or`-`1.0` bug again. A bed
+saved before startSec existed gets one back-filled from the cumulative
+sum of the durations ahead of it, which reproduces exactly the lane
+that file used to render. The
 backend treats the file as opaque JSON except for validating that
 clips is a list. Opening a project MERGES its export presets into the
 local set rather than replacing them, so opening someone else's
@@ -1343,8 +1389,8 @@ Export settings
 Renders
     POST /api/render_timeline       render an entire clip list in one
                                      ffmpeg pass (sections 4-6), with
-                                     optional audioBed / fillNoise /
-                                     noAudio
+                                     optional audioBeds / fillNoise /
+                                     noiseGainDb / noAudio
     POST /api/render_a1             render the A1 track alone to a
                                      .wav timed to the V1 sequence
                                      (section 9)
@@ -1401,7 +1447,9 @@ Every client-supplied filename is resolved through a traversal guard
     +2.61 dBFS with no tone at all, and AAC does not clamp it (a hot
     test measured +3.44 dB surviving the encode). Room tone adds
     nothing to that, since it plays only where nothing else does: the
-    render peak is max(existing peak, -12.83 dBFS), measured unchanged
+    render peak is max(existing peak, the tone's peak at the chosen
+    level -- -12.83 dBFS at the default +12, -0.83 at the +24 ceiling),
+    measured unchanged
     at -9.06 dBFS with the toggle off and on. The bed's exposure is
     real; the tone's is not.
 

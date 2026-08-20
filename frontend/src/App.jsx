@@ -12,7 +12,9 @@ import TechInfoPanel from './components/TechInfoPanel'
 import HoldFrameForm from './components/HoldFrameForm'
 import TrimForm from './components/TrimForm'
 import ReverseForm from './components/ReverseForm'
-import SpeedForm from './components/SpeedForm'
+import SpeedForm, {
+  NOISE_GAIN_DB_DEFAULT, NOISE_GAIN_DB_MIN, NOISE_GAIN_DB_MAX,
+} from './components/SpeedForm'
 import CropForm from './components/CropForm'
 import CropOverlay from './components/CropOverlay'
 import OverlayPreview from './components/OverlayPreview'
@@ -27,7 +29,7 @@ import ProjectLibrary from './components/ProjectLibrary'
 import AboutDialog from './components/AboutDialog'
 import FfmpegCustomSettings from './components/FfmpegCustomSettings'
 import Timeline from './components/Timeline/Timeline'
-import { clipBaseSec, roundUpAmount } from './clipMath'
+import { clipBaseSec, roundUpAmount, clampNoiseGainDb, normalizeBeds, bedLaneEndSec } from './clipMath'
 import { loadTrackTags, tagTrack, renameTrackTag, isAudioFile } from './fileList'
 import { analyzeAgainstV1, batchCutAgainstV1, reconstructFromV1, sequencePieces } from './analyzeMath'
 import { mergeExportPresets } from './exportPresets'
@@ -130,7 +132,12 @@ function AppInner() {
   // there is nothing for the clip toolbar to trim or select. Order IS the lane,
   // so this is an array and the render sends it in order. Undoable like the
   // other two — add and remove are the only edits it has, and both are as
-  // destructive as any V1 edit. Shape: [{ name, dir, durationSec }].
+  // destructive as any V1 edit. Shape: [{ name, dir, durationSec, startSec }].
+  // `startSec` (version 6) is what makes the lane's positions EXPLICIT: removing
+  // a clip leaves the survivors exactly where they were, and the hole renders as
+  // silence — or as room tone when that toggle is on. It is LANE seconds, 0 being
+  // V1's picture start excluding V1's head hold, so it is immune to head-hold
+  // edits. clipMath.normalizeBeds back-fills it for older projects.
   // Eye = show the bar on the timeline. It does not affect the render — the
   // bed is either loaded or it isn't. a1Muted silences the bed in the PREVIEW
   // only; it has no UI control (the gutter is just A1 + the eye), so it stays
@@ -159,10 +166,22 @@ function AppInner() {
   // audio and the bed come out bit-identical at their own level, and no length
   // and no video frame changes either way (all three verified by subtraction).
   // A render-wide switch, not a per-clip decision — it never marks a clip dirty.
-  // Render-time only: the preview does not emulate it. Session-only, like
-  // v2RenderMode: not persisted in the .nara.
+  // Render-time only: the preview does not emulate it. Both the switch and the
+  // level below are saved in the .nara (version 6), since a project's room tone
+  // is part of how it is meant to sound.
   const [noiseEnabled, setNoiseEnabled] = useState(false)
   const toggleNoise = useCallback(() => setNoiseEnabled(v => !v), [])
+  // How loud the tone is, in dB of gain on the asset. Held as the field's RAW
+  // TEXT, not a number, so a half-typed "-" or a momentarily empty box doesn't
+  // snap back under the cursor; clamped to a number exactly once, at payload
+  // time, by clampNoiseGainDb. Deliberately not part of useUndoableTracks: it is
+  // a render setting rather than a lane snapshot, and spending an undo step per
+  // ▲ click would bury whatever real edit the user actually wants back.
+  const [noiseGainDb, setNoiseGainDb] = useState(String(NOISE_GAIN_DB_DEFAULT))
+  const noiseSettings = useCallback(() => ({
+    noiseGainDb: clampNoiseGainDb(
+      noiseGainDb, NOISE_GAIN_DB_DEFAULT, NOISE_GAIN_DB_MIN, NOISE_GAIN_DB_MAX),
+  }), [noiseGainDb])
   // Shared timecode/frames display mode — lifted here (rather than local to
   // TransportBar) so Trim and Splice, which live as separate sibling
   // components, can format/parse positions the same way the transport clock
@@ -546,6 +565,24 @@ function AppInner() {
     })
   }
 
+  // The A1 lane as the server wants it: which file, where it came from, and where
+  // it sits on the lane. One helper rather than an inline .map per route, because
+  // Render V1 and Render A1 must describe the SAME lane — a startSec present in
+  // one and missing in the other would put a removed clip's hole in a different
+  // place in the .wav than in the video, and the two are meant to be
+  // sample-for-sample interchangeable.
+  //
+  // No duration goes out: the server measures each bed's reach from its own audio
+  // stream (see ffmpeg_utils.bed_spans), which is the only number room tone can
+  // safely be kept off.
+  function bedsToPayload(beds) {
+    return normalizeBeds(beds).map(b => ({
+      input: b.name,
+      dir: b.dir,
+      startSec: b.startSec || 0,
+    }))
+  }
+
   // Render V2 in 1+ mode: one pass per cut, in track order, writing
   // `<name>_01`, `_02`… (see renderNames.shotOutputNames — the same function
   // the dialog previewed the series with, so the names shown are the names
@@ -565,7 +602,11 @@ function AppInner() {
   // parallel ffmpeg runs happened to finish. A failure stops the series there
   // and says which shot — the shots already written stay, since they're
   // finished files and re-running only appends a fresh series.
-  async function renderShots(sourceClips, overlays, baseName, noAudio, noise) {
+  // `settings` is the render-wide knob bag (see api.renderTimeline) — passed in
+  // from the caller already clamped, so every shot in the series is rendered
+  // with the exact numbers the joined render would have used. Forgetting it here
+  // would make a 1+ series quietly stop matching Render V1.
+  async function renderShots(sourceClips, overlays, baseName, noAudio, noise, settings) {
     const names = shotOutputNames(baseName, sourceClips.length)
     for (let i = 0; i < sourceClips.length; i++) {
       setV2ShotProgress({ done: i, total: sourceClips.length })
@@ -590,7 +631,7 @@ function AppInner() {
       // The whole overlay list goes in; clipsToPayload pairs by clip id (which
       // the copy above keeps), so a shot with no V2 partner renders without one.
       const payload = clipsToPayload([shotClip], overlays)
-      const result = await renderTimeline(payload, names[i], noAudio, [], noise)
+      const result = await renderTimeline(payload, names[i], noAudio, [], noise, settings)
       if (result.error) {
         alert(
           `Render failed on shot ${i + 1} of ${sourceClips.length}: ` + result.error
@@ -620,9 +661,14 @@ function AppInner() {
     if (result?.noise_fill_sec == null) return
     const fill = result.noise_fill_sec
     const seq = result.sequence_sec
+    // The level comes from the SERVER's echo, not from local state: what the log
+    // reports is then the level that actually reached the filtergraph, so a
+    // clamp or a stale field shows up here instead of being papered over.
+    const gain = result.noise_gain_db
+    const at = gain == null ? '' : ` at ${gain > 0 ? '+' : ''}${gain} dB`
     setAnalyzeLog(prev => [
       fill > 0
-        ? { kind: 'info', text: `♪ ${label}: room tone filled ${fill.toFixed(2)}s of silence in a ${seq.toFixed(2)}s sequence` }
+        ? { kind: 'info', text: `♪ ${label}: room tone filled ${fill.toFixed(2)}s of silence in a ${seq.toFixed(2)}s sequence${at}` }
         : { kind: 'warn', text: `♪ ${label}: room tone found no silence to fill — all ${seq.toFixed(2)}s already carries audio, so the render is unchanged` },
       ...prev,
     ])
@@ -645,12 +691,15 @@ function AppInner() {
       // A renders the V2 track by itself, where a V1-length lane has no
       // meaning. noAudio also excludes it — the backend rejects that
       // combination outright, so don't send it. Order is the lane order.
-      const beds = (isV2 || noAudio) ? [] : audioBeds.map(b => ({ input: b.name, dir: b.dir }))
+      const beds = (isV2 || noAudio) ? [] : bedsToPayload(audioBeds)
       // Unlike the bed, noise fill is NOT V1-only: a V2 render has its own
       // holds and slow-downs, and their gaps deserve the same treatment. It is
       // suppressed only by noAudio, where there is no audio graph to fill (the
       // backend rejects that combination outright).
       const noise = !noAudio && noiseEnabled
+      // Clamped ONCE per render, here, and handed to both paths below, so a 1+
+      // series and a joined render can't disagree about the level.
+      const settings = noiseSettings()
       // The 1 / 1+ switch belongs to the V2 group, so only its two targets read
       // it — Render V1 always writes one file, as it always has.
       if ((isV2 || isComposite) && v2ShotMode === '1+') {
@@ -665,7 +714,7 @@ function AppInner() {
             ...prev,
           ])
         }
-        const ok = await renderShots(sourceClips, overlays, outputName, noAudio, noise)
+        const ok = await renderShots(sourceClips, overlays, outputName, noAudio, noise, settings)
         // Clean only when the whole series landed: a stopped series left some
         // of the track unrendered, and the dot is what says so. `silent` —
         // clearing dirty dots is bookkeeping the user didn't do, so it must not
@@ -677,7 +726,7 @@ function AppInner() {
         return
       }
       const payload = clipsToPayload(sourceClips, overlays)
-      const result = await renderTimeline(payload, outputName, noAudio, beds, noise)
+      const result = await renderTimeline(payload, outputName, noAudio, beds, noise, settings)
       if (result.error) { alert('Render failed: ' + result.error + (result.detail ? '\n' + result.detail : '')); return }
       logNoiseFill(result, isV2 ? 'V2' : isComposite ? 'A/B' : 'V1')
       // silent for the same reason as the 1+ path above.
@@ -709,12 +758,12 @@ function AppInner() {
     setRendering(true)
     try {
       const payload = clipsToPayload(timelineClips)
-      const beds = audioBeds.map(b => ({ input: b.name, dir: b.dir }))
+      const beds = bedsToPayload(audioBeds)
       // Named after the FIRST clip on the lane when there's no project name —
       // the one the render starts with, and the only stable choice as more are
       // appended.
       const base = projectName || (audioBeds[0] ? audioBeds[0].name.replace(/\.[^.]+$/, '') : 'render')
-      const result = await renderA1(payload, `${base}_A1`, beds, noiseEnabled)
+      const result = await renderA1(payload, `${base}_A1`, beds, noiseEnabled, noiseSettings())
       if (result.error) {
         alert('Render A1 failed: ' + result.error + (result.detail ? '\n' + result.detail : ''))
         return
@@ -850,15 +899,23 @@ function AppInner() {
       return false
     }
     setTrackTags(prev => tagTrack(name, 'a1', prev))
+    // Positioned INSIDE the updater, not from the `audioBeds` in scope:
+    // Timeline.handleA1Files awaits this once per dropped file, so React state
+    // still holds the pre-drop lane on the second call and a start computed out
+    // here would stack every file on top of the first.
+    //
+    // The end of the LAST bed, not the sum of the durations: with a hole in the
+    // lane those differ, and a new clip belongs after everything already there.
     setAudioBeds(prev => [...prev, {
       name,
       dir: 'input',
       // The container duration, not video_duration: an audio-only file has no
       // video stream, and for a file that does have one it's the audio that
-      // matters here. This is also what places every LATER clip on the lane
-      // (each one starts at the running sum), so it's read once here rather
-      // than re-probed per render.
+      // matters here. This is what DRAWS the clip and what places the next one;
+      // the render measures its own reach from the audio stream instead, so this
+      // is read once here rather than re-probed per render.
       durationSec: info.duration,
+      startSec: bedLaneEndSec(prev),
     }])
     return true
   }
@@ -872,6 +929,12 @@ function AppInner() {
 
   // By index, not by name: the same file can legitimately sit on A1 twice (a
   // sting used at the head and again at the tail), so identity is position.
+  //
+  // Dropping the entry is the WHOLE edit: every surviving bed carries its own
+  // startSec, so nothing moves and the render fills the hole it leaves with
+  // silence (or room tone). Before startSec existed, position was the running sum
+  // of the preceding durations, so this same line pulled the rest of the lane
+  // earlier.
   function handleRemoveBed(index) {
     setAudioBeds(prev => prev.filter((_, i) => i !== index))
   }
@@ -950,13 +1013,25 @@ function AppInner() {
     }
   }
 
-  // version 5 turns A1 into a lane: `audioBeds` (an ordered array) replaces
-  // version 3's single `audioBed` object, and version 4 added exportPresets.
-  // Nothing reads `version` — it's a marker for humans reading a .nara — and
-  // older files still load unchanged (handleLibraryOpen promotes a lone
-  // `audioBed` to a one-clip lane and defaults a missing preset list to none).
+  // version 6 saves the room-tone settings — `noiseEnabled` and `noiseGainDb` —
+  // because how a project's silence sounds is part of the project, not a
+  // property of whoever last had it open. version 5 turned A1 into a lane:
+  // `audioBeds` (an ordered array) replaces version 3's single `audioBed`
+  // object, and version 4 added exportPresets. Nothing reads `version` — it's a
+  // marker for humans reading a .nara — and older files still load unchanged
+  // (handleLibraryOpen promotes a lone `audioBed` to a one-clip lane, defaults a
+  // missing preset list to none, and defaults absent room-tone keys).
+  //
+  // The level is saved as the CLAMPED NUMBER, never the raw field text: a .nara
+  // is read by the next session and by a human, and "-" or "999" is neither a
+  // level nor something the server would accept.
   function buildProject() {
-    return { version: 5, clips: timelineClips, track2Clips, audioBeds, selectedId, exportPresets }
+    return {
+      version: 6, clips: timelineClips, track2Clips, audioBeds, selectedId, exportPresets,
+      noiseEnabled,
+      noiseGainDb: clampNoiseGainDb(
+        noiseGainDb, NOISE_GAIN_DB_DEFAULT, NOISE_GAIN_DB_MIN, NOISE_GAIN_DB_MAX),
+    }
   }
 
   async function handleSave() {
@@ -1034,12 +1109,22 @@ function AppInner() {
       v1: project.clips,
       v2: project.track2Clips || [],
       // A pre-version-5 project has a single `audioBed` object; it becomes a
-      // one-clip lane, which renders the graph it always did.
-      a1: project.audioBeds || (project.audioBed ? [project.audioBed] : []),
+      // one-clip lane, which renders the graph it always did. normalizeBeds
+      // back-fills startSec for anything written before version 6, from the
+      // cumulative sum that USED to be the lane's only notion of position — so an
+      // older project reopens as the same lane it rendered as.
+      a1: normalizeBeds(project.audioBeds || (project.audioBed ? [project.audioBed] : [])),
     })
     setSelectedId(project.selectedId || null)
     setProjectName(name)
     setShowLibrary(false)
+    // Room tone (version 6). Both operators are load-bearing on a pre-version-6
+    // file, which has neither key: `=== true` so a missing switch is off rather
+    // than truthy-undefined, and `== null` — NOT `||` — because 0 dB is a legal
+    // level that `||` would silently promote to the default.
+    setNoiseEnabled(project.noiseEnabled === true)
+    setNoiseGainDb(String(
+      project.noiseGainDb == null ? NOISE_GAIN_DB_DEFAULT : project.noiseGainDb))
     // The project's own export presets fold into the saved set (see
     // mergeExportPresets — the project's copy wins a name collision, and a
     // pre-version-4 project has none, so nothing happens). The POST is what
@@ -1181,6 +1266,8 @@ function AppInner() {
         setClips={setActiveClips}
         noiseEnabled={noiseEnabled}
         onToggleNoise={toggleNoise}
+        noiseGainDb={noiseGainDb}
+        onSetNoiseGainDb={setNoiseGainDb}
       />
     </div>
   )

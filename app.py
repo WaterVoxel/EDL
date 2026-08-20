@@ -689,6 +689,83 @@ def _a1_request_beds(data):
     return [b for b in beds if b]
 
 
+def _a1_bed_placements(raw_beds, bed_infos):
+    """The A1 lane as `(start_sec, reach_sec)` pairs for ffmpeg_utils, one per bed.
+
+    Both render routes build the lane through this, for the same reason they share
+    _a1_request_beds and _a1_noise_gain_db: a placement list that differs between
+    the two puts a removed bed's hole in a different place in the stem than in the
+    render, which is exactly the kind of drift an A1 stem exists to rule out.
+
+    The two halves come from deliberately different sources. `startSec` is a client
+    EDIT DECISION — where the user left that bed on the lane — so it is validated
+    and otherwise trusted. `reach` is a MEDIA FACT, so it is the server's probed
+    audio-stream duration and never the client's `durationSec` (which is a
+    container duration used only for drawing). Coverage stays measured; only its
+    granularity changed, from one sum for the lane to one figure per bed.
+
+    A bed with no `startSec` — an older client, or a .nara saved before beds
+    carried one — yields None, which fu.normalize_bed_placements falls back to
+    "starts where the previous bed's audio ends": the contiguous lane A1 has always
+    been, rendering the graph it always did.
+
+    Raises ValueError for the caller to turn into a 400.
+    """
+    placements = []
+    for n, (raw_bed, info) in enumerate(zip(raw_beds, bed_infos)):
+        raw = raw_bed.get("startSec") if isinstance(raw_bed, dict) else None
+        if raw is None:
+            start = None
+        else:
+            try:
+                start = float(raw)
+            except (ValueError, TypeError):
+                raise ValueError(f"A1 clip {n + 1}: startSec must be numeric")
+            # `not (a <= x <= b)` so NaN is rejected rather than reaching the
+            # filtergraph as an anullsrc duration. The ceiling is a day, which no
+            # real lane approaches — it is here to catch a corrupt value, not to
+            # express a limit.
+            if not (0.0 <= start <= 86400.0):
+                raise ValueError(
+                    f"A1 clip {n + 1}: startSec must be between 0 and 86400 seconds"
+                )
+        placements.append((start, info.get("audio_duration") or 0.0))
+    return placements
+
+
+def _a1_noise_gain_db(data):
+    """The room-tone level out of a render request, in dB, validated.
+
+    Both render routes call this, for the same reason they both call
+    _a1_request_beds: the level has to reach ffmpeg_utils identically down
+    either path or /api/render_a1's stem stops matching the joined render.
+    That equivalence used to hold by construction (the gain was a module
+    constant applied in one place); now that it arrives per request, this
+    function is the single place it is read and bounded.
+
+    A request that omits the key gets fu.NOISE_GAIN_DB — the exact graph an
+    older client always got. Deliberately NOT `data.get(...) or DEFAULT`:
+    0 dB (raw asset level) is a legal value, and `or` would silently turn it
+    into 12, the same bug class as `speed or 1.0`.
+    """
+    raw = data.get("noiseGainDb")
+    if raw is None:
+        return fu.NOISE_GAIN_DB
+    try:
+        gain = float(raw)
+    except (ValueError, TypeError):
+        raise ValueError("noiseGainDb must be numeric")
+    # `not (a <= x <= b)` rather than `x < a or x > b` so NaN is rejected too.
+    if not (fu.NOISE_GAIN_DB_MIN <= gain <= fu.NOISE_GAIN_DB_MAX):
+        raise ValueError(
+            f"noiseGainDb must be between {fu.NOISE_GAIN_DB_MIN} and "
+            f"{fu.NOISE_GAIN_DB_MAX} dB"
+        )
+    # Round to the frontend's step precision so the filtergraph string for a
+    # given user-visible level is deterministic (framemd5 checks depend on it).
+    return round(gain, 1)
+
+
 @app.route("/api/render_timeline", methods=["POST"])
 def render_timeline():
     data = request.get_json(force=True)
@@ -768,7 +845,8 @@ def render_timeline():
     bed_paths = []
     bed_indexes = []
     bed_infos = []
-    for n, raw_bed in enumerate(_a1_request_beds(data)):
+    raw_beds = _a1_request_beds(data)
+    for n, raw_bed in enumerate(raw_beds):
         try:
             bed_name = raw_bed["input"]
             bed_path = fu.safe_path(
@@ -800,6 +878,13 @@ def render_timeline():
     # client-supplied name, so this adds no new file-reference surface.
     noise_paths = []
     noise_index = None
+    # Parsed unconditionally, even with the toggle off: an out-of-range level is
+    # a bad request either way, and reporting it only once room tone happens to
+    # be on would surface the client bug at a random later moment.
+    try:
+        noise_gain_db = _a1_noise_gain_db(data)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     if data.get("fillNoise"):
         if not os.path.isfile(fu.NOISE_ASSET):
             return jsonify({
@@ -1079,15 +1164,19 @@ def render_timeline():
     out_name = candidate
     out_path = os.path.join(export_dir, out_name)
 
-    # How far the A1 lane's SOUND reaches, which is what keeps room tone off it
-    # (see fu.noise_fill_plan). Summed from each file's audio-stream duration, not
-    # its container duration: a file whose video runs past its audio would
-    # otherwise be credited with sound it does not have.
-    bed_reach_sec = sum(i.get("audio_duration") or 0.0 for i in bed_infos)
+    # Where each bed sits on the A1 lane and how far its SOUND reaches — what
+    # keeps room tone off the lane, and what makes a removed bed leave a hole
+    # instead of pulling the rest of the lane earlier (see fu.bed_spans and
+    # fu.a1_bed_source).
+    try:
+        bed_placements = _a1_bed_placements(raw_beds, bed_infos)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
     filt = fu.build_timeline_filter(
         clip_specs, target_w, target_h, target_fps, no_audio=no_audio, audio_beds=bed_indexes,
-        fill_noise=noise_index, bed_reach_sec=bed_reach_sec
+        fill_noise=noise_index, bed_placements=bed_placements,
+        noise_gain_db=noise_gain_db
     )
 
     # Overlay sources come after every clip input, matching the input_index
@@ -1109,10 +1198,11 @@ def render_timeline():
     noise_report = {}
     if noise_index is not None:
         tone_sec, seq_sec = fu.noise_fill_summary(
-            clip_specs, bed_reach_sec=bed_reach_sec, has_bed=bool(bed_indexes)
+            clip_specs, bed_placements=bed_placements
         )
         noise_report = {"noise_fill_sec": round(tone_sec, 3),
-                        "sequence_sec": round(seq_sec, 3)}
+                        "sequence_sec": round(seq_sec, 3),
+                        "noise_gain_db": noise_gain_db}
 
     quality = get_export_quality()
     if quality in fu.MULTIPASS_QUALITIES:
@@ -1160,6 +1250,12 @@ def render_a1():
     # The A1 track has content only if a bed, room-tone fill, or both are on.
     raw_beds = _a1_request_beds(data)
     fill_noise_on = bool(data.get("fillNoise"))
+    # Same unconditional parse as render_timeline, via the same function, so this
+    # stem's tone level can never drift from the joined render's.
+    try:
+        noise_gain_db = _a1_noise_gain_db(data)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     if not raw_beds and not fill_noise_on:
         return jsonify({"error": "nothing on A1 to render: load an audio track or turn on A1 Room Tone"}), 400
 
@@ -1262,13 +1358,18 @@ def render_a1():
         noise_index = len(input_paths)
         input_paths.append(fu.NOISE_ASSET)
 
-    # Same measured lane reach render_timeline computes, from the same key, so the
-    # stem's room tone lands in exactly the same stretches as the render's.
-    bed_reach_sec = sum(i.get("audio_duration") or 0.0 for i in bed_infos)
+    # The same lane render_timeline builds, through the same function, so the
+    # stem's room tone lands in exactly the same stretches as the render's and a
+    # removed bed leaves its hole in the same place.
+    try:
+        bed_placements = _a1_bed_placements(raw_beds, bed_infos)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
     try:
         filt = fu.build_a1_filter(clip_specs, audio_beds=bed_indexes,
-                                  fill_noise=noise_index, bed_reach_sec=bed_reach_sec)
+                                  fill_noise=noise_index, bed_placements=bed_placements,
+                                  noise_gain_db=noise_gain_db)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
@@ -1292,10 +1393,11 @@ def render_a1():
     noise_report = {}
     if noise_index is not None:
         tone_sec, seq_sec = fu.noise_fill_summary(
-            clip_specs, bed_reach_sec=bed_reach_sec, has_bed=bool(bed_indexes)
+            clip_specs, bed_placements=bed_placements
         )
         noise_report = {"noise_fill_sec": round(tone_sec, 3),
-                        "sequence_sec": round(seq_sec, 3)}
+                        "sequence_sec": round(seq_sec, 3),
+                        "noise_gain_db": noise_gain_db}
     return jsonify({"output": candidate, **noise_report})
 
 
