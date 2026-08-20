@@ -11,7 +11,7 @@ export function withDefaultExt(name) {
   return trimmed.includes('.') ? trimmed : `${trimmed}.mp4`
 }
 
-// Names for a shot-by-shot render (Render V2's 1+ mode): the typed name with a
+// Names for a shot-by-shot render (V2 Render's 1+ mode): the typed name with a
 // zero-padded index inserted before the extension, one per cut in track order.
 //
 // Zero-padded to at least two digits so the series sorts in cut order in the

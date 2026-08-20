@@ -30,7 +30,7 @@ export const deleteOutputFile = (name) => fetch(`/api/outputs/${encodeURICompone
 // "key absent → the graph an older client always got" default reachable.
 export const renderTimeline = (clips, output, noAudio = false, audioBeds = [], fillNoise = false, settings = {}) =>
   postJSON('/api/render_timeline', { clips, output, noAudio, audioBeds, fillNoise, ...settings })
-// Render A1 alone to a .wav. Takes the SAME clip payload a V1 render does — the
+// Render the A1 track alone to a .wav (the A1 Render button). Takes the SAME clip payload a V1 render does — the
 // server reads only the timing keys off it, but sending the whole thing keeps
 // the two calls interchangeable at the call site. The extension is the server's
 // to decide, so `output` is a base name.

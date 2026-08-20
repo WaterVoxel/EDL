@@ -297,7 +297,7 @@ function AppInner() {
   const overlays = overlayMatch.overlays
   const hasOverlay = overlays.length > 0
 
-  // "Render V2" mode, toggled by the A / A/B switch beside that button:
+  // "V2 Render" mode, toggled by the A / A/B switch beside that button:
   //   'A'  → render the V2 track on its own, to its own file (the original
   //          behavior, and the default).
   //   'AB' → composite V2 over V1 and render the two as one clip.
@@ -309,7 +309,7 @@ function AppInner() {
   const abMatch = matchOverlays(timelineClips, track2Clips, { fullFrameSameSize: true })
   const abOverlays = abMatch.overlays
 
-  // "Render V2"'s second axis, the 1 / 1+ switch beside the A / A/B one:
+  // "V2 Render"'s second axis, the 1 / 1+ switch beside the A / A/B one:
   //   '1'  → one file, the whole track joined into a single clip (the original
   //          behavior, and the default).
   //   '1+' → one file per cut, each shot rendered on its own and numbered in
@@ -321,7 +321,7 @@ function AppInner() {
   const [v2ShotMode, setV2ShotMode] = useState('1')
   // { done, total } while a shot-by-shot render is running, null otherwise.
   // A 1+ render is N sequential ffmpeg passes behind one click, so unlike every
-  // other render in the app it has an inside to report — the Render V2 button
+  // other render in the app it has an inside to report — the V2 Render button
   // counts the shots off and refuses a second click until they're done.
   const [v2ShotProgress, setV2ShotProgress] = useState(null)
 
@@ -345,11 +345,11 @@ function AppInner() {
       msgs.push({
         kind: 'info',
         text: `▣ ${overlays.length} V2 ${overlays.length === 1 ? 'clip is' : 'clips are'} composited over V1 `
-          + `(${overlays.map(o => `${o.w}×${o.h}`).join(', ')}) — set the V2 toggle to A/B and click Render V2 to burn ${overlays.length === 1 ? 'it' : 'them'} in`,
+          + `(${overlays.map(o => `${o.w}×${o.h}`).join(', ')}) — set the V2 toggle to A/B and click V2 Render to burn ${overlays.length === 1 ? 'it' : 'them'} in`,
       })
     }
     if (hasDirty) {
-      msgs.push({ kind: 'info', text: '● Unrendered edits — click Render V1 to apply' })
+      msgs.push({ kind: 'info', text: '● Unrendered edits — click V1 Render to apply' })
     }
     return [...analyzeLog, ...msgs]
   })()
@@ -567,7 +567,7 @@ function AppInner() {
 
   // The A1 lane as the server wants it: which file, where it came from, and where
   // it sits on the lane. One helper rather than an inline .map per route, because
-  // Render V1 and Render A1 must describe the SAME lane — a startSec present in
+  // V1 Render and A1 Render must describe the SAME lane — a startSec present in
   // one and missing in the other would put a removed clip's hole in a different
   // place in the .wav than in the video, and the two are meant to be
   // sample-for-sample interchangeable.
@@ -583,7 +583,7 @@ function AppInner() {
     }))
   }
 
-  // Render V2 in 1+ mode: one pass per cut, in track order, writing
+  // V2 Render in 1+ mode: one pass per cut, in track order, writing
   // `<name>_01`, `_02`… (see renderNames.shotOutputNames — the same function
   // the dialog previewed the series with, so the names shown are the names
   // written).
@@ -605,7 +605,7 @@ function AppInner() {
   // `settings` is the render-wide knob bag (see api.renderTimeline) — passed in
   // from the caller already clamped, so every shot in the series is rendered
   // with the exact numbers the joined render would have used. Forgetting it here
-  // would make a 1+ series quietly stop matching Render V1.
+  // would make a 1+ series quietly stop matching V1 Render.
   async function renderShots(sourceClips, overlays, baseName, noAudio, noise, settings) {
     const names = shotOutputNames(baseName, sourceClips.length)
     for (let i = 0; i < sourceClips.length; i++) {
@@ -687,7 +687,7 @@ function AppInner() {
       // full-frame-aware match (abOverlays), not the always-on one.
       const overlays = isComposite ? abOverlays : []
       // A1 is locked to V1, so it only rides along on renders that CONTAIN the
-      // V1 sequence: a plain V1 render and an A/B composite. Render V2 in mode
+      // V1 sequence: a plain V1 render and an A/B composite. V2 Render in mode
       // A renders the V2 track by itself, where a V1-length lane has no
       // meaning. noAudio also excludes it — the backend rejects that
       // combination outright, so don't send it. Order is the lane order.
@@ -701,7 +701,7 @@ function AppInner() {
       // series and a joined render can't disagree about the level.
       const settings = noiseSettings()
       // The 1 / 1+ switch belongs to the V2 group, so only its two targets read
-      // it — Render V1 always writes one file, as it always has.
+      // it — V1 Render always writes one file, as it always has.
       if ((isV2 || isComposite) && v2ShotMode === '1+') {
         // A1 is defined against the WHOLE V1 sequence: one delay past the head
         // hold, one length, one run of clips. A single shot has none of that, so
@@ -710,7 +710,7 @@ function AppInner() {
         // there was something to leave out.
         if (beds.length > 0) {
           setAnalyzeLog(prev => [
-            { kind: 'info', text: `▣ A1 is not included in a 1+ render — the lane is timed to the whole V1 sequence, not to a single shot. Use Render A1 for it.` },
+            { kind: 'info', text: `▣ A1 is not included in a 1+ render — the lane is timed to the whole V1 sequence, not to a single shot. Use A1 Render for it.` },
             ...prev,
           ])
         }
@@ -742,7 +742,7 @@ function AppInner() {
     }
   }
 
-  // Render A1 — the audio counterpart to Render V1: writes the A1 track alone
+  // A1 Render — the audio counterpart to V1 Render: writes the A1 track alone
   // to a .wav, timed to the V1 sequence (head-hold delay, padded/cut to the
   // sequence length, bed gain, and — with A1 Room Tone on — tone in exactly the
   // stretches the V1 render fills, which is why V1's clips are sent even though
@@ -765,7 +765,7 @@ function AppInner() {
       const base = projectName || (audioBeds[0] ? audioBeds[0].name.replace(/\.[^.]+$/, '') : 'render')
       const result = await renderA1(payload, `${base}_A1`, beds, noiseEnabled, noiseSettings())
       if (result.error) {
-        alert('Render A1 failed: ' + result.error + (result.detail ? '\n' + result.detail : ''))
+        alert('A1 Render failed: ' + result.error + (result.detail ? '\n' + result.detail : ''))
         return
       }
       // Nothing else reports where an A1 render landed (it writes no video, so
@@ -832,7 +832,7 @@ function AppInner() {
   // V1 APPENDS, exactly like A1: a dropped file lands after the last clip and
   // nothing is replaced. That's the opposite of handleAddToV2 below, and the
   // difference is the tracks, not an inconsistency — V2 is a single-slot track
-  // (Render V2 collapses it to one file, so a second clip there has no
+  // (V2 Render collapses it to one file, so a second clip there has no
   // meaning), while V1 is a sequence being built up.
   //
   // Routed through handleAddToTimeline rather than duplicating its body so a
@@ -1415,7 +1415,7 @@ function AppInner() {
                 onToggleFree={() => setFreeEnabled(v => !v)}
               />
               {/* The Render button used to sit here; it now lives in the
-                  Timeline's action bar as "Render V1", beside Render V2. */}
+                  Timeline's action bar as "V1 Render", beside V2 Render. */}
             </div>
           </div>
           <div ref={previewStageRef} data-tour="previewStage" className="relative flex-1 min-h-[50vh] flex items-center justify-center bg-black p-3">
@@ -1616,8 +1616,8 @@ function AppInner() {
             if (renderTarget === 'composite') return `${stem}-composite.mp4`
             return `${stem}.mp4`
           })()}
-          // Non-zero only for a 1+ Render V2, which turns the one name below
-          // into that many numbered files — the dialog previews them. Render V1
+          // Non-zero only for a 1+ V2 Render, which turns the one name below
+          // into that many numbered files — the dialog previews them. V1 Render
           // never splits, so it never passes a count.
           shotCount={renderTarget !== 'v1' && v2ShotMode === '1+'
             ? (renderTarget === 'v2' ? track2Clips : timelineClips).length

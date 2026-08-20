@@ -6,7 +6,7 @@ import { sampleCropOrigin } from '../cropAnimation'
 // counterpart to the render's `overlay` filter (see build_timeline_filter in
 // ffmpeg_utils.py). A SECOND <video> element is layered over the main
 // preview, sized to the crop box and moved along the same keyframe curve, so
-// what you see while scrubbing is what an A/B "Render V2" will bake in.
+// what you see while scrubbing is what an A/B "V2 Render" will bake in.
 //
 // Why a second element rather than reusing the shared one: the main <video>
 // belongs to the playback engine (which owns its src, currentTime and play

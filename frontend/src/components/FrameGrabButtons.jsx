@@ -13,7 +13,7 @@ import { formatTimecode } from '../timecode'
  *   - V2 overlay layers and the crop box are NOT baked in. Those are separate
  *     DOM elements sitting OVER the video (OverlayPreview / CropOverlay), not
  *     pixels inside it; compositing them here would mean reimplementing the
- *     render's overlay/crop math against a canvas. Render V2 in A/B mode is
+ *     render's overlay/crop math against a canvas. V2 Render in A/B mode is
  *     what bakes an overlay into pixels.
  *   - The PNG is whatever the browser decoded — frame-exact, but no more
  *     color-managed than the preview itself. For a bit-exact still, render.

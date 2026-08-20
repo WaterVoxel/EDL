@@ -943,7 +943,7 @@ points, which is meaningful only when V2 is another version of the
 SAME source -- there, the same timecodes still point at the same
 footage. Batch Analyze assumes the opposite and much more common case
 for multi-shot work: V2 holds V1's sequence JOINED into one file (a
-Render V1 output, or Render V2 on its `1` mode) that went out to an
+V1 Render output, or V2 Render on its `1` mode) that went out to an
 external tool and came back whole. In that file the second shot does
 not begin at V1 clip 2's inSec -- it begins where clip 1 ended -- so
 the boundaries are cumulative DURATIONS from the head of V2's own
@@ -1004,7 +1004,7 @@ RECONSTRUCT is step 2 of a round-trip workflow, not a standalone
 inverse of Analyze. The intended sequence: Analyze conforms V2 to V1's
 cuts (as above); the user then takes V2's rendered footage out of the
 app entirely -- through an external tool, e.g. a style-transfer model
--- and drops the result back onto V2. Render V2 always merges every V2
+-- and drops the result back onto V2. V2 Render always merges every V2
 clip into ONE continuous file, and dropping a file back onto V2
 (handleAddToV2) always replaces V2 with a single fresh clip -- so by
 the time Reconstruct runs, V2 is always exactly one clip, even if V1
@@ -1075,7 +1075,7 @@ deliberate:
     original frame with the processed region on top.
 
 There is exactly one way to reach a composite render: the A / A/B
-switch beside Render V2. In A (default) Render V2 renders the V2 track
+switch beside V2 Render. In A (default) V2 Render renders the V2 track
 alone, as before. In A/B it renders V1 with the overlays attached, and
 is deliberately MORE permissive in one specific way: it passes
 fullFrameSameSize, so a V2 clip matching V1's resolution becomes a
@@ -1116,7 +1116,7 @@ of one:
   - Audio splits at the same points, each file with its own AAC frame
     boundaries; A1 is left out entirely, because the lane is timed to
     the whole V1 sequence (one delay, one length) and re-laying it under
-    each shot would restart it at every cut. Render A1 still writes it.
+    each shot would restart it at every cut. A1 Render still writes it.
 
 Holds stay a property of the SEQUENCE in 1+, not of each shot: the
 head hold opens the first shot and the tail/round hold closes the last,
@@ -1132,7 +1132,7 @@ same pipeline described in sections 4 and 5.
 9. THE A1 STEM RENDER (AUDIO ALONE, TIMED TO THE PICTURE)
 -------------------------------------------------------------
 
-Render A1 (/api/render_a1) renders the A1 track BY ITSELF to a .wav
+A1 Render (/api/render_a1) renders the A1 track BY ITSELF to a .wav
 that is exactly as long as the equivalent V1 render, so it drops into
 another tool already in sync. Codec is always pcm_s16le -- this is a
 stem to mix elsewhere, so it never uses the lossy export-quality

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { withDefaultExt, shotOutputNames } from '../renderNames'
 
-// `shotCount` > 0 means this render writes one file PER CUT (Render V2's 1+
+// `shotCount` > 0 means this render writes one file PER CUT (V2 Render's 1+
 // mode) rather than one file: the dialog then previews the actual series the
 // typed name expands to, live as it's typed, since "one name in, N files out"
 // is not something a single filename field can otherwise convey.
@@ -45,7 +45,7 @@ export default function RenderDialog({ defaultName, showNoAudioOption = false, s
           className="px-2.5 py-1.5 text-[12px] font-mono rounded bg-neutral-950 border border-neutral-700 text-neutral-200 focus:border-indigo-500 focus:outline-none"
         />
         {/* What 1+ is about to write. Teal, the V2 color, because only a
-            Render V2 can be split this way. The middle of a long series is
+            V2 Render can be split this way. The middle of a long series is
             elided rather than listed — the first, the last and the count are
             what identify a series; every name in between is the same string
             with a different number. */}

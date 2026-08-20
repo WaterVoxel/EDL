@@ -470,7 +470,7 @@ export default function Timeline({
   // portal moves only the DOM parent, keeping the React tree, the handlers,
   // and the state exactly as they were.
   //
-  // How many files a 1+ Render V2 would write: the cuts it splits at belong to
+  // How many files a 1+ V2 Render would write: the cuts it splits at belong to
   // whichever track that render is built from — V2's own clips in A, V1's in
   // A/B, where V2's clips are overlays ON V1's cuts rather than cuts of their
   // own. Read only by labels here; App.jsx derives the same count from the same
@@ -541,7 +541,7 @@ export default function Timeline({
       <div className="flex items-center gap-1.5 justify-self-end">
         {/* The primary render. Lives in this bar rather than in the Preview
             header so every render action sits in one row, and it reads
-            left-to-right as V1 then V2. Styled like Render V2 (outline, not a
+            left-to-right as V1 then V2. Styled like V2 Render (outline, not a
             filled button) since they're the same kind of action, in indigo
             because that's V1's color everywhere else. Always present but
             disabled with no clips — it's the main action, so it shouldn't
@@ -552,7 +552,7 @@ export default function Timeline({
           title="Apply every V1 edit decision in one lossless pass and write the result to the export folder"
           className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] rounded border border-indigo-600 text-indigo-400 hover:bg-indigo-900/40 disabled:border-neutral-700 disabled:text-neutral-600 disabled:hover:bg-transparent"
         >
-          {rendering ? 'Rendering…' : 'Render V1'}
+          {rendering ? 'Rendering…' : 'V1 Render'}
         </button>
         {track2Clips.length > 0 && (
           <button
@@ -563,7 +563,7 @@ export default function Timeline({
             // stays exactly as it was — one pass, no progress to report.
             disabled={!!v2ShotProgress}
             title={
-              (v2RenderMode === 'AB' ? 'Render V2 composited over V1' : 'Render the V2 track')
+              (v2RenderMode === 'AB' ? 'V2 Render composited over V1' : 'Render the V2 track')
               + (v2ShotMode === '1+'
                 ? ` as ${v2ShotCount} separate ${v2ShotCount === 1 ? 'file' : 'files'}, one per cut`
                 : ' as one clip')
@@ -572,10 +572,10 @@ export default function Timeline({
           >
             {v2ShotProgress
               ? `Shot ${v2ShotProgress.done + 1}/${v2ShotProgress.total}…`
-              : 'Render V2'}
+              : 'V2 Render'}
           </button>
         )}
-        {/* What "Render V2" produces: A = the V2 track alone (default),
+        {/* What "V2 Render" produces: A = the V2 track alone (default),
             A/B = V2 composited on top of V1 as a single clip. A segmented
             switch rather than a checkbox, since the two are alternatives
             and the active one names the output. */}
@@ -583,7 +583,7 @@ export default function Timeline({
           <div
             className="flex items-stretch rounded overflow-hidden border border-teal-700 text-[9px] leading-none"
             role="group"
-            aria-label="Render V2 output mode"
+            aria-label="V2 Render output mode"
           >
             <button
               onClick={() => onSetV2RenderMode?.('A')}
@@ -603,7 +603,7 @@ export default function Timeline({
             </button>
           </div>
         )}
-        {/* How MANY files "Render V2" writes: 1 = the whole track joined into
+        {/* How MANY files "V2 Render" writes: 1 = the whole track joined into
             a single clip (the original behavior, and the default), 1+ = one
             file per cut, numbered in track order.
             Deliberately a SECOND switch rather than four modes in one: this
@@ -615,7 +615,7 @@ export default function Timeline({
           <div
             className="flex items-stretch rounded overflow-hidden border border-teal-700 text-[9px] leading-none"
             role="group"
-            aria-label="Render V2 shot mode"
+            aria-label="V2 Render shot mode"
           >
             <button
               onClick={() => onSetV2ShotMode?.('1')}
@@ -644,7 +644,7 @@ export default function Timeline({
             content too, and on a sequence with any silence in it that alone
             makes a usable stem; when there is none, the server says so instead
             of writing an empty file) — the same "appears with its track" rule
-            Render V2 follows. */}
+            V2 Render follows. */}
         {(audioBeds.length > 0 || noiseEnabled) && (
           <button
             onClick={onRenderA1}
@@ -652,7 +652,7 @@ export default function Timeline({
             title="Render the A1 track alone to a .wav, timed to the V1 sequence — same length, ready to line up beside the V1 file"
             className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] rounded border border-amber-600 text-amber-400 hover:bg-amber-900/40 disabled:border-neutral-700 disabled:text-neutral-600 disabled:hover:bg-transparent"
           >
-            Render A1
+            A1 Render
           </button>
         )}
       </div>

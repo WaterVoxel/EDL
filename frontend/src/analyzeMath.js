@@ -25,13 +25,13 @@ import { clipMainSec } from './clipMath.js'
 // timeline's two numbered buttons encode it directly —
 //   1. Analyze conforms V2's clip(s) to V1's exact cut structure.
 //   2. The user takes that V2 footage OUT of the app entirely (renders it
-//      via Render V2 — which always merges every V2 clip into ONE
+//      via V2 Render — which always merges every V2 clip into ONE
 //      continuous file — runs it through an external tool, e.g. a
 //      style-transfer model, and drops the result back onto V2 via
 //      handleAddToV2, which always replaces V2 with a single fresh clip).
 //   3. Reconstruct strips the V1-derived edit artifacts that got baked
 //      into that round-tripped footage back out, so V2 plays as if V1's
-//      decisions had never been applied — ready for Render V2 again.
+//      decisions had never been applied — ready for V2 Render again.
 //
 // Because step 2 ALWAYS collapses V1's clips down to one V2 clip, holds
 // and round-up must be treated as SEQUENCE-level facts about V1, not
@@ -49,7 +49,7 @@ import { clipMainSec } from './clipMath.js'
 // restyled version of the footage). If V2 somehow holds more than one
 // clip (e.g. Reconstruct was run before ever rendering V2), only the
 // first is treated as the round-tripped result and the rest are left
-// untouched — Render V2 is what's meant to collapse V2 to one clip
+// untouched — V2 Render is what's meant to collapse V2 to one clip
 // first.
 //
 // What "reverse the decision" means differs per field, because holds,
@@ -207,7 +207,7 @@ export function reconstructFromV1(v1Clips, v2Clips) {
 }
 
 // "Batch Analyze" is the plain-cut sibling of Analyze, for a whole sequence
-// handled as ONE file: Render V1 (or Render V2 in its `1` mode) joins the cut
+// handled as ONE file: V1 Render (or V2 Render in its `1` mode) joins the cut
 // into a single clip, that file goes out to an external tool and comes back
 // whole, and all that's wanted from it is V1's cuts — the file split where V1
 // splits, nothing else applied.
@@ -289,7 +289,7 @@ const PIECE_NAMES = { main: 'Shot', head: 'Head', tail: 'Tail', round: 'Round' }
 // Returns { segments, kinds, overflow, leftoverSec }:
 //   segments    — V2's FIRST clip replaced by one clip per V1 PIECE, in track
 //                 order; any further V2 clips are left exactly as they were
-//                 (same convention as reconstructFromV1 — Render V2 in `1` mode
+//                 (same convention as reconstructFromV1 — V2 Render in `1` mode
 //                 is what's meant to collapse V2 to one clip first).
 //   kinds       — the piece kind each of those segments starts with
 //                 ('main'|'head'|'tail'|'round'), parallel to the segments, so a

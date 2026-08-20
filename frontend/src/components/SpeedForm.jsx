@@ -82,7 +82,7 @@ export default function SpeedForm({
         A1 Room Tone
       </button>
       {/* How loud the tone above is — the same ▲/▼ stepper the trim fields use,
-          sitting next to the toggle it belongs to rather than next to Render A1,
+          sitting next to the toggle it belongs to rather than next to A1 Render,
           since it changes what a V1 render contains too, not just the stem.
           Greyed out with the toggle off: it still SHOWS the level, so turning
           tone back on holds no surprise, but there is nothing to set until

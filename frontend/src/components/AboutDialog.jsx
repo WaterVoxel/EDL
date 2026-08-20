@@ -319,10 +319,10 @@ export default function AboutDialog({ onClose }) {
             </p>
             <p>
               <strong>② V2 Batch Analyzer</strong> — the plain-cut sibling, for a sequence handled as
-              one file. Render V1 (or Render V2 on <em>1</em>), take that single joined file through
+              one file. Press V1 Render (or V2 Render on <em>1</em>), take that single joined file through
               an external tool in one pass, drop it back on V2, and this cuts it where V1 cuts: four
               clips on V1 give four clips on V2, at the same places. Holds count as cuts of their own
-              — a head hold, a tail hold and a Raise's round-up are each a stretch of one frozen
+              — a head hold, a tail hold and a round-up are each a stretch of one frozen
               frame in that joined file, so each becomes its own clip (<em>Head01</em>, <em>Tail01</em>,
               <em>Round01</em>) instead of being buried inside the shot beside it. It works in
               sequence time rather than source time — the second shot in a joined file starts where
@@ -340,7 +340,7 @@ export default function AboutDialog({ onClose }) {
               state of the footage, verified bit-exact against the original.
             </p>
             <p>
-              <strong>④ Render V2</strong> has an <strong>A / A/B</strong> switch. <em>A</em> renders
+              <strong>④ V2 Render</strong> has an <strong>A / A/B</strong> switch. <em>A</em> renders
               the V2 track by itself to{' '}
               <span className="font-mono text-neutral-400">&lt;stem&gt;-analyzed.mp4</span>.{' '}
               <em>A/B</em> composites V2 <strong>onto</strong> V1 and renders the pair as one clip, to{' '}
@@ -543,7 +543,7 @@ export default function AboutDialog({ onClose }) {
               distinguishable from &ldquo;nothing needed filling&rdquo;.
             </p>
             <p>
-              <strong>Render A1</strong> writes the timeline's audio alone as a{' '}
+              <strong>A1 Render</strong> writes the timeline's audio alone as a{' '}
               <span className="font-mono text-neutral-400">.wav</span> —{' '}
               <span className="font-mono text-neutral-400">-c:a pcm_s16le</span>, uncompressed, the
               same length as the V1 render, opening no clip as a video input at all. It rebuilds the
