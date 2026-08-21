@@ -41,14 +41,14 @@ export default function SpeedForm({
 
   return (
     <div className="flex items-center gap-1.5">
-      <span className="text-[9px] font-semibold uppercase tracking-wide text-neutral-500 whitespace-nowrap">Speed</span>
-      {!selectedClip && <span className="text-[9px] text-neutral-600">select a clip</span>}
+      <span className="text-[8px] font-semibold uppercase tracking-wide text-neutral-500 whitespace-nowrap">Speed</span>
+      {!selectedClip && <span className="text-[8px] text-neutral-600">select a clip</span>}
       {selectedClip && (
         <select
           value={String(current)}
           onChange={e => apply(parseFloat(e.target.value))}
           title={`Slow down by stretching frame timing (no generated frames). Options keep the effective rate ≥ ${MIN_EFFECTIVE_FPS} fps for this clip's ${(selectedClip.fps || 30).toFixed(0)} fps source.`}
-          className={`px-1 py-0.5 text-[9px] rounded bg-neutral-950 border text-neutral-300 ${current !== 1 ? 'border-orange-500' : 'border-neutral-700'}`}
+          className={`px-1 py-0.5 text-[8px] rounded bg-neutral-950 border text-neutral-300 ${current !== 1 ? 'border-orange-500' : 'border-neutral-700'}`}
         >
           {speeds.map(s => (
             <option key={s} value={String(s)}>
@@ -73,7 +73,7 @@ export default function SpeedForm({
         title={noiseEnabled
           ? 'Turn off room tone — every silent stretch renders as pure digital silence again. The dB setting is kept for next time'
           : 'Fill the silent stretches with room tone: holds, round-ups, slow-downs, clips whose source has no audio, gaps left by a removed A1 clip, and the tail past the end of a short A1 track. Set how loud with the dB arrows beside this button. Never plays over sound that is already there — clip audio and the A1 track come out untouched, at the same level, and no video frame changes. Applies at render time; the preview will not play it'}
-        className={`px-1.5 py-0.5 text-[9px] rounded border transition-colors ${
+        className={`px-1.5 py-0.5 text-[8px] rounded border transition-colors ${
           noiseEnabled
             ? 'bg-amber-500 text-neutral-950 border-amber-500'
             : 'bg-neutral-800 text-neutral-400 border-neutral-700 hover:text-neutral-200'
@@ -104,7 +104,7 @@ export default function SpeedForm({
         width="w-9"
         title={`How loud the room tone is, in dB of gain on the tone asset. ${NOISE_GAIN_DB_MIN} to +${NOISE_GAIN_DB_MAX} dB, default +${NOISE_GAIN_DB_DEFAULT}. 0 leaves the asset at its recorded level (about −25 dBFS peak); +${NOISE_GAIN_DB_MAX} is as loud as it goes without the tone clipping on its own. Only scales the tone — clip audio and the A1 track are never touched, whatever this is set to`}
       />
-      <span className={`text-[9px] ${noiseEnabled ? 'text-neutral-500' : 'text-neutral-700'}`}>dB</span>
+      <span className={`text-[8px] ${noiseEnabled ? 'text-neutral-500' : 'text-neutral-700'}`}>dB</span>
     </div>
   )
 }

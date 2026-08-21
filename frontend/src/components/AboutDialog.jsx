@@ -282,7 +282,10 @@ export default function AboutDialog({ onClose }) {
               drop lands as clips end to end in the order dropped, the same way A1 takes audio.
               <strong>Round Up</strong> holds the last frame to land the sequence on a whole
               second, <strong>Duplicate</strong>{' '}
-              copies a clip with every decision intact, and <strong>Split</strong> divides one clip
+              copies a clip with every decision intact — the pair is renamed{' '}
+              <em>name_a</em> (the original) and <em>name_b</em> (the copy), further copies taking{' '}
+              <em>_c</em>, <em>_d</em>… and the copy is marked <strong>⧉</strong> on the lane and in
+              the EDL the way a reversed clip is marked ◀ — and <strong>Split</strong> divides one clip
               into two at the playhead — a video clip, or an audio clip on A1 if that is what you
               clicked last.
             </p>

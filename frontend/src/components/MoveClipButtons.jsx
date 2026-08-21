@@ -29,14 +29,14 @@ export default function MoveClipButtons({ selectedClip, clips, setClips, onSelec
 
   return (
     <div className="flex items-center gap-1.5">
-      {!selectedClip && <span className="text-[9px] text-neutral-600">select a clip</span>}
-      <span className="text-[9px] text-neutral-500">Move</span>
+      {!selectedClip && <span className="text-[8px] text-neutral-600">select a clip</span>}
+      <span className="text-[8px] text-neutral-500">Move</span>
       <div className="flex items-center gap-0.5">
         <button
           onClick={() => apply(-1)}
           disabled={index <= 0}
           title="Move the selected clip one slot earlier (⌥←)"
-          className="px-1.5 py-0.5 text-[9px] rounded bg-teal-600 text-white hover:bg-teal-500 disabled:bg-neutral-700 disabled:text-neutral-500"
+          className="px-1.5 py-0.5 text-[8px] rounded bg-teal-600 text-white hover:bg-teal-500 disabled:bg-neutral-700 disabled:text-neutral-500"
         >
           ◀
         </button>
@@ -44,7 +44,7 @@ export default function MoveClipButtons({ selectedClip, clips, setClips, onSelec
           onClick={() => apply(1)}
           disabled={index === -1 || index >= clips.length - 1}
           title="Move the selected clip one slot later (⌥→)"
-          className="px-1.5 py-0.5 text-[9px] rounded bg-teal-600 text-white hover:bg-teal-500 disabled:bg-neutral-700 disabled:text-neutral-500"
+          className="px-1.5 py-0.5 text-[8px] rounded bg-teal-600 text-white hover:bg-teal-500 disabled:bg-neutral-700 disabled:text-neutral-500"
         >
           ▶
         </button>

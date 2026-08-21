@@ -74,7 +74,7 @@ export default function TrimForm({ selectedClip, setClips, displayMode = 'timeco
 
   return (
     <div className="flex items-center gap-1.5">
-      <span className="text-[9px] font-semibold uppercase tracking-wide text-neutral-500 whitespace-nowrap">Trim</span>
+      <span className="text-[8px] font-semibold uppercase tracking-wide text-neutral-500 whitespace-nowrap">Trim</span>
       <NumericStepper
         value={inVal}
         onChange={setInVal}
@@ -84,7 +84,7 @@ export default function TrimForm({ selectedClip, setClips, displayMode = 'timeco
         disabled={disabled}
         title="Or drag the clip's edges directly on the timeline"
       />
-      <span className="text-[9px] text-neutral-500">–</span>
+      <span className="text-[8px] text-neutral-500">–</span>
       <NumericStepper
         value={outVal}
         onChange={setOutVal}
@@ -94,18 +94,18 @@ export default function TrimForm({ selectedClip, setClips, displayMode = 'timeco
         disabled={disabled}
         title="Or drag the clip's edges directly on the timeline"
       />
-      <span className="text-[9px] text-neutral-600">{displayMode === 'frames' ? 'fr' : 's'}</span>
+      <span className="text-[8px] text-neutral-600">{displayMode === 'frames' ? 'fr' : 's'}</span>
       <button
         onClick={apply}
         disabled={disabled}
-        className="px-1.5 py-0.5 text-[9px] rounded bg-indigo-600 text-white hover:bg-indigo-500 disabled:bg-neutral-700 disabled:text-neutral-500"
+        className="px-1.5 py-0.5 text-[8px] rounded bg-indigo-600 text-white hover:bg-indigo-500 disabled:bg-neutral-700 disabled:text-neutral-500"
       >
         Apply
       </button>
       <button
         onClick={reset}
         disabled={disabled}
-        className="px-1.5 py-0.5 text-[9px] rounded border border-neutral-700 text-neutral-500 hover:text-neutral-300 disabled:opacity-50"
+        className="px-1.5 py-0.5 text-[8px] rounded border border-neutral-700 text-neutral-500 hover:text-neutral-300 disabled:opacity-50"
       >
         Reset
       </button>

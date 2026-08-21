@@ -14,12 +14,12 @@ export default function ReverseForm({ selectedClip, setClips }) {
 
   return (
     <div className="flex items-center gap-1.5">
-      {!selectedClip && <span className="text-[9px] text-neutral-600">select a clip</span>}
+      {!selectedClip && <span className="text-[8px] text-neutral-600">select a clip</span>}
       <button
         onClick={toggle}
         disabled={!selectedClip}
         title="Play this clip backwards (applied on Render)"
-        className={`px-1.5 py-0.5 text-[9px] rounded disabled:bg-neutral-700 disabled:text-neutral-500 ${
+        className={`px-1.5 py-0.5 text-[8px] rounded disabled:bg-neutral-700 disabled:text-neutral-500 ${
           isReversed ? 'bg-orange-600 text-white hover:bg-orange-500' : 'bg-indigo-600 text-white hover:bg-indigo-500'
         }`}
       >

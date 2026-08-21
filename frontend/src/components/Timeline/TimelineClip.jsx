@@ -147,6 +147,7 @@ export default function TimelineClip({
         />
         <div className="absolute inset-0 flex flex-col items-start justify-between px-1.5 py-0.5 pointer-events-none">
           <span className="text-[8px] text-neutral-100 truncate max-w-full font-medium">
+            {clip.isDuplicate && <span title="Duplicate of another clip on this track">⧉ </span>}
             {clip.reversed && <span title="Reversed">◀ </span>}
             {clip.displayName || clip.sourceName}
           </span>

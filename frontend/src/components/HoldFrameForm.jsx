@@ -27,7 +27,7 @@ export default function HoldFrameForm({ clips, setClips }) {
 
   return (
     <div className="flex items-center gap-1.5">
-      <span className="text-[9px] font-semibold uppercase tracking-wide text-neutral-500 whitespace-nowrap">Hold</span>
+      <span className="text-[8px] font-semibold uppercase tracking-wide text-neutral-500 whitespace-nowrap">Hold</span>
       <NumericStepper
         value={duration}
         onChange={setDuration}
@@ -39,7 +39,7 @@ export default function HoldFrameForm({ clips, setClips }) {
         onClick={() => apply('head')}
         disabled={disabled}
         title="Freeze the first frame of the sequence"
-        className="px-1.5 py-0.5 text-[9px] rounded bg-fuchsia-700 text-white hover:bg-fuchsia-600 disabled:bg-neutral-700 disabled:text-neutral-500"
+        className="px-1.5 py-0.5 text-[8px] rounded bg-fuchsia-700 text-white hover:bg-fuchsia-600 disabled:bg-neutral-700 disabled:text-neutral-500"
       >
         Head
       </button>
@@ -47,7 +47,7 @@ export default function HoldFrameForm({ clips, setClips }) {
         onClick={() => apply('tail')}
         disabled={disabled}
         title="Freeze the last frame of the sequence"
-        className="px-1.5 py-0.5 text-[9px] rounded bg-fuchsia-700 text-white hover:bg-fuchsia-600 disabled:bg-neutral-700 disabled:text-neutral-500"
+        className="px-1.5 py-0.5 text-[8px] rounded bg-fuchsia-700 text-white hover:bg-fuchsia-600 disabled:bg-neutral-700 disabled:text-neutral-500"
       >
         Tail
       </button>

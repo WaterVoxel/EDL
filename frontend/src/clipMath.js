@@ -331,6 +331,52 @@ export function nextSplitName(baseName, clips, extra = []) {
   return root + String(maxN + 1).padStart(2, '0')
 }
 
+// The "family" a duplicate name belongs to: extension and any trailing
+// single-letter suffix stripped, so duplicating "video_b" groups with
+// "video_a" under the root "video" instead of starting a family called
+// "video_b". Deliberately ONE letter and not `_([a-z]+)`: a multi-letter
+// pattern would read the "_video" in "my_video" as a suffix and rename that
+// clip to "my_a", destroying a name the user chose.
+const DUP_SUFFIX_RE = /_([a-z])$/
+
+function duplicateRoot(name) {
+  return stripExt(name).replace(DUP_SUFFIX_RE, '')
+}
+
+// Names for a duplicate pair: the original becomes "<root>_a" and the copy
+// "<root>_b", then "_c", "_d"… for further copies of the same family. An
+// original that ALREADY carries a suffix keeps it (it's already in the family,
+// and renaming it to _a would collide with the _a that exists), so duplicating
+// the _b clip yields _c and leaves _b alone.
+//
+// `original` is returned rather than assumed so the caller renames the source
+// clip in the same state update as the insert — one undo step for one action.
+// Past 26 members the letters are exhausted and it falls back to the numeric
+// split scheme, which cannot collide with any letter name.
+export function duplicateNames(baseName, clips) {
+  const root = duplicateRoot(baseName)
+  const stripped = stripExt(baseName)
+  const used = new Set()
+  for (const c of clips || []) {
+    const name = c.displayName || c.sourceName
+    if (!name || duplicateRoot(name) !== root) continue
+    const m = stripExt(name).match(DUP_SUFFIX_RE)
+    if (m) used.add(m[1])
+  }
+
+  const own = stripped.match(DUP_SUFFIX_RE)
+  const original = own ? stripped : `${root}_a`
+  used.add(own ? own[1] : 'a')
+
+  for (let i = 0; i < 26; i++) {
+    const letter = String.fromCharCode(97 + i)
+    if (!used.has(letter)) return { original, copy: `${root}_${letter}` }
+  }
+  // Keyed off `root`, not `baseName`, so the fallback is "v01" rather than a
+  // suffix-on-suffix "v_a01" — and no letter name can ever equal it.
+  return { original, copy: nextSplitName(root, clips) }
+}
+
 // Deterministic color per clip id, so a clip keeps its color across
 // reorders and stays visually traceable after being split by Splice.
 export function clipColor(clipId) {

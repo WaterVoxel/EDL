@@ -1305,7 +1305,7 @@ function AppInner() {
         onClick={undoEdit}
         disabled={!canUndo}
         title="Undo last edit — any track (Cmd/Ctrl+Z)"
-        className="w-5 h-5 flex items-center justify-center rounded text-[12px] text-neutral-400 hover:text-white hover:bg-neutral-700 disabled:opacity-40"
+        className="w-5 h-5 flex items-center justify-center rounded text-[9px] text-neutral-400 hover:text-white hover:bg-neutral-700 disabled:opacity-40"
       >↩</button>
       <div className="w-px h-3.5 bg-neutral-700" />
       <HoldFrameForm clips={activeClips} setClips={setActiveClips} />

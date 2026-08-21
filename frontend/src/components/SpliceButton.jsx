@@ -127,7 +127,7 @@ export default function SpliceButton({
       title={selectedBed
         ? 'Split the selected A1 clip into two at the playhead — the two halves play exactly what the one clip did, so nothing else on the lane moves and nothing is re-encoded'
         : 'Split the selected clip into two clips at the playhead'}
-      className="px-1.5 py-0.5 text-[9px] rounded bg-sky-600 text-white hover:bg-sky-500 disabled:bg-neutral-700 disabled:text-neutral-500"
+      className="px-1.5 py-0.5 text-[8px] rounded bg-sky-600 text-white hover:bg-sky-500 disabled:bg-neutral-700 disabled:text-neutral-500"
     >
       Split
     </button>

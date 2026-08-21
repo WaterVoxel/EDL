@@ -24,16 +24,16 @@ export default function RaiseButton({ clips, setClips }) {
         onClick={apply}
         disabled={amount <= 0}
         title="Hold the last frame of the sequence to round its total duration up to the next whole second"
-        className="px-1.5 py-0.5 text-[9px] rounded bg-amber-600 text-white hover:bg-amber-500 disabled:bg-neutral-700 disabled:text-neutral-500"
+        className="px-1.5 py-0.5 text-[8px] rounded bg-amber-600 text-white hover:bg-amber-500 disabled:bg-neutral-700 disabled:text-neutral-500"
       >
         Round Up
       </button>
       {clips.length === 0 ? (
-        <span className="text-[9px] text-neutral-600">no clips</span>
+        <span className="text-[8px] text-neutral-600">no clips</span>
       ) : amount <= 0 ? (
-        <span className="text-[9px] text-neutral-600">whole ({base.toFixed(1)}s)</span>
+        <span className="text-[8px] text-neutral-600">whole ({base.toFixed(1)}s)</span>
       ) : (
-        <span className="text-[9px] text-amber-400 whitespace-nowrap">+{amount.toFixed(2)}s → {(base + amount).toFixed(0)}s</span>
+        <span className="text-[8px] text-amber-400 whitespace-nowrap">+{amount.toFixed(2)}s → {(base + amount).toFixed(0)}s</span>
       )}
     </div>
   )

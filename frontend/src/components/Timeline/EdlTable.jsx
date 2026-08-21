@@ -60,6 +60,7 @@ export default function EdlTable({ clips, selectedId, onSelect, onDelete, onMove
             >
               <td className="px-2.5 py-0.5 text-neutral-400">{row.event}</td>
               <td className="px-1.5 py-0.5 text-neutral-300 truncate max-w-[140px]">
+                {row.clip.isDuplicate && <span title="Duplicate of another clip on this track">⧉ </span>}
                 {row.clip.reversed && <span title="Reversed">◀ </span>}
                 {row.reel}
               </td>
