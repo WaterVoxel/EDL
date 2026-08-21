@@ -1,7 +1,12 @@
 import { formatTimecode } from '../../timecode'
 import { clipTotalSec } from '../../clipMath'
 
-export default function EdlTable({ clips, selectedId, onSelect, onDelete }) {
+// `onMove(clipId, delta)` reorders by one slot. Worth having here and not only on
+// the timeline: these rows are full width whatever a clip's duration is, so they
+// stay easy to hit for the short pieces a Split leaves behind — and this list IS
+// the order that V2 Analyzer / Batch Analyzer / Reconstruct read off V1, so it's
+// the natural place to correct it.
+export default function EdlTable({ clips, selectedId, onSelect, onDelete, onMove }) {
   if (clips.length === 0) return null
 
   let recordIn = 0
@@ -9,6 +14,7 @@ export default function EdlTable({ clips, selectedId, onSelect, onDelete }) {
     const totalDur = clipTotalSec(clip)
     const row = {
       clip,
+      index: i,
       event: String(i + 1).padStart(3, '0'),
       reel: clip.displayName || clip.sourceName,
       srcIn: clip.inSec,
@@ -42,7 +48,7 @@ export default function EdlTable({ clips, selectedId, onSelect, onDelete }) {
             <th className="text-left font-normal px-1.5 py-0.5">REC OUT</th>
             <th className="text-left font-normal px-1.5 py-0.5">HOLD H/T</th>
             <th className="text-left font-normal px-1.5 py-0.5">STATUS</th>
-            <th className="w-6"></th>
+            <th className="w-16"></th>
           </tr>
         </thead>
         <tbody>
@@ -72,13 +78,39 @@ export default function EdlTable({ clips, selectedId, onSelect, onDelete }) {
                   : <span className="text-emerald-400">rendered</span>}
               </td>
               <td className="px-1.5 py-0.5">
-                <button
-                  onClick={e => { e.stopPropagation(); onDelete(row.clip.id) }}
-                  title="Delete clip"
-                  className="w-4 h-4 flex items-center justify-center rounded text-neutral-600 hover:text-white hover:bg-red-600 opacity-0 group-hover:opacity-100 text-[10px] leading-none"
-                >
-                  ×
-                </button>
+                {/* Every button here stops propagation, or the row's own onClick
+                    would also fire and re-select the clip mid-action. ▲/▼ are
+                    earlier/later in the sequence — the list runs top to bottom
+                    where the timeline runs left to right. */}
+                <div className="flex items-center gap-0.5">
+                  {onMove && (
+                    <>
+                      <button
+                        onClick={e => { e.stopPropagation(); onMove(row.clip.id, -1) }}
+                        disabled={row.index === 0}
+                        title="Move this clip one slot earlier (⌥←)"
+                        className="w-4 h-4 flex items-center justify-center rounded text-neutral-600 hover:text-white hover:bg-teal-600 disabled:opacity-0 opacity-0 group-hover:opacity-100 text-[9px] leading-none"
+                      >
+                        ▲
+                      </button>
+                      <button
+                        onClick={e => { e.stopPropagation(); onMove(row.clip.id, 1) }}
+                        disabled={row.index === clips.length - 1}
+                        title="Move this clip one slot later (⌥→)"
+                        className="w-4 h-4 flex items-center justify-center rounded text-neutral-600 hover:text-white hover:bg-teal-600 disabled:opacity-0 opacity-0 group-hover:opacity-100 text-[9px] leading-none"
+                      >
+                        ▼
+                      </button>
+                    </>
+                  )}
+                  <button
+                    onClick={e => { e.stopPropagation(); onDelete(row.clip.id) }}
+                    title="Delete clip"
+                    className="w-4 h-4 flex items-center justify-center rounded text-neutral-600 hover:text-white hover:bg-red-600 opacity-0 group-hover:opacity-100 text-[10px] leading-none"
+                  >
+                    ×
+                  </button>
+                </div>
               </td>
             </tr>
           ))}

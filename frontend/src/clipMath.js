@@ -98,6 +98,57 @@ export function sequenceVideoStartSec(clips) {
   return clips.length > 0 ? (clips[0].headHoldSec || 0) : 0
 }
 
+// Where a clip starts on the timeline, by id. The cumulative sum that clicking a
+// clip already seeks to — shared so "the playhead follows the clip" means the
+// same position whichever surface moved it (toolbar, ⌥arrow, drag, EDL row).
+// 0 for an id that isn't in the array, which is also the right answer for an
+// empty sequence.
+export function clipStartSec(clips, id) {
+  let pos = 0
+  for (const c of clips || []) {
+    if (c.id === id) return pos
+    pos += clipTotalSec(c)
+  }
+  return 0
+}
+
+// V1/V2 have no per-clip position — the render concatenates clips end to end —
+// so MOVING a clip means changing its index and nothing else. This is that move,
+// and the single definition of it: the toolbar buttons, ⌥←/⌥→, a drag-and-drop
+// and the EDL's arrows all route through here, so no two of them can disagree
+// about where a clip lands.
+//
+// Returns the SAME array reference for a no-op or out-of-range move. That is
+// load-bearing, not a micro-optimization: reduceEdit bails on
+// `next === present[key]` (useUndoableTracks.js), so a move that changes nothing
+// costs no undo step — and callers compare by reference to skip re-marking every
+// clip dirty.
+export function moveClip(clips, from, to) {
+  if (!Array.isArray(clips)) return clips
+  if (!Number.isInteger(from) || from < 0 || from >= clips.length) return clips
+  const dest = Math.max(0, Math.min(to, clips.length - 1))
+  if (dest === from) return clips
+  const next = [...clips]
+  const [moved] = next.splice(from, 1)
+  next.splice(dest, 0, moved)
+  return next
+}
+
+// The index a drop belongs at, from the clip it was dropped ON plus which half of
+// that clip the cursor was over. The `from < to` correction accounts for the hole
+// the dragged clip leaves when it's removed: without it, dropping on the right
+// half of a clip to the right lands one slot short of the boundary the user was
+// pointing at — which reads as "it didn't go where I put it".
+//
+// Pairs with the insertion line the drag draws: the line marks a BOUNDARY (before
+// or after clip N), this converts that boundary into the destination index, so
+// what is drawn is where the clip lands.
+export function dropTargetIndex(from, overIndex, side) {
+  let to = side === 'after' ? overIndex + 1 : overIndex
+  if (from < to) to -= 1
+  return to
+}
+
 // Where each V1 clip starts and ends in that same lane coordinate space, plus
 // its head/tail hold spans. What the A1 bed draws its clip-boundary dividers
 // and hold markers from, so the link to V1 is visible and not just implied.

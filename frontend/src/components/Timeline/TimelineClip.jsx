@@ -3,7 +3,13 @@ import { nextGesture } from '../../hooks/useUndoableTracks'
 
 const MIN_CLIP_SEC = 0.1
 
-export default function TimelineClip({ clip, pps, selected, selectedPart, onSelect, onDeletePart, onTrim, onDelete, index, onDragStart, onDragOver, onDrop }) {
+export default function TimelineClip({
+  clip, pps, selected, selectedPart, onSelect, onDeletePart, onTrim, onDelete, index,
+  // Reorder drag: `dropSide` marks which edge of THIS clip the insertion line
+  // belongs on ('before' | 'after' | null), `dragging` marks this clip as the one
+  // being dragged. Both come from the lane, which owns the whole gesture.
+  onDragStart, onDragOver, onDrop, onDragEnd, dropSide = null, dragging = false,
+}) {
   const headPx = clipHeadPx(clip, pps)
   const mainPx = clipMainPx(clip, pps)
   const tailPx = clipTailPx(clip, pps)
@@ -60,14 +66,43 @@ export default function TimelineClip({ clip, pps, selected, selectedPart, onSele
 
   return (
     <div
-      className="relative flex-shrink-0 h-full select-none group"
+      className={`relative flex-shrink-0 h-full select-none group ${dragging ? 'opacity-40' : ''}`}
       style={{ width: Math.max(totalPx, 24) }}
+      // How the lane tells "the drag is over a clip" from "it's over the empty
+      // stretch past the last clip", which is a drop-at-the-end.
+      data-clip=""
       draggable
       onDragStart={e => { e.dataTransfer.effectAllowed = 'move'; onDragStart(index) }}
-      onDragOver={e => { e.preventDefault(); onDragOver(index) }}
-      onDrop={e => { e.preventDefault(); onDrop(index) }}
-      title="Drag to reorder"
+      // Which HALF of this clip the cursor is over, from the cursor itself rather
+      // than from the index: that's what lets the caller draw the insertion line
+      // on the near edge and drop the clip exactly there. A clip floored to 24px
+      // still has a real rect, so short clips work the same way.
+      onDragOver={e => {
+        e.preventDefault()
+        const rect = e.currentTarget.getBoundingClientRect()
+        onDragOver(index, e.clientX < rect.left + rect.width / 2 ? 'before' : 'after')
+      }}
+      onDrop={e => {
+        e.preventDefault()
+        const rect = e.currentTarget.getBoundingClientRect()
+        onDrop(index, e.clientX < rect.left + rect.width / 2 ? 'before' : 'after')
+      }}
+      // Fires even when the drag is abandoned (Esc, or a drop outside the lane),
+      // which is what clears the insertion line and stops the edge scroll.
+      onDragEnd={() => onDragEnd?.()}
+      title="Drag to reorder — or use Move ◀ ▶ / ⌥← ⌥→"
     >
+      {/* Insertion line: where this clip WILL land if dropped now. Teal and 2px,
+          deliberately unlike the playhead's 1px red line and the indigo wash a
+          file drag paints — three things that can appear over the same lane.
+          Sits in the 2px inter-clip gap (-2px), so it reads as a boundary
+          between clips rather than as part of either one. */}
+      {dropSide && (
+        <div
+          className="absolute top-0 bottom-0 w-0.5 bg-teal-300 z-30 pointer-events-none"
+          style={dropSide === 'before' ? { left: -2 } : { right: -2 }}
+        />
+      )}
       {/* Head hold segment — only ever present on the sequence's first clip */}
       {headPx > 0 && (
         <div
@@ -94,7 +129,10 @@ export default function TimelineClip({ clip, pps, selected, selectedPart, onSele
           a child inset inside it means the dashes reveal nothing (the dark
           track behind), not the clip's own color. */}
       <div
-        className={`absolute top-0 bottom-0 rounded overflow-hidden cursor-pointer border-2 ${borderClass} ${selected && selectedPart === 'main' ? 'ring-2 ring-white ring-offset-1 ring-offset-neutral-950 brightness-110' : ''}`}
+        /* grab, not pointer: the body is the drag handle for reordering, and that
+           cursor is the only standing hint that a clip can be moved at all. The
+           edge trim strips below keep their own ew-resize. */
+        className={`absolute top-0 bottom-0 rounded overflow-hidden cursor-grab active:cursor-grabbing border-2 ${borderClass} ${selected && selectedPart === 'main' ? 'ring-2 ring-white ring-offset-1 ring-offset-neutral-950 brightness-110' : ''}`}
         style={{ left: headPx, width: Math.max(mainPx, 24) }}
         onClick={() => onSelect(clip, 'main')}
       >

@@ -21,6 +21,7 @@ import OverlayPreview from './components/OverlayPreview'
 import RaiseButton from './components/RaiseButton'
 import SpliceButton from './components/SpliceButton'
 import DuplicateButton from './components/DuplicateButton'
+import MoveClipButtons from './components/MoveClipButtons'
 import ChatPanel from './components/ChatPanel'
 import RenderDialog from './components/RenderDialog'
 import ReformatPanel from './components/ReformatPanel'
@@ -169,6 +170,11 @@ function AppInner() {
   // state would re-render the whole app during playback — the very thing that
   // got the old playhead readout removed from this toolbar (see SpliceButton).
   const laneClockRef = useRef(null)
+  // The other direction, same reason: a seek function put here by Timeline.jsx, so
+  // this toolbar's Move buttons can send the playhead to the clip they just moved.
+  // It takes TIMELINE seconds — laneClockRef hands out A1 LANE seconds, which is a
+  // different origin, so the two are not interchangeable.
+  const timelineSeekRef = useRef(null)
 
   // Picking a video clip drops the A1 selection, so Split always cuts the clip
   // the user touched LAST — the one rule that keeps one button over two tracks
@@ -1308,6 +1314,14 @@ function AppInner() {
       <div className="w-px h-3.5 bg-neutral-700" />
       <DuplicateButton selectedClip={activeSelectedClip} clips={activeClips} setClips={setActiveClips} onSelectId={setActiveSelectedId} />
       <div className="w-px h-3.5 bg-neutral-700" />
+      {/* Reorder without dragging. V2 gets no seek: like clicking a V2 clip, it
+          leaves the playhead alone — V1 is the timeline of record. */}
+      <MoveClipButtons
+        selectedClip={activeSelectedClip} clips={activeClips} setClips={setActiveClips}
+        onSelectId={setActiveSelectedId}
+        onSeek={focusedTrack === 1 ? (sec => timelineSeekRef.current?.(sec)) : null}
+      />
+      <div className="w-px h-3.5 bg-neutral-700" />
       <ReverseForm selectedClip={activeSelectedClip} setClips={setActiveClips} />
       <div className="w-px h-3.5 bg-neutral-700" />
       {/* The one tool an A1 selection redirects: with an audio clip selected,
@@ -1601,6 +1615,7 @@ function AppInner() {
                   selectedBedIndex={selectedBedIndex}
                   onSelectBed={setSelectedBedIndex}
                   laneClockRef={laneClockRef}
+                  timelineSeekRef={timelineSeekRef}
                   a1Visible={a1Visible}
                   onToggleA1={toggleA1Visible}
                   a1Muted={a1Muted}

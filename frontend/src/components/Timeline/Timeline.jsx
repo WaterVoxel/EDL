@@ -10,13 +10,17 @@ import TransportBar from './TransportBar'
 import { useMedia } from '../../context/MediaContext'
 import { probe } from '../../api'
 import { useTimelinePlayback } from '../../hooks/useTimelinePlayback'
-import { clipTotalSec, clipTotalPx, clipHeadPx, clipMainPx, sanitizeHoldPlacement, timelinePosToPx, sequenceVideoStartSec } from '../../clipMath'
+import { clipTotalSec, clipTotalPx, clipHeadPx, clipMainPx, sanitizeHoldPlacement, timelinePosToPx, sequenceVideoStartSec, clipStartSec, moveClip, dropTargetIndex } from '../../clipMath'
 import { addKeyframe, removeNearestKeyframe, sampleCropOrigin, clipTFromTimelinePos, retimeKeyframesForTrim } from '../../cropAnimation'
 
 const PPS = 60
 const TRACK_PAD = 8
 const GAP = 0.5 * 4 // gap-0.5 = 2px (0.125rem = 2px)
 const GUTTER_PX = 48 // matches the w-12 gutter (track-focus label + eye toggle)
+// How close to the scroll box's edge a reorder drag has to get before the lane
+// starts scrolling itself, and how many px per frame it moves at full tilt.
+const EDGE_SCROLL_PX = 56
+const EDGE_SCROLL_MAX = 18
 
 function EyeIcon({ off, className }) {
   return off ? (
@@ -43,7 +47,7 @@ export default function Timeline({
   v2RenderMode = 'A', onSetV2RenderMode,
   v2ShotMode = '1', onSetV2ShotMode, v2ShotProgress = null,
   audioBeds = [], onAddToA1, onRemoveBed, a1Visible = true, onToggleA1,
-  selectedBedIndex = null, onSelectBed, laneClockRef = null,
+  selectedBedIndex = null, onSelectBed, laneClockRef = null, timelineSeekRef = null,
   a1Muted = false, noiseEnabled = false,
   // The two halves of the bar swap, so each one is rendered where the other
   // used to be: `toolbar` is App.jsx's clip edit row, handed down as a node
@@ -77,6 +81,11 @@ export default function Timeline({
   const { videoRef, setActivePreview } = useMedia()
   const timelineRef = useRef(null)
   const dragFromRef = useRef(null)
+  // The horizontal scroll box the three lanes share, the cursor's last known X
+  // during a reorder drag, and the rAF handle that scrolls the box near its edges.
+  const scrollerRef = useRef(null)
+  const dragXRef = useRef(null)
+  const edgeScrollRef = useRef(0)
   const playheadRef = useRef(null)
   // Cache probe() results per source so a looping timeline doesn't re-hit
   // the network (and re-fire setActivePreview) every time playback crosses
@@ -101,18 +110,54 @@ export default function Timeline({
   // empty by design) and `files.length` reports on drop itself.
   const isFileDrag = e => Array.from(e.dataTransfer?.types || []).includes('Files')
 
+  // A reorder drag that is over the lane but not over any clip — i.e. the empty
+  // stretch past the last one. `data-clip` is how that's told apart: clip drags
+  // bubble up to the lane too, and without this check the lane would overwrite the
+  // clip's own insertion point on every single dragover.
+  const isOverAClip = e => !!e.target?.closest?.('[data-clip]')
+
   const v1FileDragProps = {
-    onDragOver: e => { if (!isFileDrag(e)) return; e.preventDefault(); setV1DragOver(true) },
+    onDragOver: e => {
+      if (!isFileDrag(e)) {
+        // Dropping past the end means "put it last", so that move doesn't require
+        // hitting the right half of a 24px clip. preventDefault is what makes the
+        // lane itself an allowed drop target for the reorder.
+        if (dragFromRef.current != null && !isOverAClip(e)) {
+          e.preventDefault()
+          setDropAt('1:end')
+        }
+        return
+      }
+      e.preventDefault()
+      setV1DragOver(true)
+    },
     onDragEnter: e => { if (!isFileDrag(e)) return; e.preventDefault(); setV1DragOver(true) },
     // Crossing from the lane onto one of its own clips fires dragleave on the
     // lane too (the event bubbles), which would strobe the highlight on every
     // clip boundary the pointer passes over. Only a leave that actually exits
     // the lane counts.
-    onDragLeave: e => { if (!e.currentTarget.contains(e.relatedTarget)) setV1DragOver(false) },
+    onDragLeave: e => {
+      if (e.currentTarget.contains(e.relatedTarget)) return
+      setV1DragOver(false)
+      // Drag the clip out of the lane and the insertion line goes with it, so a
+      // line is only ever shown where a drop would actually land.
+      setDropAt(null)
+    },
     onDrop: e => {
-      // No files means a clip reorder, whose own drop already ran on the
-      // TimelineClip below and is merely bubbling through here.
-      if (!e.dataTransfer.files.length) return
+      if (!e.dataTransfer.files.length) {
+        // A clip reorder. If it landed ON a clip, that clip's own drop handler has
+        // already run (this is just the event bubbling through) and cleared
+        // dragFromRef, so the guard below also serves as "don't handle it twice".
+        // What's left is a drop on the empty stretch past the last clip: move it
+        // there. V2's lane has no equivalent — it's a scratch track whose drop
+        // zone means "replace with this file".
+        const from = dragFromRef.current
+        if (from == null) return
+        e.preventDefault()
+        handleDragEnd()
+        applyMove(from, clips.length - 1)
+        return
+      }
       e.preventDefault()
       setV1DragOver(false)
       handleV1Files(e.dataTransfer.files)
@@ -203,6 +248,19 @@ export default function Timeline({
     laneClockRef.current = () => transport.getTimelinePos() - sequenceVideoStartSec(clips)
   }
 
+  // The same trick for the other direction: let App.jsx's toolbar SEEK, which the
+  // Move buttons need so the playhead can follow the clip they just moved. The
+  // transport lives here, and `setActiveSelectedId` up there is the raw setter,
+  // not the seeking `selectItem`.
+  //
+  // Takes TIMELINE seconds, while laneClockRef above hands out A1 LANE seconds
+  // (timelinePos − sequenceVideoStartSec). Deliberately different frames: one
+  // addresses V1's ruler, the other an A1 clip's own position. Not symmetric, so
+  // don't pass a value from one to the other.
+  if (timelineSeekRef) {
+    timelineSeekRef.current = (sec) => transport.seekTimeline(sec)
+  }
+
   // Keep the playhead pixel position in sync whenever the clip layout or the
   // (throttled) position state changes — covers seeks, edits, and the paused
   // state. During playback the engine also calls positionPlayhead directly
@@ -216,17 +274,60 @@ export default function Timeline({
   function handleSelect(clip, part = 'main') {
     setFocusedTrack(1)
     selectItem(clip.id, part)
-    let pos = 0
-    for (const c of clips) {
-      if (c.id === clip.id) break
-      pos += clipTotalSec(c)
-    }
-    transport.seekTimeline(pos)
+    transport.seekTimeline(clipStartSec(clips, clip.id))
   }
 
   function handleSelect2(clip, part = 'main') {
     setFocusedTrack(2)
     selectItem2(clip.id, part)
+  }
+
+  // Reorder: V1/V2 clips have no position of their own — the render concatenates
+  // them in array order — so moving a clip IS changing its index. Every surface
+  // that offers a move (the toolbar's Move ◀ ▶, ⌥←/⌥→, a drag-and-drop, the EDL's
+  // ▲ ▼) funnels through here, so they can't drift apart.
+  //
+  // `next` is computed from the rendered `clips` rather than inside an updater
+  // because the seek below needs the post-move array. That makes the array a real
+  // dependency of the keyboard handler — see the keydown effect's dep list.
+  function applyMove(from, to) {
+    const next = moveClip(clips, from, to)
+    // Same reference = the move was a no-op or out of range. Bail before marking
+    // anything dirty, so nudging the first clip left doesn't burn an undo step or
+    // re-dirty the whole sequence.
+    if (next === clips) return
+    const moved = clips[from]
+    // Reordering changes the rendered sequence even though no clip's own
+    // decisions changed, so every clip is dirty — and a head/tail/round hold that
+    // just left an outer slot is stripped, exactly as it is on add/split/delete.
+    setClips(sanitizeHoldPlacement(next.map(c => ({ ...c, dirty: true }))))
+    selectItem(moved.id, 'main')
+    // Selection and playhead ride along, so the preview keeps showing the clip
+    // being moved instead of whatever slid under a stationary playhead.
+    transport.seekTimeline(clipStartSec(next, moved.id))
+  }
+
+  // V2's twin, minus the seek: handleSelect2 deliberately doesn't move the
+  // playhead either (V1 is the timeline of record).
+  function applyMove2(from, to) {
+    if (!setTrack2Clips) return
+    const next = moveClip(track2Clips, from, to)
+    if (next === track2Clips) return
+    const moved = track2Clips[from]
+    setTrack2Clips(sanitizeHoldPlacement(next.map(c => ({ ...c, dirty: true }))))
+    selectItem2(moved.id, 'main')
+  }
+
+  // One slot earlier/later on whichever track is focused — what ⌥←/⌥→ and the
+  // EDL arrows both mean.
+  function nudgeSelected(delta) {
+    if (focusedTrack === 2) {
+      const from = track2Clips.findIndex(c => c.id === selectedId2)
+      if (from !== -1) applyMove2(from, from + delta)
+      return
+    }
+    const from = clips.findIndex(c => c.id === selectedId)
+    if (from !== -1) applyMove(from, from + delta)
   }
 
   function handleDeleteSelected() {
@@ -331,6 +432,17 @@ export default function Timeline({
         if (transport.playing) { transport.stop() } else { transport.play() }
         return
       }
+      // ⌥ + arrow MOVES the selected clip one slot; plain arrow steps one frame.
+      // Must be tested first, or the frame-step below would swallow it. The
+      // preventDefault is outside the selection check on purpose: with nothing
+      // selected ⌥← does nothing at all rather than quietly frame-stepping,
+      // which would look like the shortcut moved the wrong thing.
+      if (e.altKey && !e.metaKey && !e.ctrlKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+        e.preventDefault()
+        if (!hasSelection) return
+        nudgeSelected(e.key === 'ArrowLeft' ? -1 : 1)
+        return
+      }
       if (e.key === 'ArrowRight') {
         e.preventDefault()
         transport.stepFrames(1)
@@ -354,35 +466,106 @@ export default function Timeline({
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [focusedTrack, selectedId, selectedPart, selectedId2, selectedPart2, clips.length, transport, canUndo, onUndo])
+    // `clips`/`track2Clips` themselves, not just clips.length: ⌥arrow reorders
+    // the array it closes over, so a stale one would move the clip that used to
+    // be at that index. Length alone doesn't change on a reorder or a trim.
+  }, [focusedTrack, selectedId, selectedPart, selectedId2, selectedPart2, clips, track2Clips, transport, canUndo, onUndo])
 
-  function handleDragStart(idx) { dragFromRef.current = idx }
-  function handleDragOver(_idx) {}
-  function handleDrop(targetIdx) {
-    if (dragFromRef.current == null || dragFromRef.current === targetIdx) return
-    setClips(prev => {
-      const next = [...prev]
-      const [moved] = next.splice(dragFromRef.current, 1)
-      next.splice(targetIdx, 0, moved)
-      // Reordering changes the rendered sequence, and can move a clip that
-      // held a head/tail/round segment away from the sequence's outer
-      // edge, so re-anchor those segments and mark everything dirty.
-      return sanitizeHoldPlacement(next.map(c => ({ ...c, dirty: true })))
-    })
-    dragFromRef.current = null
+  // Scroll the lane while a reorder drag hovers near either edge, so a clip can
+  // be moved somewhere off-screen. There is no zoom, PPS is fixed, and the lanes
+  // live in one overflow-x-auto box, so long sequences run well past the viewport.
+  //
+  // Driven by rAF off a cursor position kept in a ref — NOT by the dragover event
+  // itself. dragover stops firing the moment the cursor holds still, which is
+  // exactly when the user has parked at the edge waiting for the lane to scroll;
+  // event-driven scrolling stalls there and feels broken.
+  function startEdgeScroll() {
+    if (edgeScrollRef.current) return
+    const tick = () => {
+      const el = scrollerRef.current
+      const x = dragXRef.current
+      if (el && x != null) {
+        const rect = el.getBoundingClientRect()
+        const fromLeft = x - rect.left
+        const fromRight = rect.right - x
+        // Speed ramps with how deep into the edge zone the cursor is, and is
+        // clamped so being outside the box entirely just means full speed.
+        if (fromLeft < EDGE_SCROLL_PX) {
+          el.scrollLeft -= EDGE_SCROLL_MAX * Math.min(1, (EDGE_SCROLL_PX - fromLeft) / EDGE_SCROLL_PX)
+        } else if (fromRight < EDGE_SCROLL_PX) {
+          el.scrollLeft += EDGE_SCROLL_MAX * Math.min(1, (EDGE_SCROLL_PX - fromRight) / EDGE_SCROLL_PX)
+        }
+      }
+      edgeScrollRef.current = requestAnimationFrame(tick)
+    }
+    edgeScrollRef.current = requestAnimationFrame(tick)
   }
 
-  function handleDragStart2(idx) { dragFromRef2.current = idx }
-  function handleDragOver2(_idx) {}
-  function handleDrop2(targetIdx) {
-    if (!setTrack2Clips || dragFromRef2.current == null || dragFromRef2.current === targetIdx) return
-    setTrack2Clips(prev => {
-      const next = [...prev]
-      const [moved] = next.splice(dragFromRef2.current, 1)
-      next.splice(targetIdx, 0, moved)
-      return sanitizeHoldPlacement(next.map(c => ({ ...c, dirty: true })))
-    })
+  function stopEdgeScroll() {
+    if (edgeScrollRef.current) cancelAnimationFrame(edgeScrollRef.current)
+    edgeScrollRef.current = 0
+    dragXRef.current = null
+  }
+
+  // A drag interrupted by an unmount (loading a project mid-drag) would otherwise
+  // leave the loop running against a detached node.
+  useEffect(() => stopEdgeScroll, [])
+
+  // Where the insertion line is drawn, as ONE string ("3:after") rather than two
+  // pieces of state. dragover fires continuously while the cursor moves, so this
+  // is set dozens of times a second with the same value — React's bail-out on an
+  // identical primitive is what keeps that from re-rendering the whole lane.
+  // Prefixed with the track so V1's and V2's lines can never both be lit.
+  const [dropAt, setDropAt] = useState(null)
+
+  function handleDragStart(idx) { dragFromRef.current = idx; startEdgeScroll() }
+  // Gated on a reorder of THIS track being in flight: a file dragged over the lane
+  // (which always appends) and a V2 clip dragged across it (which can't move to
+  // V1) must not draw a line promising an insertion point that isn't real.
+  function handleDragOver(idx, side) {
+    if (dragFromRef.current == null) return
+    setDropAt(`1:${idx}:${side}`)
+  }
+  function handleDrop(idx, side) {
+    const from = dragFromRef.current
+    handleDragEnd()
+    if (from == null) return
+    // dropTargetIndex, not `idx`: the line is drawn at a BOUNDARY, and dragging
+    // rightwards has to account for the hole the clip leaves behind, or it lands
+    // one slot short of where the user was pointing.
+    applyMove(from, dropTargetIndex(from, idx, side))
+  }
+
+  function handleDragStart2(idx) { dragFromRef2.current = idx; startEdgeScroll() }
+  function handleDragOver2(idx, side) {
+    if (dragFromRef2.current == null) return
+    setDropAt(`2:${idx}:${side}`)
+  }
+  function handleDrop2(idx, side) {
+    const from = dragFromRef2.current
+    handleDragEnd()
+    if (from == null) return
+    applyMove2(from, dropTargetIndex(from, idx, side))
+  }
+
+  // Fires on the dragged element even when the drag is abandoned (Esc, or a drop
+  // outside any lane), so it — not the drop — is what guarantees the line clears
+  // and the edge-scroll loop stops.
+  function handleDragEnd() {
+    dragFromRef.current = null
     dragFromRef2.current = null
+    setDropAt(null)
+    stopEdgeScroll()
+  }
+
+  // Which side of which clip the line belongs on, for one track's lane. A drop
+  // past the end (`1:end`) draws on the last clip's far side — the same boundary,
+  // and therefore the same picture, as hovering that clip's right half.
+  function dropSideFor(track, idx, count) {
+    if (dropAt === `${track}:end`) return idx === count - 1 ? 'after' : null
+    return dropAt === `${track}:${idx}:before` ? 'before'
+      : dropAt === `${track}:${idx}:after` ? 'after'
+      : null
   }
 
   // Playhead/ruler/click-to-seek all measure from ONE shared wrapper
@@ -690,7 +873,18 @@ export default function Timeline({
           Add clips from the Media Bin to start editing
         </div>
       ) : (
-        <div className="overflow-x-auto">
+        // One dragover listener for all three lanes: the event bubbles, so this
+        // records the cursor for the edge-scroll loop no matter which lane, the
+        // ruler, or the gap between them the pointer is over. Only during a
+        // reorder drag — a file drag has its own per-lane handling and must not
+        // start scrolling the box.
+        <div
+          ref={scrollerRef}
+          className="overflow-x-auto"
+          onDragOver={e => {
+            if (dragFromRef.current != null || dragFromRef2.current != null) dragXRef.current = e.clientX
+          }}
+        >
           <div ref={timelineRef} className="inline-block min-w-full relative">
             <Playhead ref={playheadRef} visible={clips.length > 0} onDrag={handlePlayheadDrag} />
 
@@ -759,6 +953,9 @@ export default function Timeline({
                           onDragStart={handleDragStart2}
                           onDragOver={handleDragOver2}
                           onDrop={handleDrop2}
+                          onDragEnd={handleDragEnd}
+                          dragging={dragFromRef2.current === i && dropAt != null}
+                          dropSide={dropSideFor(2, i, track2Clips.length)}
                         />
                       ))}
                     </div>
@@ -825,6 +1022,13 @@ export default function Timeline({
                       onDragStart={handleDragStart}
                       onDragOver={handleDragOver}
                       onDrop={handleDrop}
+                      onDragEnd={handleDragEnd}
+                      // dragFromRef is a ref, so reading it during render only
+                      // works because `dropAt` state lands on the first dragover
+                      // and re-renders the lane — which is also exactly when
+                      // there is something to dim.
+                      dragging={dragFromRef.current === i && dropAt != null}
+                      dropSide={dropSideFor(1, i, clips.length)}
                     />
                   ))}
                 </div>
@@ -1021,7 +1225,16 @@ export default function Timeline({
         />
       )}
 
-      <EdlTable clips={clips} selectedId={selectedId} onSelect={handleSelect} onDelete={handleDelete} />
+      <EdlTable
+        clips={clips}
+        selectedId={selectedId}
+        onSelect={handleSelect}
+        onDelete={handleDelete}
+        onMove={(id, delta) => {
+          const from = clips.findIndex(c => c.id === id)
+          if (from !== -1) applyMove(from, from + delta)
+        }}
+      />
     </div>
   )
 }

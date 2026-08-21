@@ -287,6 +287,21 @@ export default function AboutDialog({ onClose }) {
               clicked last.
             </p>
             <p>
+              Clips have no position of their own — the render lays them end to end in list order —
+              so <strong>moving</strong> a clip means changing where it sits in that order, and there
+              are four ways to do it, all the same edit and all one undo step:{' '}
+              <strong>Move ◀ ▶</strong> in the toolbar, <strong>⌥←</strong> / <strong>⌥→</strong>{' '}
+              (plain arrows still step one frame), dragging the clip along the lane — a teal line
+              marks the boundary it will land on, and the lane scrolls when you hold near an edge —
+              or the <strong>▲ ▼</strong> arrows on an EDL row, which stay easy to hit for the short
+              pieces a Split leaves behind. The clip stays selected with the playhead on its new
+              start. Reordering re-times everything after the clip, so every clip goes back to{' '}
+              <em>pending</em> until the next render; a head or tail hold that ends up off the ends
+              of the sequence is dropped, since only the first and last clip can carry one. V2 is not
+              re-cut retroactively — <strong>re-run V2 Analyzer after reordering V1</strong> if you
+              want V2 to follow the new order.
+            </p>
+            <p>
               No timeline edit touches disk. Render compiles the whole list into one filter graph:
               per clip, an optional overlay composite, then crop, then an optional head freeze, the
               trimmed main body (reversed and/or time-stretched as flagged), an optional tail/round
