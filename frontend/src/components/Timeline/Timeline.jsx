@@ -43,6 +43,7 @@ export default function Timeline({
   v2RenderMode = 'A', onSetV2RenderMode,
   v2ShotMode = '1', onSetV2ShotMode, v2ShotProgress = null,
   audioBeds = [], onAddToA1, onRemoveBed, a1Visible = true, onToggleA1,
+  selectedBedIndex = null, onSelectBed, laneClockRef = null,
   a1Muted = false, noiseEnabled = false,
   // The two halves of the bar swap, so each one is rendered where the other
   // used to be: `toolbar` is App.jsx's clip edit row, handed down as a node
@@ -190,6 +191,17 @@ export default function Timeline({
   // render recomputes it on a frame grid, which can differ by a few ms under
   // mixed fps (see build_timeline_filter's expected_secs).
   const sequenceSec = transport.totalDuration
+
+  // Hand App.jsx a way to read the playhead in A1 LANE seconds, for the Split
+  // button up there (an A1 clip's own position is lane-relative). Assigned during
+  // render, like AudioBedPlayer's own refs: getTimelinePos is ref-backed and
+  // therefore live, so this stays exact without lifting the playhead's ~15Hz
+  // state out of this component and re-rendering the app during playback. The
+  // subtraction is here because this is where the lane's offset already lives —
+  // one conversion, in the one place that owns it.
+  if (laneClockRef) {
+    laneClockRef.current = () => transport.getTimelinePos() - sequenceVideoStartSec(clips)
+  }
 
   // Keep the playhead pixel position in sync whenever the clip layout or the
   // (throttled) position state changes — covers seeks, edits, and the paused
@@ -909,8 +921,10 @@ export default function Timeline({
                 positioned playhead spans it and click-to-seek covers it with
                 no extra math, exactly like V1 and V2. It has no gutter focus
                 button (a plain <span>, like the ANIM label above): its clips
-                aren't trimmable, so there's nothing for the clip toolbar or
-                the Delete key to act on. */}
+                aren't trimmable, so of the clip toolbar only Split acts on
+                them, and it reads its own `selectedBedIndex` rather than the
+                focused track — which is also why the Delete key still deletes
+                the focused V1/V2 clip with an A1 clip selected. */}
             <div className="border-t border-neutral-800">
               <div className="flex items-stretch">
                 <div className="shrink-0 w-12 flex items-center justify-center gap-1 text-[9px] font-mono bg-neutral-800 text-emerald-500/80">
@@ -968,6 +982,8 @@ export default function Timeline({
                         muted={a1Muted}
                         noiseEnabled={noiseEnabled}
                         onRemove={onRemoveBed}
+                        selectedIndex={selectedBedIndex}
+                        onSelect={onSelectBed}
                       />
                       <label
                         onClick={e => e.stopPropagation()}

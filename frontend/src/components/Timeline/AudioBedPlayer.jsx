@@ -1,4 +1,5 @@
 import { useRef, useEffect, useState } from 'react'
+import { bedPlayedSec, bedInSec } from '../../clipMath'
 
 // Matches ffmpeg_utils.BED_GAIN — the render attenuates A1 by this much
 // before summing it under V1's audio, so the preview has to as well or the
@@ -31,10 +32,17 @@ const BED_GAIN = 0.35
  * every A1 boundary — the one place the mix has to be seamless.
  *
  * `startSec` is V1's picture start (the first clip's head hold), matching the
- * render's adelay on the lane. Source time for clip N is therefore
+ * render's adelay on the lane. A clip's position on the lane is therefore
  * `timelinePos - startSec - offsetN` — negative before the clip's turn, past
- * its own duration after it, and silent in both, which is what the render has
- * there (leading silence from adelay, apad silence past the lane's end).
+ * its own played length after it, and silent in both, which is what the render
+ * has there (leading silence from adelay, apad silence past the lane's end).
+ *
+ * SOURCE time is that lane position plus the clip's own `inSec`, and its span is
+ * its played length rather than its file's duration: a clip that has been split
+ * plays only part of its file, and the render's atrim cuts it at exactly these
+ * two numbers. An element that isn't the one under the playhead parks at its own
+ * `inSec` — the first sample it is allowed to play — so it starts clean on its
+ * turn instead of playing the part of the file that was cut away.
  *
  * Position is read in a rAF loop rather than from MediaContext's currentTime,
  * which comes from `timeupdate` (~4Hz) — see gotchas.md. The sync tolerances
@@ -82,8 +90,10 @@ function A1ClipAudio({ bed, transport, muted, startSec }) {
   // ahead of this one being removed) would restart playback mid-scrub.
   const startRef = useRef(startSec)
   startRef.current = startSec
-  const spanRef = useRef(bed.durationSec || 0)
-  spanRef.current = bed.durationSec || 0
+  const spanRef = useRef(0)
+  spanRef.current = bedPlayedSec(bed)
+  const inRef = useRef(0)
+  inRef.current = bedInSec(bed)
 
   useEffect(() => {
     const el = audioRef.current
@@ -94,19 +104,20 @@ function A1ClipAudio({ bed, transport, muted, startSec }) {
     const tick = () => {
       const t = transportRef.current
       const pos = t?.getTimelinePos?.() ?? 0
-      // Source time for this clip: the timeline position minus where this clip's
-      // own stretch of the lane begins.
-      const srcTime = pos - startRef.current
-      if (srcTime < 0 || srcTime >= spanRef.current) {
+      // Where the playhead is inside this clip's own stretch of the lane, and
+      // the point in the FILE that plays there.
+      const lanePos = pos - startRef.current
+      const srcTime = inRef.current + lanePos
+      if (lanePos < 0 || lanePos >= spanRef.current) {
         // Not this clip's turn — either still ahead of it (the head hold, or an
         // earlier clip playing) or already past its end. The render has other
-        // audio or silence here, so hold the element paused at its own 0 and let
-        // it start cleanly when its turn comes. Parking at 0 rather than leaving
-        // it wherever it ended also keeps it out of the `ended` state, where a
-        // play() would restart the file from the top and loop it under the rest
-        // of the sequence.
+        // audio or silence here, so hold the element paused at its own first
+        // sample and let it start cleanly when its turn comes. Parking there
+        // rather than leaving it wherever it ended also keeps it out of the
+        // `ended` state, where a play() would restart the file from the top and
+        // loop it under the rest of the sequence.
         if (!el.paused) el.pause()
-        if (el.currentTime !== 0) el.currentTime = 0
+        if (Math.abs(el.currentTime - inRef.current) > 0.005) el.currentTime = inRef.current
       } else if (!t?.playing) {
         if (!el.paused) el.pause()
         if (Math.abs(el.currentTime - srcTime) > 0.005) el.currentTime = srcTime

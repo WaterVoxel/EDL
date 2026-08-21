@@ -689,31 +689,44 @@ def _a1_request_beds(data):
     return [b for b in beds if b]
 
 
-def _a1_bed_placements(raw_beds, bed_infos):
-    """The A1 lane as `(start_sec, reach_sec)` pairs for ffmpeg_utils, one per bed.
+def _a1_bed_lane(raw_beds, bed_infos):
+    """The A1 lane for ffmpeg_utils: `(placements, trims)`.
+
+    placements is one `(start_sec, reach_sec)` per bed — where it sits in lane
+    seconds and how many seconds of audio it carries. trims is one
+    `(in_sec, end_sec)` in FILE seconds per bed, or None for a bed that plays its
+    whole file.
 
     Both render routes build the lane through this, for the same reason they share
-    _a1_request_beds and _a1_noise_gain_db: a placement list that differs between
-    the two puts a removed bed's hole in a different place in the stem than in the
-    render, which is exactly the kind of drift an A1 stem exists to rule out.
+    _a1_request_beds and _a1_noise_gain_db: a lane that differs between the two
+    puts a removed bed's hole — or a split clip's cut — in a different place in the
+    stem than in the render, which is exactly the kind of drift an A1 stem exists
+    to rule out. The two come back TOGETHER from one function because they are two
+    views of the same numbers: reach is `end - in`, so a route that computed one
+    without the other could render a half-clip's worth of audio while telling room
+    tone the whole file was covered.
 
-    The two halves come from deliberately different sources. `startSec` is a client
-    EDIT DECISION — where the user left that bed on the lane — so it is validated
-    and otherwise trusted. `reach` is a MEDIA FACT, so it is the server's probed
-    audio-stream duration and never the client's `durationSec` (which is a
-    container duration used only for drawing). Coverage stays measured; only its
-    granularity changed, from one sum for the lane to one figure per bed.
+    The parts come from deliberately different sources. `startSec`, `inSec` and
+    `outSec` are client EDIT DECISIONS — where the user left that clip on the lane
+    and which part of the file they cut — so they are validated and otherwise
+    trusted. The file's LENGTH is a MEDIA FACT, so the reach is bounded by the
+    server's probed audio-stream duration and never by the client's `durationSec`
+    (a container duration used only for drawing). Coverage stays measured.
 
     A bed with no `startSec` — an older client, or a .nara saved before beds
     carried one — yields None, which fu.normalize_bed_placements falls back to
     "starts where the previous bed's audio ends": the contiguous lane A1 has always
-    been, rendering the graph it always did.
+    been, rendering the graph it always did. A bed with no `inSec`/`outSec` — every
+    bed until Split came to A1 — yields a None trim and the untrimmed chain, so
+    that graph is byte-identical too.
 
     Raises ValueError for the caller to turn into a 400.
     """
     placements = []
+    trims = []
     for n, (raw_bed, info) in enumerate(zip(raw_beds, bed_infos)):
-        raw = raw_bed.get("startSec") if isinstance(raw_bed, dict) else None
+        raw_bed = raw_bed if isinstance(raw_bed, dict) else {}
+        raw = raw_bed.get("startSec")
         if raw is None:
             start = None
         else:
@@ -729,8 +742,42 @@ def _a1_bed_placements(raw_beds, bed_infos):
                 raise ValueError(
                     f"A1 clip {n + 1}: startSec must be between 0 and 86400 seconds"
                 )
-        placements.append((start, info.get("audio_duration") or 0.0))
-    return placements
+
+        # The cut, in the file's own seconds. Absent inSec means "from the first
+        # sample"; absent outSec means "to the end of the audio stream", which is
+        # the only thing the server can measure and therefore the only sensible
+        # default — a client that trims the tail says so explicitly.
+        audio_dur = info.get("audio_duration") or 0.0
+        in_sec = raw_bed.get("inSec")
+        out_sec = raw_bed.get("outSec")
+        try:
+            in_sec = 0.0 if in_sec is None else float(in_sec)
+            out_sec = None if out_sec is None else float(out_sec)
+        except (ValueError, TypeError):
+            raise ValueError(f"A1 clip {n + 1}: inSec/outSec must be numeric")
+        if not (0.0 <= in_sec <= 86400.0):
+            raise ValueError(
+                f"A1 clip {n + 1}: inSec must be between 0 and 86400 seconds"
+            )
+        if out_sec is not None and not (in_sec < out_sec <= 86400.0):
+            raise ValueError(
+                f"A1 clip {n + 1}: outSec must be greater than inSec and at most 86400 seconds"
+            )
+        end_sec = audio_dur if out_sec is None else min(out_sec, audio_dur)
+        reach = max(end_sec - in_sec, 0.0)
+        # Only reachable from a file replaced in input/ by a shorter one, or a
+        # hand-edited project: the app never cuts outside a clip's own played
+        # length. A 400 naming the measured duration beats rendering a lane with a
+        # silently empty clip in it, which would look like the render dropped audio.
+        if reach <= 0.0 and (in_sec > 0 or out_sec is not None):
+            raise ValueError(
+                f"A1 clip {n + 1} ({raw_bed.get('input')}): the cut "
+                f"{in_sec:.3f}s–{end_sec:.3f}s has no audio in it — "
+                f"this file's audio is {audio_dur:.3f}s long"
+            )
+        placements.append((start, reach))
+        trims.append(None if (in_sec <= 0 and out_sec is None) else (in_sec, end_sec))
+    return placements, trims
 
 
 def _a1_noise_gain_db(data):
@@ -1169,13 +1216,13 @@ def render_timeline():
     # instead of pulling the rest of the lane earlier (see fu.bed_spans and
     # fu.a1_bed_source).
     try:
-        bed_placements = _a1_bed_placements(raw_beds, bed_infos)
+        bed_placements, bed_trims = _a1_bed_lane(raw_beds, bed_infos)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
     filt = fu.build_timeline_filter(
         clip_specs, target_w, target_h, target_fps, no_audio=no_audio, audio_beds=bed_indexes,
-        fill_noise=noise_index, bed_placements=bed_placements,
+        fill_noise=noise_index, bed_placements=bed_placements, bed_trims=bed_trims,
         noise_gain_db=noise_gain_db
     )
 
@@ -1362,14 +1409,14 @@ def render_a1():
     # stem's room tone lands in exactly the same stretches as the render's and a
     # removed bed leaves its hole in the same place.
     try:
-        bed_placements = _a1_bed_placements(raw_beds, bed_infos)
+        bed_placements, bed_trims = _a1_bed_lane(raw_beds, bed_infos)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
     try:
         filt = fu.build_a1_filter(clip_specs, audio_beds=bed_indexes,
                                   fill_noise=noise_index, bed_placements=bed_placements,
-                                  noise_gain_db=noise_gain_db)
+                                  bed_trims=bed_trims, noise_gain_db=noise_gain_db)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 

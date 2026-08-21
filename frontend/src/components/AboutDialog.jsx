@@ -283,7 +283,8 @@ export default function AboutDialog({ onClose }) {
               <strong>Round Up</strong> holds the last frame to land the sequence on a whole
               second, <strong>Duplicate</strong>{' '}
               copies a clip with every decision intact, and <strong>Split</strong> divides one clip
-              into two at the playhead.
+              into two at the playhead — a video clip, or an audio clip on A1 if that is what you
+              clicked last.
             </p>
             <p>
               No timeline edit touches disk. Render compiles the whole list into one filter graph:
@@ -459,6 +460,18 @@ export default function AboutDialog({ onClose }) {
               clip after a gap was measured landing one sample-frame (~23 µs) from where it sat
               before — <em>bit-identical</em> at that offset across 130,459 frames, against a control
               that showed the whole 86,362-frame shift the old behaviour would have caused.
+            </p>
+            <p>
+              <strong>Cutting an audio clip.</strong> Click a clip on A1 — the playhead moves to where
+              you clicked — and the toolbar's <strong>Split</strong> button divides it there into two
+              clips playing adjoining parts of the one file. It is a cut, not a re-edit: the halves
+              butt together with no gap, nothing else on the lane moves, and the render is{' '}
+              <em>bit-identical</em> to the uncut one — 356,474 samples, largest difference exactly
+              zero, still zero after cutting one of the halves again. Remove a half with its × and
+              the space it held becomes an ordinary gap: silence, or room tone with that toggle on.
+              Nothing is re-encoded and nothing is written until Render, so a cut costs you the
+              click and nothing else. Split is the only tool an audio selection reaches — the rest of
+              the toolbar, and the Delete key, stay on the video clip they were pointed at.
             </p>
             <p>
               <strong>Room tone.</strong> A hold has no audio of its own, and digital silence in the

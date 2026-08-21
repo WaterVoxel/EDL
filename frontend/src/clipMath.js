@@ -305,6 +305,68 @@ export function clampNoiseGainDb(text, dflt, min, max) {
   return Math.round(Math.min(max, Math.max(min, n)) * 10) / 10
 }
 
+// Which part of its FILE an A1 clip plays. `inSec`/`outSec` are optional and
+// absent means "all of it": that is every A1 clip that has never been split, and
+// every bed in a project saved before Split reached the lane, so an old .nara
+// needs no migration and renders the graph it always did.
+//
+// `outSec` is bounded by `durationSec` — the probed CONTAINER duration, the same
+// approximation that has always drawn the lane and placed the next clip. The
+// render bounds its own copy by the file's measured AUDIO-stream duration
+// instead (app.py `_a1_bed_lane`), which is why a clip's tail is the server's
+// call and an untrimmed clip sends no `outSec` at all.
+export function bedInSec(bed) {
+  return Number.isFinite(bed?.inSec) ? Math.max(bed.inSec, 0) : 0
+}
+
+export function bedOutSec(bed) {
+  const dur = Number.isFinite(bed?.durationSec) ? Math.max(bed.durationSec, 0) : 0
+  const out = Number.isFinite(bed?.outSec) ? bed.outSec : dur
+  return dur > 0 ? Math.min(out, dur) : out
+}
+
+// How long an A1 clip is ON THE LANE. This — not durationSec — is what draws it,
+// what places the clip after it and what the preview plays: a split clip's half
+// occupies only the part of the file it kept.
+export function bedPlayedSec(bed) {
+  return Math.max(bedOutSec(bed) - bedInSec(bed), 0)
+}
+
+// Lane seconds → that clip's own file seconds. The inverse of how the bar and the
+// preview player place it, and the one conversion Split needs: the playhead is a
+// lane position, and a cut is a point in the file.
+export function bedFileTimeAt(bed, laneSec) {
+  return bedInSec(bed) + (laneSec - (bed?.startSec || 0))
+}
+
+// Both halves must be worth having. Same strict comparison (and, at the call
+// site, the same MIN_PART_SEC) a V1 splice uses, so the two Splits refuse for the
+// same reason at the same margin.
+export function canSplitBed(bed, atFileSec, minPartSec) {
+  if (!bed || !Number.isFinite(atFileSec)) return false
+  return atFileSec - bedInSec(bed) > minPartSec && bedOutSec(bed) - atFileSec > minPartSec
+}
+
+// Cut one A1 clip into two at a point in its file. The halves are the SAME file
+// twice with adjoining source ranges, which is what makes this a cut rather than
+// a re-layout: the render concatenates them sample-exactly, so the lane sounds
+// identical until one of them is moved or removed.
+//
+// The left half keeps the original's `startSec` and the right half starts exactly
+// one left-half later, so a split opens NO hole — the invariant that lets a split
+// be undone by deleting either half without disturbing the rest of the lane.
+//
+// The right half deliberately does not gain an `outSec` the original didn't have:
+// absent still means "to the end of the file", so the render keeps measuring that
+// tail itself instead of trusting a container duration.
+export function splitBed(bed, atFileSec) {
+  const inSec = bedInSec(bed)
+  return [
+    { ...bed, inSec, outSec: atFileSec },
+    { ...bed, inSec: atFileSec, startSec: (bed.startSec || 0) + (atFileSec - inSec) },
+  ]
+}
+
 // A1 lane positions. A bed's `startSec` is LANE seconds — 0 is where V1's
 // picture starts, excluding V1's head hold (the render adelays the whole lane by
 // that hold), so a bed's start survives every V1 head-hold edit untouched.
@@ -325,7 +387,10 @@ export function normalizeBeds(beds) {
   let changed = false
   let cursor = 0
   const out = beds.map(bed => {
-    const dur = Number.isFinite(bed.durationSec) ? Math.max(bed.durationSec, 0) : 0
+    // The PLAYED length, not the file's: a split clip's half occupies only its
+    // own part of the lane, so the clip after it (and any clamp against it)
+    // measures from where that half actually ends.
+    const dur = bedPlayedSec(bed)
     const raw = Number.isFinite(bed.startSec) ? bed.startSec : cursor
     const start = Math.max(raw, cursor)
     cursor = start + dur
@@ -341,5 +406,5 @@ export function normalizeBeds(beds) {
 // short/long/exact state, the trailing hatch) means the end, not the total.
 export function bedLaneEndSec(beds) {
   return (beds || []).reduce(
-    (end, b) => Math.max(end, (b.startSec || 0) + (b.durationSec || 0)), 0)
+    (end, b) => Math.max(end, (b.startSec || 0) + bedPlayedSec(b)), 0)
 }

@@ -29,7 +29,7 @@ import ProjectLibrary from './components/ProjectLibrary'
 import AboutDialog from './components/AboutDialog'
 import FfmpegCustomSettings from './components/FfmpegCustomSettings'
 import Timeline from './components/Timeline/Timeline'
-import { clipBaseSec, roundUpAmount, clampNoiseGainDb, normalizeBeds, bedLaneEndSec } from './clipMath'
+import { clipBaseSec, roundUpAmount, clampNoiseGainDb, normalizeBeds, bedLaneEndSec, bedInSec } from './clipMath'
 import { loadTrackTags, tagTrack, renameTrackTag, isAudioFile } from './fileList'
 import { analyzeAgainstV1, batchCutAgainstV1, reconstructFromV1, sequencePieces } from './analyzeMath'
 import { mergeExportPresets } from './exportPresets'
@@ -129,15 +129,24 @@ function AppInner() {
   // starts where the previous one ends), but still NOT part of focusedTrack/
   // activeClips: no clip on it owns editable timing (the lane starts at V1's
   // picture start and the render pads or cuts the whole run to V1's length), so
-  // there is nothing for the clip toolbar to trim or select. Order IS the lane,
+  // there is nothing for Trim, Hold, Reverse, Speed or Round Up to act on. A1
+  // has its own selection instead (selectedBedIndex below), used by Split alone —
+  // deliberately not a third focusedTrack value, so selecting an audio clip never
+  // takes the rest of the toolbar, or Delete, away from the video clip they were
+  // pointed at. Order IS the lane,
   // so this is an array and the render sends it in order. Undoable like the
   // other two — add and remove are the only edits it has, and both are as
-  // destructive as any V1 edit. Shape: [{ name, dir, durationSec, startSec }].
+  // destructive as any V1 edit.
+  // Shape: [{ name, dir, durationSec, startSec, inSec?, outSec? }].
   // `startSec` (version 6) is what makes the lane's positions EXPLICIT: removing
   // a clip leaves the survivors exactly where they were, and the hole renders as
   // silence — or as room tone when that toggle is on. It is LANE seconds, 0 being
   // V1's picture start excluding V1's head hold, so it is immune to head-hold
   // edits. clipMath.normalizeBeds back-fills it for older projects.
+  // `inSec`/`outSec` (version 7) are which part of its FILE a clip plays, absent
+  // meaning all of it: a split clip is the same file twice with adjoining ranges,
+  // so nothing about an unsplit lane — or a project saved before Split existed —
+  // changes. See clipMath.splitBed / bedPlayedSec.
   // Eye = show the bar on the timeline. It does not affect the render — the
   // bed is either loaded or it isn't. a1Muted silences the bed in the PREVIEW
   // only; it has no UI control (the gutter is just A1 + the eye), so it stays
@@ -146,14 +155,35 @@ function AppInner() {
   const [a1Visible, setA1Visible] = useState(true)
   const [a1Muted] = useState(false)
   const toggleA1Visible = useCallback(() => setA1Visible(v => !v), [])
+  // Which A1 clip Split will cut. An INDEX, not an id: A1 clips have no id (the
+  // same file can legitimately sit on the lane twice, so identity is position —
+  // which is also why onRemove takes an index). Everything reads the clip through
+  // `selectedBed` below rather than the index, so an index left pointing past the
+  // end of a shorter lane (an undo, a project load) degrades to "nothing
+  // selected" instead of to the wrong clip.
+  const [selectedBedIndex, setSelectedBedIndex] = useState(null)
+  const selectedBed = selectedBedIndex == null ? null : (audioBeds[selectedBedIndex] || null)
+  // The A1 lane's live playhead, in LANE seconds. A function put here by
+  // Timeline.jsx, which owns the transport: Split needs the playhead at the
+  // moment it is pressed, and lifting the ~15Hz position into this component's
+  // state would re-render the whole app during playback — the very thing that
+  // got the old playhead readout removed from this toolbar (see SpliceButton).
+  const laneClockRef = useRef(null)
 
+  // Picking a video clip drops the A1 selection, so Split always cuts the clip
+  // the user touched LAST — the one rule that keeps one button over two tracks
+  // unambiguous. Only for a real pick: `id == null` is a deselect (and playback's
+  // follow-the-playhead selection goes through setSelectedId directly, not here),
+  // neither of which should quietly un-select the audio clip the user chose.
   const selectItem = useCallback((id, part = 'main') => {
     setSelectedId(id)
     setSelectedPart(id == null ? 'main' : part)
+    if (id != null) setSelectedBedIndex(null)
   }, [])
   const selectItem2 = useCallback((id, part = 'main') => {
     setSelectedId2(id)
     setSelectedPart2(id == null ? 'main' : part)
+    if (id != null) setSelectedBedIndex(null)
   }, [])
   const [rendering, setRendering] = useState(false)
   const [showRenderDialog, setShowRenderDialog] = useState(false)
@@ -430,6 +460,7 @@ function AppInner() {
     resetTracks({ v1: [], v2: [], a1: [] })
     setSelectedId(null)
     setSelectedId2(null)
+    setSelectedBedIndex(null)
     refresh()
   }
 
@@ -575,11 +606,19 @@ function AppInner() {
   // No duration goes out: the server measures each bed's reach from its own audio
   // stream (see ffmpeg_utils.bed_spans), which is the only number room tone can
   // safely be kept off.
+  //
+  // inSec/outSec go out only when the clip actually plays part of its file, so an
+  // unsplit lane sends exactly the payload it always did and gets exactly the
+  // graph it always did. An absent outSec means "to the end of the audio", which
+  // keeps that measurement the server's — a half whose tail is the file's tail
+  // must not be capped by a container duration measured here.
   function bedsToPayload(beds) {
     return normalizeBeds(beds).map(b => ({
       input: b.name,
       dir: b.dir,
       startSec: b.startSec || 0,
+      ...(bedInSec(b) > 0 ? { inSec: bedInSec(b) } : {}),
+      ...(Number.isFinite(b.outSec) ? { outSec: b.outSec } : {}),
     }))
   }
 
@@ -937,6 +976,12 @@ function AppInner() {
   // earlier.
   function handleRemoveBed(index) {
     setAudioBeds(prev => prev.filter((_, i) => i !== index))
+    // Identity is position, so the selection has to follow the shift: without
+    // this, removing a clip before the selected one would leave the ring — and
+    // Split — on its neighbour instead.
+    setSelectedBedIndex(sel => (
+      sel == null || sel === index ? null : sel > index ? sel - 1 : sel
+    ))
   }
 
   function handleAnalyze() {
@@ -1013,6 +1058,11 @@ function AppInner() {
     }
   }
 
+  // version 7 is A1 clips that can be SPLIT: a clip may carry `inSec`/`outSec`
+  // saying which part of its file it plays. Nothing had to change to save them
+  // (they ride along on the bed objects) and absent means the whole file, so a
+  // version-6 lane reopens identically — the bump is the human-readable marker
+  // that a lane in this file may hold two clips pointing at one file.
   // version 6 saves the room-tone settings — `noiseEnabled` and `noiseGainDb` —
   // because how a project's silence sounds is part of the project, not a
   // property of whoever last had it open. version 5 turned A1 into a lane:
@@ -1027,7 +1077,7 @@ function AppInner() {
   // level nor something the server would accept.
   function buildProject() {
     return {
-      version: 6, clips: timelineClips, track2Clips, audioBeds, selectedId, exportPresets,
+      version: 7, clips: timelineClips, track2Clips, audioBeds, selectedId, exportPresets,
       noiseEnabled,
       noiseGainDb: clampNoiseGainDb(
         noiseGainDb, NOISE_GAIN_DB_DEFAULT, NOISE_GAIN_DB_MIN, NOISE_GAIN_DB_MAX),
@@ -1116,6 +1166,9 @@ function AppInner() {
       a1: normalizeBeds(project.audioBeds || (project.audioBed ? [project.audioBed] : [])),
     })
     setSelectedId(project.selectedId || null)
+    // A1's selection is a position in the lane that was just replaced, so it
+    // cannot survive the load.
+    setSelectedBedIndex(null)
     setProjectName(name)
     setShowLibrary(false)
     // Room tone (version 6). Both operators are load-bearing on a pre-version-6
@@ -1257,7 +1310,14 @@ function AppInner() {
       <div className="w-px h-3.5 bg-neutral-700" />
       <ReverseForm selectedClip={activeSelectedClip} setClips={setActiveClips} />
       <div className="w-px h-3.5 bg-neutral-700" />
-      <SpliceButton selectedClip={activeSelectedClip} clips={activeClips} setClips={setActiveClips} onSelectId={setActiveSelectedId} />
+      {/* The one tool an A1 selection redirects: with an audio clip selected,
+          Split cuts that clip instead of the video one. */}
+      <SpliceButton
+        selectedClip={activeSelectedClip} clips={activeClips} setClips={setActiveClips}
+        onSelectId={setActiveSelectedId}
+        selectedBed={selectedBed} selectedBedIndex={selectedBedIndex}
+        setBeds={setAudioBeds} laneClockRef={laneClockRef}
+      />
       <div className="w-px h-3.5 bg-neutral-700" />
       <RaiseButton clips={activeClips} setClips={setActiveClips} />
       <div className="w-px h-3.5 bg-neutral-700" />
@@ -1538,6 +1598,9 @@ function AppInner() {
                   audioBeds={audioBeds}
                   onAddToA1={handleAddToA1}
                   onRemoveBed={handleRemoveBed}
+                  selectedBedIndex={selectedBedIndex}
+                  onSelectBed={setSelectedBedIndex}
+                  laneClockRef={laneClockRef}
                   a1Visible={a1Visible}
                   onToggleA1={toggleA1Visible}
                   a1Muted={a1Muted}

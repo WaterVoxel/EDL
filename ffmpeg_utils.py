@@ -1192,7 +1192,7 @@ def bed_lane_gaps(bed_placements, n_beds):
 
 
 def a1_bed_source(bed_indices, sample_rate, channel_layout, prefix, chains,
-                  bed_placements=None):
+                  bed_placements=None, bed_trims=None):
     """The A1 lane's clips laid end to end as ONE audio stream. Returns the
     label to feed the bed chain (adelay → aformat → apad/atrim → volume) and
     appends whatever nodes that needed to `chains`.
@@ -1231,15 +1231,30 @@ def a1_bed_source(bed_indices, sample_rate, channel_layout, prefix, chains,
     gotchas entry), and removing bed 0 makes a silence piece that first input for
     the first time.
 
+    bed_trims is the other half of what a lane clip can be: `(in_sec, end_sec)`
+    in FILE seconds for a bed that plays only part of its file, or None for one
+    that plays all of it. Splitting an A1 clip is exactly two beds pointing at the
+    same file with adjoining trims, so this is what makes Split a CUT rather than
+    a re-layout. The trim is pinned by sample count for the same reason a gap is,
+    and it goes AFTER the aformat on purpose: the cut then lands in the graph's
+    own sample-rate domain, so the two halves are cuts of the same resampled
+    stream and [A,t) followed by [t,B) is [A,B) sample for sample — a split
+    renders bit-identically to the clip it replaced (verified). Trimming before
+    the resample would leave that equality at the mercy of resampler state. An
+    untrimmed bed emits precisely the chain it always did.
+
     A single clip at lane position 0 returns its raw [N:a] pad and emits no node
     at all, so a one-file lane produces the exact graph it always did —
-    byte-identical output, nothing to re-verify. The `not gaps[0]` half of that
-    test is load-bearing: without it, removing bed 0 of a two-bed lane would take
-    the fast path and silently drop the leading hole, playing the survivor early
-    — the exact bug this parameter exists to prevent.
+    byte-identical output, nothing to re-verify. Both extra conditions on that
+    test are load-bearing: without `not gaps[0]`, removing bed 0 of a two-bed lane
+    would take the fast path and silently drop the leading hole, playing the
+    survivor early; without `not trims[0]`, a lane holding one HALF of a split
+    clip would return the whole file's pad and play the part that was cut away.
     """
     gaps = bed_lane_gaps(bed_placements, len(bed_indices))
-    if len(bed_indices) == 1 and gaps[0] <= 0.5 / sample_rate:
+    trims = list(bed_trims or ())[:len(bed_indices)]
+    trims += [None] * (len(bed_indices) - len(trims))
+    if len(bed_indices) == 1 and gaps[0] <= 0.5 / sample_rate and not trims[0]:
         return f"[{bed_indices[0]}:a]"
     parts = []
     for n, idx in enumerate(bed_indices):
@@ -1254,9 +1269,20 @@ def a1_bed_source(bed_indices, sample_rate, channel_layout, prefix, chains,
             )
             parts.append(gap_label)
         label = f"[{prefix}in{n}]"
+        cut = ""
+        if trims[n]:
+            first = max(int(round(float(trims[n][0]) * sample_rate)), 0)
+            # max(..., first + 1) can never fire on a lane the app produced — a
+            # split's halves are both inside the clip's own played length, and
+            # app.py rejects an empty range with a 400 that names the measured
+            # duration. It is here so that a hand-edited project can never emit
+            # an atrim whose end is at or before its start, which ffmpeg refuses
+            # with a filtergraph error the user could do nothing about.
+            last = max(int(round(float(trims[n][1]) * sample_rate)), first + 1)
+            cut = f",atrim=start_sample={first}:end_sample={last},asetpts=PTS-STARTPTS"
         chains.append(
             f"[{idx}:a]aformat=sample_rates={sample_rate}:"
-            f"channel_layouts={channel_layout}{label}"
+            f"channel_layouts={channel_layout}{cut}{label}"
         )
         parts.append(label)
     if len(parts) == 1:
@@ -1558,7 +1584,7 @@ def bed_spans(clip_specs, timings, bed_placements):
 
 def build_a1_filter(clip_specs, sample_rate=44100, channel_layout="stereo",
                     audio_beds=None, fill_noise=None, bed_placements=(),
-                    noise_gain_db=NOISE_GAIN_DB):
+                    bed_trims=(), noise_gain_db=NOISE_GAIN_DB):
     """Build a filter_complex that renders the A1 track ALONE as [outa].
 
     This is the audio-only counterpart to build_timeline_filter: same A1
@@ -1584,7 +1610,9 @@ def build_a1_filter(clip_specs, sample_rate=44100, channel_layout="stereo",
     audio_beds / fill_noise are input indices, as in build_timeline_filter, and
     bed_placements says where each bed sits on the lane and how much audio it
     carries; all three obey the same room-tone rule (see noise_fill_plan).
-    bed_placements must be the SAME list the V1 render is given, or a bed's hole
+    bed_trims says which part of its file each bed plays (a split A1 clip's two
+    halves are one file with adjoining trims). bed_placements and bed_trims must
+    both be the SAME lists the V1 render is given, or a bed's hole
     lands in a different place in the stem than in the render. Room tone fills the silence this stem
     would otherwise have AND the silence the V1 render would otherwise have, which
     is the same set: the stem's job is to be the A1 contribution to that render.
@@ -1686,7 +1714,7 @@ def build_a1_filter(clip_specs, sample_rate=44100, channel_layout="stereo",
         # the pad below still measures from 0), same frame-quantized offset, same
         # BED_GAIN — so this render and the V1 one carry bit-identical bed samples.
         bed_src = a1_bed_source(audio_beds, sample_rate, channel_layout, "a1b", chains,
-                                bed_placements)
+                                bed_placements, bed_trims)
         if head_sec > 0:
             delay_ms = round(head_sec * 1000)
             chains.append(f"{bed_src}adelay=delays={delay_ms}:all=1[a1bdel]")
@@ -1723,7 +1751,7 @@ def build_a1_filter(clip_specs, sample_rate=44100, channel_layout="stereo",
 def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
                            sample_rate=44100, channel_layout="stereo", no_audio=False,
                            audio_beds=None, fill_noise=None, bed_placements=(),
-                           noise_gain_db=NOISE_GAIN_DB):
+                           bed_trims=(), noise_gain_db=NOISE_GAIN_DB):
     """Build one filter_complex string that renders an entire timeline (a
     sequence of trimmed clips, each optionally extended by a frozen-frame
     hold at its lead and/or trail edge, and optionally played backwards)
@@ -1800,8 +1828,10 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
     dialogue and the bed play at exactly the level they would with the toggle off.
 
     bed_placements is the A1 lane: one (start_sec, reach_sec) per bed, where the
-    start is in lane seconds and the reach is that file's own audio-stream
-    duration. Together they are what keeps tone off the bed, and what lets a bed be
+    start is in lane seconds and the reach is how much of that file's own audio
+    stream the bed plays (its whole duration unless bed_trims cuts it — see
+    a1_bed_source, which is where a split A1 clip's two halves become two trims of
+    one file). Together they are what keeps tone off the bed, and what lets a bed be
     removed from the middle of the lane without moving the ones after it — the hole
     it leaves renders as silence, or as tone with the toggle on. The reach is
     MEASURED rather than inferred from the lane's position, which is the whole
@@ -2206,7 +2236,7 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
                 # means 1s of leading silence and 1s less bed heard, never a render
                 # that runs 1s long.
                 bed_src = a1_bed_source(audio_beds, sample_rate, channel_layout, "ab", chains,
-                                        bed_placements)
+                                        bed_placements, bed_trims)
                 if bed_offset_sec > 0:
                     delay_ms = round(bed_offset_sec * 1000)
                     # all=1 delays every channel by the one value (without it

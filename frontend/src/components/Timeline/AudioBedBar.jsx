@@ -1,4 +1,7 @@
-import { sequencePosToPx, sequenceClipBounds, sequenceVideoStartSec, normalizeBeds, bedLaneEndSec } from '../../clipMath'
+import {
+  sequencePosToPx, sequenceClipBounds, sequenceVideoStartSec, normalizeBeds,
+  bedLaneEndSec, bedPlayedSec, bedInSec, bedOutSec,
+} from '../../clipMath'
 
 /* A stretch of the lane with nothing of A1's own in it: silence with A1 Room Tone
  * off, room tone with it on. One component for all three kinds — the head hold,
@@ -35,7 +38,13 @@ function GapBlock({ left, width, noiseEnabled, title, className = '' }) {
  * its own — the whole run starts where V1's PICTURE starts, and the render pads
  * it with silence or cuts it at the sequence's end. So these deliberately aren't
  * TimelineClips: there are no head/tail/round segments, no edge-drag trim, no
- * drag-to-reposition and no reorder. The only per-clip edit is remove.
+ * drag-to-reposition and no reorder. The two per-clip edits are remove and
+ * SPLIT: clicking a clip selects it (for the toolbar's Split button, which cuts
+ * it at the playhead) and, because the click also reaches the lane underneath,
+ * moves the playhead to where you clicked — so "click where you want the cut,
+ * then press Split" is one gesture. A split clip is two clips playing adjoining
+ * parts of one file, which is why a clip's span is its PLAYED length rather than
+ * its file's duration.
  *
  * What the lane DOES have to show is how its total length compares to the
  * sequence, which is the one thing the user can't otherwise see and the one
@@ -78,7 +87,10 @@ function GapBlock({ left, width, noiseEnabled, title, className = '' }) {
  * container puts the bars a few ms off what is rendered. The bar is a reference,
  * not the authority; the total is clamped by apad/atrim either way.
  */
-export default function AudioBedBar({ beds, clips, sequenceSec, pps, gapPx, muted = false, noiseEnabled = false, onRemove }) {
+export default function AudioBedBar({
+  beds, clips, sequenceSec, pps, gapPx, muted = false, noiseEnabled = false,
+  onRemove, selectedIndex = null, onSelect,
+}) {
   // Where V1's picture starts — A1 is delayed to here by the render, so the
   // space it has to fill is the sequence MINUS the head hold.
   const startSec = sequenceVideoStartSec(clips)
@@ -115,7 +127,9 @@ export default function AudioBedBar({ beds, clips, sequenceSec, pps, gapPx, mute
   // as V1 floors a clip's box without moving the clips after it.
   const MIN_SEG_PX = 16
   const segs = lane.map((bed, index) => {
-    const durSec = bed.durationSec || 0
+    // The PLAYED length: a clip that has been split occupies only the part of
+    // its file it kept, and the clip after it was placed against that.
+    const durSec = bedPlayedSec(bed)
     const fromSec = startSec + (bed.startSec || 0)
     const left = posToPx(fromSec)
     return {
@@ -127,6 +141,9 @@ export default function AudioBedBar({ beds, clips, sequenceSec, pps, gapPx, mute
       width: Math.max(posToPx(fromSec + durSec) - left, MIN_SEG_PX),
       // Any part of this clip past the sequence edge is cut at render.
       cut: fromSec + durSec > sequenceSec + EPS,
+      // Plays only part of its file — a half of a split clip. Worth saying in the
+      // tooltip, because two bars can carry the same file name.
+      trimmed: bedInSec(bed) > 0 || Number.isFinite(bed.outSec),
     }
   })
 
@@ -155,13 +172,21 @@ export default function AudioBedBar({ beds, clips, sequenceSec, pps, gapPx, mute
       {segs.map(seg => (
         <div
           key={`${seg.index}-${seg.bed.name}`}
-          className={`group absolute top-0 bottom-0 rounded border border-emerald-500 bg-gradient-to-b from-emerald-700 to-emerald-900 overflow-hidden ${muted ? 'opacity-40' : ''}`}
-          style={{ left: seg.left, width: seg.width, zIndex: 10 }}
+          /* No stopPropagation: the click is MEANT to reach the lane behind
+             this bar, whose handler moves the playhead to where it landed. One
+             click therefore both selects the clip and puts the playhead where
+             Split will cut it. The × below does stop it, since removing a clip
+             is not a place to put the playhead. */
+          onClick={() => onSelect?.(seg.index)}
+          className={`group absolute top-0 bottom-0 rounded border border-emerald-500 bg-gradient-to-b from-emerald-700 to-emerald-900 overflow-hidden ${muted ? 'opacity-40' : ''} ${seg.index === selectedIndex ? 'ring-2 ring-sky-400 brightness-110' : ''}`}
+          style={{ left: seg.left, width: seg.width, zIndex: seg.index === selectedIndex ? 12 : 10 }}
           title={
             `${segs.length > 1 ? `A1 clip ${seg.index + 1} — ` : ''}${seg.bed.name} — ${seg.durSec.toFixed(2)}s`
             + `, starting ${seg.fromSec.toFixed(2)}s into the sequence`
             + (seg.index === 0 && startSec > 0 ? ` (with V1's picture, after the head hold)` : '')
+            + (seg.trimmed ? ` — plays ${bedInSec(seg.bed).toFixed(2)}s to ${bedOutSec(seg.bed).toFixed(2)}s of the file` : '')
             + (seg.cut ? ` — runs past the end of the sequence, so ${Math.min(seg.fromSec + seg.durSec - sequenceSec, seg.durSec).toFixed(2)}s of it is cut` : '')
+            + `. Click to select it, then Split to cut it at the playhead`
           }
         >
           <div className="absolute inset-0 flex items-center gap-1 px-1.5 pointer-events-none">

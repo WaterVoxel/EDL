@@ -582,6 +582,16 @@ exact, and the piece's aformat must precede that atrim because concat
 negotiates its output format from its FIRST input -- which a silence
 piece becomes as soon as clip 0 is the one removed.
 
+A SPLIT A1 clip rides in that same concat: the two halves are two
+inputs of the one file, each cut by an atrim=start_sample:end_sample
+(sample counts again, never seconds) with its aformat placed FIRST so
+both halves are cuts of the SAME resampled stream. That ordering is
+what makes the cut free -- [A,t) followed by [t,B) is [A,B) sample for
+sample, measured bit-identical through /api/render_a1 -- where cutting
+before the resample would restart the resampler's state at the seam.
+An untrimmed clip emits exactly the chain it always did, so a lane
+nobody has split renders byte-identically to before the feature.
+
 The delay is the first clip's head hold, frame-quantized exactly like
 the hold's own gap. A hold freezes a frame BEFORE the clip proper
 begins, so a bed starting at 0 would play music over that frozen frame
@@ -912,7 +922,14 @@ there is no volume control. Section 5 covers the graph and every
 measured parameter. The bed is not clip-shaped -- no head/tail/round
 segments, no edge-drag trim, no reorder -- so it is deliberately not
 part of `focusedTrack`, and its gutter has an eye toggle but no focus
-or mute button. Audio files are accepted into the media bin for this
+or mute button. It does have ONE editing tool: clicking an A1 clip
+selects it (and moves the playhead to where you clicked), and the
+toolbar's Split button then CUTS it there into two clips playing
+adjoining parts of the one file. Because that is a cut and not a
+re-edit, the lane sounds exactly the same until one half is removed --
+at which point the space it held becomes a hole like any other. Split
+is the only toolbar control an A1 selection reaches; the Delete key
+still acts on the focused video clip, and removal is still the x. Audio files are accepted into the media bin for this
 one purpose (AUDIO_EXTENSIONS is separate from the video-only
 ALLOWED_EXTENSIONS that clips and overlay sources gate on), and a bed
 can only be added once V1 has a clip, because a bed with no V1 has no
@@ -1310,11 +1327,13 @@ session, all of them plain JSON or plain files:
                                      pcm_s16le, 48 kHz stereo, 3.003s)
     localStorage                    per-bin favorites, sticky track tags
 
-A .nara project is { version: 6, clips, track2Clips, audioBeds,
+A .nara project is { version: 7, clips, track2Clips, audioBeds,
 selectedId, exportPresets, noiseEnabled, noiseGainDb }. Version 3
 added audioBed, 4 added exportPresets, 5 replaced the single audioBed
 with the ordered audioBeds array (each entry gaining a lane-relative
-startSec), 6 added the two room-tone settings. Nothing READS the
+startSec), 6 added the two room-tone settings, 7 an A1 clip's optional
+inSec/outSec (the split -- absent means the whole file, so a version-6
+project opens and renders identically). Nothing READS the
 version field -- it is a marker for humans, and older files load
 unchanged because every addition degrades to a sensible empty value
 (no beds, no presets, tone off). The two room-tone fields are
