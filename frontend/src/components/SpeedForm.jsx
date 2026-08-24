@@ -1,8 +1,9 @@
 // Slow-down control: stretches frame timing (setpts) without re-encoding
 // tricks, interpolation, or generated frames — every output frame is an
 // existing source frame shown longer. Only predefined speeds whose
-// effective frame rate stays at or above MIN_EFFECTIVE_FPS are offered,
-// computed per clip from its source fps.
+// effective frame rate stays at or above MIN_EFFECTIVE_FPS are OFFERED,
+// computed per clip from its source fps — but a speed above 1× can still be
+// DISPLAYED, because V2 Reconstruct sets one to undo a slow-down (see below).
 import NumericStepper from './NumericStepper'
 
 const MIN_EFFECTIVE_FPS = 12
@@ -29,8 +30,14 @@ export default function SpeedForm({
   selectedClip, setClips, noiseEnabled = false, onToggleNoise,
   noiseGainDb = String(NOISE_GAIN_DB_DEFAULT), onSetNoiseGainDb,
 }) {
-  const speeds = selectedClip ? allowedSpeeds(selectedClip.fps) : [1.0]
+  const presets = selectedClip ? allowedSpeeds(selectedClip.fps) : [1.0]
   const current = selectedClip?.speed && selectedClip.speed > 0 ? selectedClip.speed : 1
+  // V2 Reconstruct sets the RECIPROCAL of a V1 slow-down (2× for a half-speed
+  // shot) to drop the repeated frames again, and no preset here is above 1× — a
+  // <select> whose value matches no option shows its FIRST one instead, so such a
+  // clip would read "100%" while rendering at 2×. List the real value rather than
+  // let the control state a number that isn't the clip's.
+  const speeds = presets.includes(current) ? presets : [current, ...presets]
 
   function apply(speed) {
     if (!selectedClip) return
@@ -47,12 +54,13 @@ export default function SpeedForm({
         <select
           value={String(current)}
           onChange={e => apply(parseFloat(e.target.value))}
-          title={`Slow down by stretching frame timing (no generated frames). Options keep the effective rate ≥ ${MIN_EFFECTIVE_FPS} fps for this clip's ${(selectedClip.fps || 30).toFixed(0)} fps source.`}
+          title={`Slow down by stretching frame timing (no generated frames). Options keep the effective rate ≥ ${MIN_EFFECTIVE_FPS} fps for this clip's ${(selectedClip.fps || 30).toFixed(0)} fps source.${current > 1 ? ` Currently ${Math.round(current * 100)}%, set by V2 Reconstruct to undo a slow-down V1 baked in — it drops the repeated frames again. Picking a preset here gives that up.` : ''}`}
           className={`px-1 py-0.5 text-[8px] rounded bg-neutral-950 border text-neutral-300 ${current !== 1 ? 'border-orange-500' : 'border-neutral-700'}`}
         >
           {speeds.map(s => (
             <option key={s} value={String(s)}>
-              {Math.round(s * 100)}%{s !== 1 ? ` (${((selectedClip.fps || 30) * s).toFixed(1).replace(/\.0$/, '')} fps)` : ''}
+              {Math.round(s * 100)}%
+              {s > 1 ? ' (un-stretch)' : s !== 1 ? ` (${((selectedClip.fps || 30) * s).toFixed(1).replace(/\.0$/, '')} fps)` : ''}
             </option>
           ))}
         </select>

@@ -15,6 +15,52 @@ the day the version file appeared. There are no tags for them and never will be 
 `v0.25.0` is the first real tag. Treat the older entries as a history, not a
 download list.
 
+## 0.27.0 — 2026-08-24
+
+**Reconstruct now undoes a slow-down instead of reporting it**
+
+If you slowed a shot on V1 — say 24 frames stretched to 48 — Reconstruct used to
+hand that shot back at its stretched length and tell you so. The frames the
+slow-down repeated were real frames in the rendered file, and the app had no
+speed-up to compress them with, so all it could honestly do was warn.
+
+It can now. A V1 slow-down comes back as its exact opposite: the reconstructed
+clip carries the reciprocal speed, which drops the repeated frames again and puts
+the shot back at its original length. 48 frames become 24 again.
+
+This is exact, not close. A slow-down only ever *duplicates* frames, so speeding
+it back up only ever drops those duplicates. Every speed the app offers was
+rendered out and back and came home frame for frame identical, awkward
+reciprocals included (75% → 133%, 40% → 250%). Checked the whole way through too:
+a three-shot render with only its middle shot slowed reconstructed to footage
+byte-identical to the original camera file.
+
+Two things it still can't do, both said in the Actions log:
+
+- **Sound doesn't come back.** Retimed footage renders silent in either
+  direction, so there was never any audio in the stretched file to restore.
+- **A slow-down more extreme than anything the app offers can't be inverted** —
+  undoing it would need a speed past what the renderer accepts. You can only get
+  there by editing a project file by hand; those shots stay stretched and are
+  named in the log.
+
+**One thing to know:** a reconstruction where *some* shots were slowed and others
+weren't now arrives as more than one clip on V2 — one per run of matching speed.
+A single clip can only carry one speed, and a single box can only show one
+duration, so the seam is where the timing genuinely changes rather than a lie
+about it. Reconstructing a sequence with one speed throughout (or none at all)
+still gives you the one fused clip it always did, and **V2 Render** joins the
+whole chain into one file either way.
+
+Also fixed: the Speed dropdown reads the clip's actual speed. A reconstructed
+clip at 200% used to display "100%", because the menu only lists slow-downs and a
+menu with no matching entry shows its first one.
+
+Numbering note: this changes behavior that existed before, which the project's
+own rule calls a major bump — but the app is still `0.x`, where that same
+convention puts breaking changes in the minor slot. `1.0.0` should mean the app
+is stable, not that Reconstruct got better, so this is 0.27.0.
+
 ## 0.26.1 — 2026-08-24
 
 **Reconstruct now cuts on the right frame when V1 changed any timing**

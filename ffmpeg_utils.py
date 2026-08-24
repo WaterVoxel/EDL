@@ -1348,8 +1348,10 @@ def clip_audio_pieces(spec, timing, sample_rate):
     shared by the V1 render and the A1 stem.
 
     Three ways a body ends up silent, all of them real cases from the UI:
-      * speed != 1: a slow-down is a pure PTS stretch with no audio (see
-        build_timeline_filter), so the body is a gap of the stretched length.
+      * speed != 1: a retime is a pure PTS change with no audio at all (see
+        build_timeline_filter) — that holds for a speed-up as much as for a
+        slow-down — so the body is a gap of the retimed length, stretched
+        below 1 and compressed above it.
       * has_audio false: the source has no audio stream at all.
       * otherwise the body is the clip's own audio, atrim'd to the trim window.
 
@@ -1905,12 +1907,20 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
     inSec (not outSec), so a hold always freezes on the frame actually
     adjacent to it in the final playback order.
 
-    spec["speed"] (0 < speed <= 1, default 1) slows the main segment by
-    stretching PTS — setpts=(1/speed)*PTS — with NO interpolation or
-    generated frames; the fps normalization repeats existing frames to
-    fill the stretched span. Slowed segments get silent audio (the spec's
-    -an equivalent within a concat graph that requires an audio stream).
-    Callers must enforce the effective-fps floor (source_fps * speed).
+    spec["speed"] (default 1) retimes the main segment by scaling PTS —
+    setpts=(1/speed)*PTS — with NO interpolation and no generated frames.
+    Below 1 it SLOWS: the fps normalization repeats existing frames to fill
+    the stretched span. Above 1 it COMPRESSES, and the normalization drops
+    frames instead of repeating them; that is the exact inverse of a slow-down
+    and is what lets V2 Reconstruct un-stretch V1's slow motion (a stretch only
+    ever duplicated frames, so the compression only ever drops duplicates —
+    verified byte-identical out and back at every slow-down preset, including
+    the non-integer reciprocals of 0.75x and 0.4x). Either way the retimed
+    segment gets silent audio (the spec's -an equivalent within a concat graph
+    that requires an audio stream), so an un-stretch does not restore the
+    sound a slow-down dropped — there was none in the file to restore.
+    Callers own both limits: the effective-fps floor (source_fps * speed) on
+    the slow side, and a ceiling on the fast side (app.py MAX_SPEED).
 
     spec["crop"] (optional dict {w, h, x, y}, source-pixel coordinates) is
     applied to the raw input before trim/reverse/speed/holds, so a lead or

@@ -1216,13 +1216,21 @@ function AppInner() {
     setTrack2Clips(r.segments)
 
     const shotCount = r.shots.reduce((n, s) => n + s.v1Indexes.length, 0)
-    // RANGES, not clips: the reconstruction is one clip on V2. It is stored as
-    // r.shots.length lane entries only because a clip carries exactly one
-    // in/out pair and these ranges are, by construction, discontiguous in V2's
-    // file — the lane draws them as a single seamless box and V2 Render joins
-    // them into one file. Never call this number "clips" to the user.
+    // RANGES, not clips. It is stored as r.shots.length lane entries only
+    // because a clip carries exactly one in/out pair and these ranges are, by
+    // construction, discontiguous in V2's file. Never call this number "clips"
+    // to the user.
     const ranges = r.shots.length
+    // How many BOXES the lane will actually draw, asked of the same function the
+    // lane asks (fuseGroups) rather than assumed to be 1. Ranges fuse only where
+    // they agree on speed and direction, so a reconstruction that un-stretched
+    // some shots and not others legitimately comes back as more than one box —
+    // one label cannot state two speeds. Everything below reads this instead of
+    // promising "one clip".
+    const boxes = fuseGroups(r.segments.slice(0, ranges)).length
     const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`
+    // 1/0.75 is 1.3333333333333333; three places is enough to name a speed.
+    const speedLabel = n => `${Number(n.toFixed(3))}×`
     const dropNotes = [
       r.dropped.holds > 0 ? `${plural(r.dropped.holds, 'hold')} (${r.dropped.holdSec.toFixed(2)}s)` : null,
       r.dropped.duplicates > 0 ? `${plural(r.dropped.duplicates, 'duplicate')} (${r.dropped.duplicateSec.toFixed(2)}s)` : null,
@@ -1230,15 +1238,17 @@ function AppInner() {
 
     const notes = [{
       kind: 'info',
-      text: `▣ V2 Reconstruct: ${plural(shotCount, 'shot')} restored from V1 as ONE clip on V2` +
+      text: `▣ V2 Reconstruct: ${plural(shotCount, 'shot')} restored from V1 as ${boxes === 1 ? 'ONE clip' : plural(boxes, 'clip')} on V2` +
         (ranges > 1 ? ` — ${ranges} chained ranges of "${name}"` : '') +
         (r.welds > 0 ? `, ${r.welds} welded back together` : '') +
         (dropNotes.length > 0 ? `, dropped ${dropNotes.join(' + ')}` : '') +
         (r.reordered ? '' : ' — already in source order'),
     }]
 
-    if (ranges > 1) {
+    if (ranges > 1 && boxes === 1) {
       notes.push({ kind: 'info', text: `▣ Nothing was re-rendered: the ${ranges} ranges are non-adjacent in "${name}", so they sit under one clip on the lane (the ⛓ ${ranges} badge) and are joined into a single file when you press V2 Render on mode 1. Delete removes the whole chain.` })
+    } else if (ranges > 1) {
+      notes.push({ kind: 'info', text: `▣ Nothing was re-rendered: the ${ranges} ranges are non-adjacent in "${name}" and draw as ${boxes} boxes, because one box can only state one speed and one direction — the run splits where the timing does. V2 Render on mode 1 still joins all of them into a single file; Delete removes one box at a time.` })
     }
     if (r.reordered) {
       const order = r.shots.map(s => s.v1Indexes.map(i => i + 1).join('+')).join(' → ')
@@ -1255,10 +1265,14 @@ function AppInner() {
           (s.unusedSec > 0.001 ? ` — ${s.unusedSec.toFixed(2)}s of the original was never on V1, and is not in this footage either` : ' — all of it'),
       })
     }
-    if (r.bakedSpeeds.length > 0) {
-      const speedShots = r.sources.reduce((n, s) => n + s.speedShots, 0)
-      const { stretchedSec, sourceSec } = r.bakedSpeedSec
-      notes.push({ kind: 'warn', text: `⚠ ${plural(speedShots, 'shot')} ran at ${r.bakedSpeeds.map(s => `${s}×`).join('/')} on V1 — the slowed frames are baked into this footage, so it comes back at the STRETCHED length: ${sourceSec.toFixed(2)}s of source occupies ${stretchedSec.toFixed(2)}s here (+${(stretchedSec - sourceSec).toFixed(2)}s of repeated frames). Speed was reset to 1× so it isn't slowed twice; this app has no speed-up to compress it back with. The cut boundaries themselves DO account for the stretch.` })
+    if (r.restoredSpeeds.length > 0) {
+      const restoredShots = r.shots.reduce((n, s) => n + (s.speed !== 1 ? s.v1Indexes.length : 0), 0)
+      const { stretchedSec, unstretchedSec } = r.restoredSec
+      const pairs = r.restoredSpeeds.map(s => `${speedLabel(s.from)} → ${speedLabel(s.to)}`).join(', ')
+      notes.push({ kind: 'info', text: `▣ ${plural(restoredShots, 'shot')} was slowed on V1 and has been un-stretched (${pairs}): the frames the slow-down repeated are dropped again, so ${stretchedSec.toFixed(2)}s of stretched footage renders back to ${unstretchedSec.toFixed(2)}s — the original timing, frame for frame. A retime carries no audio in either direction, so there was no sound in this footage to bring back.` })
+    }
+    if (r.unrestoredSpeeds.length > 0) {
+      notes.push({ kind: 'warn', text: `⚠ ${plural(r.unrestoredSpeeds.length, 'shot speed')} on V1 (${r.unrestoredSpeeds.map(speedLabel).join(', ')}) is too slow to undo — the reciprocal would be past what the render accepts — so those shots kept 1× and DO come back at their stretched length. No speed this app offers gets here, so the project file was edited by hand.` })
     }
     const croppedShots = r.sources.reduce((n, s) => n + s.croppedShots, 0)
     if (croppedShots > 0) {
@@ -1517,9 +1531,10 @@ function AppInner() {
   const displayInfo = (() => {
     if (!binSelection?.info) return null
     const info = { ...binSelection.info, _name: binSelection.name }
-    // When the selected clip is slowed, show the stretched duration and the
-    // frame count the constant-fps render will actually contain (the fps
-    // normalization duplicates frames to fill the stretched timing).
+    // When the selected clip is retimed, show the retimed duration and the frame
+    // count the constant-fps render will actually contain — the fps normalization
+    // duplicates frames to fill a stretch and drops them again on a Reconstruct
+    // un-stretch, so dividing by speed is right in both directions.
     const speed = selectedClip?.speed
     if (selectedClip && speed && speed !== 1 && selectedClip.sourceName === binSelection.name) {
       if (info.duration) info.duration = info.duration / speed

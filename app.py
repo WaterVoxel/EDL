@@ -281,6 +281,21 @@ def get_export_quality():
 # how much export config one project file is allowed to accumulate.
 MAX_EXPORT_PRESETS = 200
 
+# Speed above 1x compresses a clip: setpts drops frames instead of holding them.
+# It exists for ONE reason — V2 Reconstruct emits the reciprocal of a V1
+# slow-down so a shot that was stretched from 24 frames to 48 comes back at 24
+# again — and it is exact, not an approximation: every slow-down preset was
+# rendered out and back and came home frame-for-frame byte-identical (a stretch
+# only duplicates frames, so the compression drops only duplicates).
+#
+# The ceiling is derived, not picked. A slow-down is already bounded by the
+# 12 fps effective-rate floor below, so the slowest a clip can legally be is
+# 12/clip_fps, and the fastest un-stretch anyone can need is its reciprocal,
+# clip_fps/12 — which is 10x for a 120 fps source and less for everything
+# slower. Beyond that is nothing this app can produce, so it is refused rather
+# than silently rendered.
+MAX_SPEED = 10.0
+
 
 def get_custom_export_settings(strict=True):
     """The "custom" quality mode's flags — the ones the FFmpeg Custom Settings
@@ -1010,9 +1025,13 @@ def render_timeline():
         # tail-hold and round-hold (Raise) on the same last clip just add.
         trail_hold = (float(c.get("tailHoldSec") or 0) + float(c.get("roundHoldSec") or 0)) if is_last else 0.0
 
-        # Slow-down: pure PTS stretch, so the only quality constraint is
-        # the effective frame rate — refuse anything that would fall below
-        # 12 fps (frames held so long the motion visibly stutters).
+        # Speed is a pure PTS change either way — a stretch holds frames, a
+        # compression drops them — so the only quality constraint is the
+        # effective frame rate, and it only bites on the SLOW side: refuse a
+        # slow-down that would fall below 12 fps (frames held so long the motion
+        # visibly stutters). A speed-up raises the effective rate, so the floor
+        # cannot apply to it; its ceiling is MAX_SPEED (see there for why
+        # speed > 1 exists at all).
         try:
             # `or` would coerce a literal 0 to the default and skip the
             # range check below — only substitute the default for absent/null.
@@ -1021,8 +1040,10 @@ def render_timeline():
         except (ValueError, TypeError):
             return jsonify({"error": f"clip {i}: speed must be numeric"}), 400
         clip_fps = info["fps"] or 30.0
-        if not (0 < speed <= 1.0):
-            return jsonify({"error": f"clip {i}: speed must be in (0, 1] — only slow-down is supported"}), 400
+        if not (0 < speed <= MAX_SPEED):
+            return jsonify({"error": f"clip {i}: speed must be in (0, {MAX_SPEED:g}] — "
+                                     f"below 1 slows down, above 1 speeds up (which exists to "
+                                     f"un-stretch a slow-down; see MAX_SPEED)"}), 400
         if speed < 1.0 and clip_fps * speed < 12 - 1e-9:
             return jsonify({
                 "error": f"clip {i}: speed {speed} would drop the effective rate to "
@@ -1391,8 +1412,11 @@ def render_a1():
             speed = 1.0 if raw_speed is None else float(raw_speed)
         except (ValueError, TypeError):
             return jsonify({"error": f"clip {i}: speed must be numeric"}), 400
-        if not (0 < speed <= 1.0):
-            return jsonify({"error": f"clip {i}: speed must be in (0, 1] — only slow-down is supported"}), 400
+        # Same range as /api/render_timeline, or an A1 stem would reject a lane
+        # the video render accepts. No 12 fps floor here: this route renders no
+        # video, and the floor is a picture-quality rule.
+        if not (0 < speed <= MAX_SPEED):
+            return jsonify({"error": f"clip {i}: speed must be in (0, {MAX_SPEED:g}]"}), 400
         is_first = i == 0
         is_last = i == len(clips) - 1
         clip_specs.append({

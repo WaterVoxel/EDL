@@ -70,16 +70,21 @@ import { clipSpeed, sequenceTargetFps, clipRenderFrames } from './clipMath.js'
 //     setting the V2 clip's own flag to the SAME value plays them backward a
 //     second time and lands in true chronological order (two reversals cancel).
 //     Per shot, so V1's clips no longer have to agree on it.
-//   speed — a slow-down is already realized as repeated frames at the stretched
-//     duration, and V2's own speed only ever goes slower, so it resets to 1 and
-//     the shot comes back at its STRETCHED length. Unrecoverable; the caller
-//     warns rather than pretending otherwise, and `bakedSpeedSec` says by how
-//     many seconds so the warning is a measurement instead of a caveat.
-//     Un-stretching it would mean emitting the reciprocal speed on V2, and speed
-//     above 1x does not exist in this app — SpeedForm offers only slow-downs and
-//     BOTH render routes reject `speed > 1` outright (app.py: "only slow-down is
-//     supported"). So the honest reset is the only reachable answer here, not a
-//     shortcut.
+//   speed — a V1 slow-down is realized as REPEATED frames at the stretched
+//     duration, so the shot comes back long: 24 frames slowed to 0.5x arrive as
+//     48. The V2 clip therefore carries the RECIPROCAL speed (2x), which drops
+//     exactly those repeats and puts the shot back at its original 24 frames.
+//     That is exact rather than approximate — a stretch only ever duplicates
+//     frames, so compressing it again only ever drops duplicates; every preset
+//     was rendered out and back and came home frame-for-frame byte-identical,
+//     including the non-integer reciprocals (0.75x → 1.333x, 0.4x → 2.5x).
+//     `restoredSec` says how many seconds that took back off, so the caller
+//     reports a measurement instead of a caveat. Two things it does NOT undo:
+//     the shot's AUDIO, since a retime in either direction renders silent, so
+//     there is no sound in the stretched file to restore; and a reciprocal above
+//     the render's MAX_SPEED, which no SpeedForm preset can produce but a
+//     hand-edited .nara could — those shots keep speed 1 and are listed in
+//     `unrestoredSpeeds` rather than emitted at a speed the render would refuse.
 //   TIMING — every piece boundary is measured in whole FRAMES, via
 //     clipRenderFrames, because that is how the render lays footage
 //     down (ffmpeg_utils.clip_timing). Measuring in raw seconds instead puts each
@@ -179,9 +184,9 @@ function sourceChronologicalOrder(kept, v1Clips) {
 }
 
 // Ranges that came back adjacent become ONE clip again: consecutive in the
-// output, contiguous in V2's file, same `reversed`. This is what collapses a
-// reconstruct of a sequence nobody reordered down to the single clip spanning
-// the file that this module used to return, and what "put the order back
+// output, contiguous in V2's file, same `reversed`, same `speed`. This is what
+// collapses a reconstruct of a sequence nobody reordered down to the single clip
+// spanning the file that this module used to return, and what "put the order back
 // without any cuts" means when a move IS reversed — un-moving [C][A][B] needs a
 // cut between C and A, but none between A and B.
 //
@@ -193,12 +198,20 @@ function sourceChronologicalOrder(kept, v1Clips) {
 // the opposite order — the very bug this rewrite exists to fix, one clip
 // smaller. A reversed shot never welds to a forward one: a single flag can't
 // play both ways.
+//
+// Speed has to agree for the same reason, and it is the newer of the two rules:
+// a clip carries ONE speed, so welding a 0.5x shot to a 1x one would apply that
+// range's single reciprocal to both and mistime everything but the first. The
+// visible cost is that a mixed-speed reconstruction draws as several V2 clips
+// instead of one fused clip (clipMath.fuseGroups also requires speed to match) —
+// a seam where the timing genuinely changes, rather than one clip that is wrong.
 function weldAdjacentRanges(ordered, v1Clips) {
   const welded = []
   for (const r of ordered) {
     const prev = welded[welded.length - 1]
     const reversed = !!v1Clips[r.v1Index].reversed
-    const contiguous = prev && prev.reversed === reversed && (reversed
+    const speed = clipSpeed(v1Clips[r.v1Index])
+    const contiguous = prev && prev.reversed === reversed && prev.speed === speed && (reversed
       ? Math.abs(r.to - prev.from) <= CUT_EPSILON
       : Math.abs(r.from - prev.to) <= CUT_EPSILON)
 
@@ -212,12 +225,27 @@ function weldAdjacentRanges(ordered, v1Clips) {
         from: r.from,
         to: r.to,
         reversed,
+        speed,
         v1Indexes: [r.v1Index],
         truncatedSec: r.truncatedSec,
       })
     }
   }
   return welded
+}
+
+// The V2 speed that undoes a V1 slow-down: its reciprocal. 1x stays 1x, and a
+// reciprocal past what the render accepts stays 1x too — mirroring app.py's
+// MAX_SPEED here rather than emitting a clip /api/render_timeline would reject
+// with a 400 at Render, long after the user could tell why. Nothing SpeedForm
+// offers reaches it (its slowest preset is 0.2x → 5x, and the 12 fps effective
+// floor bounds it tighter still); a hand-edited .nara is the only way in.
+const MAX_RESTORE_SPEED = 10.0
+
+function restoreSpeed(v1Speed) {
+  if (v1Speed === 1) return 1
+  const reciprocal = 1 / v1Speed
+  return reciprocal <= MAX_RESTORE_SPEED + 1e-9 ? reciprocal : 1
 }
 
 // Returns FACTS, no display strings — the caller owns every word the user reads,
@@ -229,7 +257,9 @@ function weldAdjacentRanges(ordered, v1Clips) {
 //                 (the moveClip convention in clipMath.js) and the caller can
 //                 detect the no-op with `===`.
 //   shots       — one entry per emitted clip, in output order:
-//                 { v1Indexes, from, to, reversed, truncatedSec }. v1Indexes are
+//                 { v1Indexes, from, to, reversed, v1Speed, speed,
+//                 truncatedSec } — `v1Speed` is what V1 ran at and `speed` the
+//                 reciprocal now on the clip, equal only when both are 1. v1Indexes are
 //                 0-based indexes into v1Clips — every clip welded into that
 //                 segment, in output order — so the caller can print the order
 //                 that was reversed. from/to are seconds from the head of V2's
@@ -241,7 +271,13 @@ function weldAdjacentRanges(ordered, v1Clips) {
 //                 usedSec, unusedSec, overlapSec }. sourceDurationSec and
 //                 unusedSec are null when the duration isn't known, so the
 //                 caller skips that line instead of printing NaN.
-//   bakedSpeeds — the distinct speeds among surviving shots that weren't 1×.
+//   restoredSpeeds — one { from, to } per distinct V1 slow-down that was undone:
+//                 `from` is the speed V1 ran at, `to` the reciprocal now on V2.
+//   restoredSec — { stretchedSec, unstretchedSec }: how much of V2's file those
+//                 shots occupy, and what they render back down to.
+//   unrestoredSpeeds — V1 speeds whose reciprocal exceeded MAX_RESTORE_SPEED, so
+//                 those shots stayed at 1× and DO come back stretched. Empty for
+//                 anything the app itself can produce.
 //   dropped     — what did not survive: holds and duplicates (count + the
 //                 seconds they occupied in V2's file), pastEnd (pieces landing
 //                 entirely past the end of V2's window) and subFrame (ranges
@@ -253,7 +289,7 @@ export function reconstructFromV1(v1Clips, v2Clips) {
   const dropped = { holds: 0, holdSec: 0, duplicates: 0, duplicateSec: 0, pastEnd: 0, pastEndSec: 0, subFrame: 0 }
   const nothing = {
     segments: v2Clips, shots: [], welds: 0, reordered: false, sources: [],
-    bakedSpeeds: [], bakedSpeedSec: { stretchedSec: 0, sourceSec: 0 },
+    restoredSpeeds: [], restoredSec: { stretchedSec: 0, unstretchedSec: 0 }, unrestoredSpeeds: [],
     dropped, overflow: 0, leftoverSec: 0,
   }
 
@@ -336,7 +372,7 @@ export function reconstructFromV1(v1Clips, v2Clips) {
       inSec: v2c.inSec + r.from,
       outSec: v2c.inSec + r.to,
       reversed: r.reversed,
-      speed: 1,
+      speed: restoreSpeed(r.speed),
       crop: null,
       cropKeyframes: [],
       headHoldSec: 0,
@@ -385,19 +421,29 @@ export function reconstructFromV1(v1Clips, v2Clips) {
     delete s.windows
   }
 
-  // What the slow-downs actually cost, in SECONDS rather than a bare list of
-  // multipliers — the number the user needs to judge how far off the returned
-  // footage's timing is. A range on V2 already IS the stretched length, so
-  // multiplying it back by the V1 clip's own speed recovers the source length it
-  // was stretched from; the difference is the padding the render inserted as
-  // repeated frames.
+  // What un-stretching actually buys back, in SECONDS rather than a bare list of
+  // multipliers — the number the user needs to see that the timing really came
+  // home. A range on V2 already IS the stretched length, so multiplying it by the
+  // V1 clip's own speed gives the length it renders back to under the reciprocal;
+  // the difference is the padding the V1 render inserted as repeated frames and
+  // this reconstruction drops again.
+  //
+  // Summed over `welded`, not `kept`: only equal-speed ranges weld, so the totals
+  // are identical either way, and the welded range is where the speed lives.
   let stretchedSec = 0
-  let sourceSec = 0
-  for (const r of kept) {
-    const sp = clipSpeed(v1Clips[r.v1Index])
-    if (sp === 1) continue
+  let unstretchedSec = 0
+  const restored = new Map()
+  const unrestored = new Set()
+  for (const r of welded) {
+    if (r.speed === 1) continue
+    const v2Speed = restoreSpeed(r.speed)
+    if (v2Speed === 1) {
+      unrestored.add(r.speed)
+      continue
+    }
+    restored.set(r.speed, v2Speed)
     stretchedSec += r.to - r.from
-    sourceSec += (r.to - r.from) * sp
+    unstretchedSec += (r.to - r.from) * r.speed
   }
 
   return {
@@ -407,13 +453,16 @@ export function reconstructFromV1(v1Clips, v2Clips) {
       from: r.from,
       to: r.to,
       reversed: r.reversed,
+      v1Speed: r.speed,
+      speed: restoreSpeed(r.speed),
       truncatedSec: r.truncatedSec,
     })),
     welds: kept.length - welded.length,
     reordered,
     sources,
-    bakedSpeeds: [...new Set(kept.map(r => clipSpeed(v1Clips[r.v1Index])).filter(s => s !== 1))].sort((a, b) => a - b),
-    bakedSpeedSec: { stretchedSec, sourceSec },
+    restoredSpeeds: [...restored].map(([from, to]) => ({ from, to })).sort((a, b) => a.from - b.from),
+    restoredSec: { stretchedSec, unstretchedSec },
+    unrestoredSpeeds: [...unrestored].sort((a, b) => a - b),
     dropped,
     overflow,
     leftoverSec,

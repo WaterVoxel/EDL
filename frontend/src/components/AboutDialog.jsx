@@ -122,7 +122,9 @@ export default function AboutDialog({ onClose }) {
               <li>
                 <strong>Speed</strong> — stretches frame timing (
                 <span className="font-mono text-neutral-400">setpts</span>) with no interpolation or
-                generated frames; capped so the effective rate never drops below 12 fps.
+                generated frames; capped so the effective rate never drops below 12 fps. Reconstruct
+                can also run it the other way to undo a stretch, which drops the repeated frames
+                again and generates nothing either.
               </li>
               <li><strong>Split</strong> / <strong>Trim</strong> — cuts between existing frames, copies nothing new.</li>
             </ul>
@@ -363,28 +365,34 @@ export default function AboutDialog({ onClose }) {
               <em> [C][A][B]</em> hands V2 back A B C. Shots that come back adjacent are welded, so
               nothing you didn't move gets a cut it didn't have — a sequence nobody reordered comes
               back as one clip spanning the file. Holds and duplicate shots are dropped (frozen and
-              repeated frames V1 baked in), reverse is restored per shot, and speed and crop are
-              reset so they aren't applied twice.
+              repeated frames V1 baked in), and reverse is restored per shot. A V1 slow-down is
+              <strong> undone</strong>: the shot comes back carrying the reciprocal speed, so a shot
+              stretched from 24 frames to 48 renders back to 24 — the repeated frames the slow-down
+              inserted are dropped again, frame for frame. Crop is reset rather than faked, since
+              the pixels outside V1's box are not in the footage.
             </p>
             <p>
-              What lands on V2 is always <strong>one clip, with no gaps</strong>. Reordering means
-              the ranges are no longer in file order, and a clip holds one IN/OUT pair — so the
-              reconstruction is stored as several ranges <em>chained under a single clip</em>, marked
-              <em> ⛓ N</em> on the box. It draws as one continuous clip because that is what it is:
-              one name, one colour, one duration, and delete removes the whole chain. Nothing is
-              re-rendered at this point — <strong>V2 Render on mode 1</strong> joins the chain into a
-              single file, in exactly the order shown. Run that first if you want to Analyze,
-              Batch-Analyze or Reconstruct again; those three need one continuous file and will say
-              so rather than transform half a chain.
+              What lands on V2 has <strong>no gaps</strong>, and normally reads as one clip.
+              Reordering means the ranges are no longer in file order, and a clip holds one IN/OUT
+              pair — so the reconstruction is stored as several ranges <em>chained under a single
+              clip</em>, marked <em> ⛓ N</em> on the box. It draws as one continuous clip because that
+              is what it is: one name, one colour, one duration, and delete removes the whole chain.
+              The exception is a mix: a box can state only one speed and one direction, so if some
+              shots were slowed on V1 and others weren't, the chain draws as a box per run and the
+              log says how many. Nothing is re-rendered at this point — <strong>V2 Render on mode
+              1</strong> joins the whole chain into a single file, in exactly the order shown. Run
+              that first if you want to Analyze, Batch-Analyze or Reconstruct again; those three need
+              one continuous file and will say so rather than transform half a chain.
             </p>
             <p className="text-neutral-400">
-              Three honest limits, all reported in the Actions log. Slowed footage comes back at its
-              <em> stretched</em> length — the repeated frames are real frames now. Cropped-away
-              pixels are gone for good; to put a processed region back over the original, use V2 as
-              an overlay (④ <em>A/B</em>) instead. And footage V1 never used was never rendered, so
-              it isn't here. Reconstruct also reads V1 as it stands <em>now</em>: reorder V1 after
-              the render that produced V2's file and every boundary lands on the wrong frame, which
-              no length check can catch — the log warns whenever V1 has unrendered edits.
+              Two honest limits, both reported in the Actions log. Cropped-away pixels are gone for
+              good; to put a processed region back over the original, use V2 as an overlay (④
+              <em> A/B</em>) instead. And footage V1 never used was never rendered, so it isn't here.
+              Un-stretching a slow-down restores its <em>timing</em>, not its sound: retimed footage
+              renders silent in either direction, so there was never audio in the file to bring back.
+              Reconstruct also reads V1 as it stands <em>now</em>: reorder V1 after the render that
+              produced V2's file and every boundary lands on the wrong frame, which no length check
+              can catch — the log warns whenever V1 has unrendered edits.
             </p>
             <p>
               <strong>④ V2 Render</strong> has an <strong>A / A/B</strong> switch. <em>A</em> renders

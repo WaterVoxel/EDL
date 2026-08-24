@@ -393,7 +393,9 @@ export function roundUpAmount(totalSec) {
 //                  holds are merged — both freeze the same frame)
 // Segment fields: { clip, mode, timelineStart, timelineEnd, sourceStart,
 // rate, frozenSourceTime }. `sourceStart` is the source time at
-// timelineStart for a native/scrub body; `rate` is the play speed (≤1).
+// timelineStart for a native/scrub body; `rate` is the play speed, below 1 for a
+// slow-down and above it for a Reconstruct un-stretch (which scrubs the same way,
+// just consuming source faster than the playhead moves).
 export function buildSegments(clips) {
   const segments = []
   let elapsed = 0
