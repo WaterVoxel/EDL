@@ -50,3 +50,10 @@ export const revealFile = (name, dir = 'output') => postJSON('/api/reveal_file',
 export const renameFile = (name, newName, dir = 'output') => postJSON('/api/rename_file', { name, newName, dir })
 export const chat = (message, session_id, selected_clip) => postJSON('/api/chat', { message, session_id, selected_clip })
 export const execute = (command) => postJSON('/api/execute', { command })
+// What the BACKEND booted with. The bundle already knows its own version
+// (`import.meta.env.VITE_APP_VERSION`, fed from the same VERSION file by
+// vite.config), so this exists only to catch the two disagreeing — a browser
+// holding a stale bundle against a restarted server. Resolves to `{}` rather
+// than rejecting: the version readout is metadata, and it must never be the
+// thing that breaks a mount if the backend is down.
+export const getVersion = () => fetch('/api/version').then(r => r.json()).catch(() => ({}))

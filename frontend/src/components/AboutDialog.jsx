@@ -353,10 +353,38 @@ export default function AboutDialog({ onClose }) {
               a file shorter than V1.
             </p>
             <p>
-              <strong>③ V2 Reconstruct</strong> — the inverse: it reads V1's decisions and undoes them,
-              placing the full, untrimmed, un-reversed, hold-free original source file(s) on V2 —
-              one clip per distinct source, in the order they appear. The result is the pre-edit
-              state of the footage, verified bit-exact against the original.
+              <strong>③ V2 Reconstruct</strong> — the inverse of ②, and the one that undoes your
+              <em> moves</em>. It reads V1's decisions and reverses them <em>on the round-tripped
+              footage sitting on V2</em> — it never puts V1's own files there, because the point is
+              that V2 is a different, restyled version of the same footage. It cuts V2 at V1's shot
+              boundaries and lays the shots back down in <strong>source order</strong>: grouped by
+              source file, each file's run where that file first appears on V1, in source-time order
+              inside a run. So a V1 cut into <em>[A][B][C]</em> and then shuffled to
+              <em> [C][A][B]</em> hands V2 back A B C. Shots that come back adjacent are welded, so
+              nothing you didn't move gets a cut it didn't have — a sequence nobody reordered comes
+              back as one clip spanning the file. Holds and duplicate shots are dropped (frozen and
+              repeated frames V1 baked in), reverse is restored per shot, and speed and crop are
+              reset so they aren't applied twice.
+            </p>
+            <p>
+              What lands on V2 is always <strong>one clip, with no gaps</strong>. Reordering means
+              the ranges are no longer in file order, and a clip holds one IN/OUT pair — so the
+              reconstruction is stored as several ranges <em>chained under a single clip</em>, marked
+              <em> ⛓ N</em> on the box. It draws as one continuous clip because that is what it is:
+              one name, one colour, one duration, and delete removes the whole chain. Nothing is
+              re-rendered at this point — <strong>V2 Render on mode 1</strong> joins the chain into a
+              single file, in exactly the order shown. Run that first if you want to Analyze,
+              Batch-Analyze or Reconstruct again; those three need one continuous file and will say
+              so rather than transform half a chain.
+            </p>
+            <p className="text-neutral-400">
+              Three honest limits, all reported in the Actions log. Slowed footage comes back at its
+              <em> stretched</em> length — the repeated frames are real frames now. Cropped-away
+              pixels are gone for good; to put a processed region back over the original, use V2 as
+              an overlay (④ <em>A/B</em>) instead. And footage V1 never used was never rendered, so
+              it isn't here. Reconstruct also reads V1 as it stands <em>now</em>: reorder V1 after
+              the render that produced V2's file and every boundary lands on the wrong frame, which
+              no length check can catch — the log warns whenever V1 has unrendered edits.
             </p>
             <p>
               <strong>④ V2 Render</strong> has an <strong>A / A/B</strong> switch. <em>A</em> renders
@@ -648,10 +676,10 @@ export default function AboutDialog({ onClose }) {
             </p>
             <p>
               When a Run succeeds and a clip is selected, the produced file is loaded onto that clip
-              in place — same treatment Reconstruct gives a fresh source: IN/OUT reset to the file's
-              full length and any hold, reverse, speed, or crop staged against the old source is
-              cleared, since the chat edit is now baked into new pixels and those old settings no
-              longer apply. With no clip selected, the result simply appears in the Export Bin.
+              in place, and the clip starts over on it: IN/OUT reset to the new file's full length,
+              and any hold, reverse, speed, or crop staged against the old source is cleared, since
+              the chat edit is now baked into new pixels and those old settings no longer apply.
+              With no clip selected, the result simply appears in the Export Bin.
             </p>
           </Section>
 
@@ -696,6 +724,16 @@ export default function AboutDialog({ onClose }) {
               Questions, bug reports, and feature requests are welcome<br />
               through any of the channels above.
             </p>
+            {/* The version belongs to the bug-report block, not to a credits
+                line: it is the first thing worth quoting back. Same value the
+                header shows, read from the same place (vite.config → repo-root
+                VERSION), so the two can never disagree with each other. */}
+            <p className="text-center text-neutral-500">
+              Please include the version below — it says exactly which build this is.
+            </p>
+            <div className="flex flex-col whitespace-pre text-neutral-300">
+              <span>Version ......... {import.meta.env.VITE_APP_VERSION}</span>
+            </div>
 
             <div className="text-neutral-700">{'─'.repeat(57)}</div>
             <div className="text-neutral-500">&lt;08/2026&gt;</div>

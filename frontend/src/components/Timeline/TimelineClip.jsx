@@ -3,19 +3,45 @@ import { nextGesture } from '../../hooks/useUndoableTracks'
 
 const MIN_CLIP_SEC = 0.1
 
+// One member of a fused run has to lose the three things that make a box read as
+// its own clip — the border on the seam side, the rounding on that corner, and
+// the fill layer's matching rounding — while keeping the two that make the run
+// read as one: the border along the top and bottom, and the outer corners.
+//
+// Spelled out per position as LITERAL class strings. Tailwind v4's scanner reads
+// source text, so `rounded-${side}` would be purged and the seam would silently
+// reopen in a production build only (see CLIP_PALETTE's note in clipMath).
+const FUSE_BOX = {
+  start: 'rounded-l border-y-2 border-l-2',
+  mid: 'border-y-2',
+  end: 'rounded-r border-y-2 border-r-2',
+}
+const FUSE_FILL = { start: 'rounded-l', mid: '', end: 'rounded-r' }
+
 export default function TimelineClip({
   clip, pps, selected, selectedPart, onSelect, onDeletePart, onTrim, onDelete, index,
   // Reorder drag: `dropSide` marks which edge of THIS clip the insertion line
   // belongs on ('before' | 'after' | null), `dragging` marks this clip as the one
   // being dragged. Both come from the lane, which owns the whole gesture.
   onDragStart, onDragOver, onDrop, onDragEnd, dropSide = null, dragging = false,
+  // Set only for a member of a fused run (clipMath.fuseGroups); null everywhere
+  // else, which is why V1's lane and an ordinary V2 clip are untouched by all of
+  // it. `pos` says which end of the run this is, `colorId` is the run's shared
+  // palette key, `dirty` is the RUN's dirty state (any member counts, so a box
+  // is never half-dashed). The run's name, duration, badges, delete button and
+  // selection ring are drawn by the lane, over the whole run — a member must not
+  // draw its own, or the seam comes back as doubled labels.
+  fuse = null,
 }) {
   const headPx = clipHeadPx(clip, pps)
   const mainPx = clipMainPx(clip, pps)
   const tailPx = clipTailPx(clip, pps)
   const roundPx = clipRoundPx(clip, pps)
   const totalPx = clipTotalPx(clip, pps)
-  const color = clipColor(clip.id)
+  // One gradient across the run instead of one per member: clipColor hashes the
+  // id, and every reconstructed range gets its own fresh UUID, so untouched this
+  // would paint a colour change exactly where the seam is supposed to disappear.
+  const color = clipColor(fuse ? fuse.colorId : clip.id)
   const speed = clipSpeed(clip)
 
   // Label shows the duration as played on the timeline (stretched by any
@@ -58,7 +84,9 @@ export default function TimelineClip({
     document.addEventListener('pointerup', onUp)
   }
 
-  const borderClass = clip.dirty ? 'border-dashed border-amber-500' : color.border
+  // A fused run reports the RUN's dirty state, so trimming one member can't leave
+  // a box that is amber-dashed down one half and palette-bordered down the other.
+  const borderClass = (fuse ? fuse.dirty : clip.dirty) ? 'border-dashed border-amber-500' : color.border
 
   function segmentRing(part) {
     return selected && selectedPart === part ? 'ring-2 ring-white ring-offset-1 ring-offset-neutral-950' : ''
@@ -132,34 +160,48 @@ export default function TimelineClip({
         /* grab, not pointer: the body is the drag handle for reordering, and that
            cursor is the only standing hint that a clip can be moved at all. The
            edge trim strips below keep their own ew-resize. */
-        className={`absolute top-0 bottom-0 rounded overflow-hidden cursor-grab active:cursor-grabbing border-2 ${borderClass} ${selected && selectedPart === 'main' ? 'ring-2 ring-white ring-offset-1 ring-offset-neutral-950 brightness-110' : ''}`}
+        className={`absolute top-0 bottom-0 overflow-hidden cursor-grab active:cursor-grabbing ${fuse ? FUSE_BOX[fuse.pos] : 'rounded border-2'} ${borderClass} ${!fuse && selected && selectedPart === 'main' ? 'ring-2 ring-white ring-offset-1 ring-offset-neutral-950 brightness-110' : ''}`}
         style={{ left: headPx, width: Math.max(mainPx, 24) }}
         onClick={() => onSelect(clip, 'main')}
       >
-        <div className={`absolute inset-0 rounded bg-gradient-to-b ${color.grad}`} />
-        <div
-          className="absolute top-0 bottom-0 left-0 w-1.5 cursor-ew-resize hover:bg-white/30 z-10"
-          onPointerDown={e => handleEdgeDrag('left', e)}
-        />
-        <div
-          className="absolute top-0 bottom-0 right-0 w-1.5 cursor-ew-resize hover:bg-white/30 z-10"
-          onPointerDown={e => handleEdgeDrag('right', e)}
-        />
-        <div className="absolute inset-0 flex flex-col items-start justify-between px-1.5 py-0.5 pointer-events-none">
-          <span className="text-[8px] text-neutral-100 truncate max-w-full font-medium">
-            {clip.isDuplicate && <span title="Duplicate of another clip on this track">⧉ </span>}
-            {clip.reversed && <span title="Reversed">◀ </span>}
-            {clip.displayName || clip.sourceName}
-          </span>
-          <span className="text-[8px] text-neutral-200 font-mono">{mainDurationLabel}</span>
-        </div>
-        <button
-          onClick={e => { e.stopPropagation(); onDelete(clip.id) }}
-          title="Delete clip"
-          className="absolute top-0 right-0 w-3.5 h-3.5 flex items-center justify-center bg-black/50 hover:bg-red-600 text-white text-[9px] leading-none opacity-0 group-hover:opacity-100 z-20"
-        >
-          ×
-        </button>
+        <div className={`absolute inset-0 bg-gradient-to-b ${fuse ? FUSE_FILL[fuse.pos] : 'rounded'} ${color.grad}`} />
+        {/* Trim handles only on the run's OUTER edges. An interior handle sits
+            exactly on the invisible seam, and dragging it would cut a hole out of
+            the middle of what the user is being shown as one continuous clip —
+            with the ranges already discontiguous, nothing downstream could tell. */}
+        {(!fuse || fuse.pos === 'start') && (
+          <div
+            className="absolute top-0 bottom-0 left-0 w-1.5 cursor-ew-resize hover:bg-white/30 z-10"
+            onPointerDown={e => handleEdgeDrag('left', e)}
+          />
+        )}
+        {(!fuse || fuse.pos === 'end') && (
+          <div
+            className="absolute top-0 bottom-0 right-0 w-1.5 cursor-ew-resize hover:bg-white/30 z-10"
+            onPointerDown={e => handleEdgeDrag('right', e)}
+          />
+        )}
+        {/* Name, duration, badges and the delete × are the run's, not a member's —
+            the lane draws them once across the whole box. */}
+        {!fuse && (
+          <>
+            <div className="absolute inset-0 flex flex-col items-start justify-between px-1.5 py-0.5 pointer-events-none">
+              <span className="text-[8px] text-neutral-100 truncate max-w-full font-medium">
+                {clip.isDuplicate && <span title="Duplicate of another clip on this track">⧉ </span>}
+                {clip.reversed && <span title="Reversed">◀ </span>}
+                {clip.displayName || clip.sourceName}
+              </span>
+              <span className="text-[8px] text-neutral-200 font-mono">{mainDurationLabel}</span>
+            </div>
+            <button
+              onClick={e => { e.stopPropagation(); onDelete(clip.id) }}
+              title="Delete clip"
+              className="absolute top-0 right-0 w-3.5 h-3.5 flex items-center justify-center bg-black/50 hover:bg-red-600 text-white text-[9px] leading-none opacity-0 group-hover:opacity-100 z-20"
+            >
+              ×
+            </button>
+          </>
+        )}
       </div>
 
       {/* Tail hold segment — only ever present on the sequence's last clip */}

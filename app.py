@@ -12,6 +12,37 @@ import ffmpeg_utils as fu
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 2 * 1024**3  # 2 GB
 
+# ---- version ----
+# The ONE place this app's version is written is the `VERSION` file at the repo
+# root; everything else derives from it (see CLAUDE.md). Read here rather than
+# hardcoded so a bump is a one-line edit to one file.
+#
+# Why a plain text file and not a git tag: `share-project` deliberately excludes
+# `.git/`, and this repo's useful state is routinely uncommitted, so a shared or
+# downloaded copy has no tags to read. A file travels with the code; a tag does
+# not. Why not frontend/package.json: that is the version of one of two runtimes,
+# and Python would have to parse JS-ecosystem JSON to learn the app's version.
+#
+# Read once at import, so this reports the version the RUNNING process booted
+# with — which is the question anyone reading it off a bug report is asking. The
+# reloader is told to watch the file (see __main__) so a bump restarts the server
+# instead of silently serving the old number.
+VERSION_FILE = os.path.join(fu.PROJECT_ROOT, "VERSION")
+
+
+def _read_version():
+    # Never fatal: a missing VERSION is a packaging mistake, not a reason the
+    # editor can't render. It surfaces as the literal string "unknown", which no
+    # one can mistake for a real version.
+    try:
+        with open(VERSION_FILE, encoding="utf-8") as f:
+            return f.read().strip() or "unknown"
+    except OSError:
+        return "unknown"
+
+
+APP_VERSION = _read_version()
+
 # Resolved from PATH so the AGENT tab works on any machine. The fallback is the
 # path this project was developed against; if neither exists the tab errors when
 # used and nothing else in the editor is affected.
@@ -25,6 +56,17 @@ CHAT_SCHEMA = json.dumps({
     },
     "required": ["ffmpeg_command", "explanation"],
 })
+
+
+# ---------- version ----------
+
+@app.route("/api/version")
+def api_version():
+    # The frontend bakes its own copy in at build time (vite.config.js reads the
+    # same file), so it can compare the two and say so when a stale bundle is
+    # being served against a restarted backend — the one failure mode a single
+    # displayed number cannot show on its own.
+    return jsonify({"version": APP_VERSION})
 
 
 # ---------- static page / media serving ----------
@@ -1827,4 +1869,9 @@ def execute():
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5001, debug=True)
+    # `extra_files` puts VERSION under the reloader's watch alongside the .py
+    # files it already follows. APP_VERSION is read once at import, so without
+    # this a bump would leave the running server reporting the old number until
+    # someone happened to restart it — exactly the drift this setup exists to
+    # prevent, and the hardest kind to notice.
+    app.run(host="127.0.0.1", port=5001, debug=True, extra_files=[VERSION_FILE])

@@ -40,8 +40,20 @@ Patterns actually used in this repo — match them when editing.
 
 This project verifies render correctness with **exact frame hashes**, not visual inspection: `ffmpeg -i file -map 0:v -f framemd5 -` and compare against source frame hashes. PSNR or "looks right" is not sufficient for lossless claims. Test renders are made via `curl` against a live Flask instance and cleaned up afterward; `npx vite build` is run after every frontend change.
 
+## Versioning
+
+- `VERSION` (repo root, one semver line) is the **only** place the version is stored. Adding a reader is free; adding a second store is a bug. See the CLAUDE.md *Versioning* section for the bump/CHANGELOG/tag rule.
+- How to read it, per runtime — use the existing channel, never a fresh literal:
+  - Python: `APP_VERSION` in `app.py` (read once at import). Exposed to clients as `GET /api/version` → `{"version": "<whatever VERSION holds>"}`.
+  - Frontend: `import.meta.env.VITE_APP_VERSION`. `vite.config.js` reads `VERSION` and sets `process.env.VITE_APP_VERSION`, which `loadEnv` sweeps into Vite's env channel. Needs no import, no prop, and no state. `App.jsx` aliases it once as a module-scope `APP_VERSION`. **Do not reach for `define`** — see the gotchas entry; it silently doesn't apply in dev on Vite 8.
+  - Shell/skills: `$(cat VERSION)`.
+- `frontend/package.json`'s `version` is a derived copy — `vite.config.js` throws on drift, so a stale copy cannot survive a build. Only `bump_version.py` writes it.
+- The frontend also fetches `/api/version` at mount purely to *compare* against its own value (a stale bundle against a restarted server shows an amber `⚠` in the toolbar). That fetch is not how the UI learns its own version.
+- A change to `VERSION` alone won't reach a running dev frontend — Vite reads it at config time, so restart Vite. Flask's reloader watches it via `extra_files=[VERSION_FILE]`.
+
 ## Git
 
 - Imperative one-line commit subjects summarizing multiple changes.
-- No remote — local-only history on `main`.
+- Version bumps ride in the same commit as the change they ship, then an annotated tag derived from the file, never typed: `git tag -a "v$(cat VERSION)" -m "$(cat VERSION)"`.
+- No remote — local-only history on `main`. Tags are local too, which is why they can't be the version's source of truth (the share copy has no `.git/`).
 - Gitignored: `.venv/`, `input/`, `output/`, `.preview_cache/`, `frontend/node_modules/`, `frontend/dist/`, `.DS_Store`, `projects/` (already-tracked `.nara` files remain tracked — the ignore only stops new/changed ones from being added).

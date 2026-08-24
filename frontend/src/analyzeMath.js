@@ -1,4 +1,4 @@
-import { clipMainSec } from './clipMath.js'
+import { clipMainSec, clipSpeed } from './clipMath.js'
 
 // "Analyze" applies the V1 timeline's cut structure directly onto a
 // different file dropped on V2: each V2 segment uses the SAME inSec/outSec
@@ -21,189 +21,373 @@ import { clipMainSec } from './clipMath.js'
 //              duration — 0 if every cut point fit. When >0 the affected
 //              segment(s) are clamped to the V2 file's end.
 
-// "Reconstruct" is the counterpart to Analyze in a round-trip workflow: the
-// timeline's two numbered buttons encode it directly —
-//   1. Analyze conforms V2's clip(s) to V1's exact cut structure.
-//   2. The user takes that V2 footage OUT of the app entirely (renders it
-//      via V2 Render — which always merges every V2 clip into ONE
-//      continuous file — runs it through an external tool, e.g. a
-//      style-transfer model, and drops the result back onto V2 via
-//      handleAddToV2, which always replaces V2 with a single fresh clip).
-//   3. Reconstruct strips the V1-derived edit artifacts that got baked
-//      into that round-tripped footage back out, so V2 plays as if V1's
-//      decisions had never been applied — ready for V2 Render again.
+// "Reconstruct" is the counterpart to Analyze in a round-trip workflow:
+//   1. Analyze (or Batch Analyze) conforms V2's clip(s) to V1's cut structure.
+//   2. The user takes that footage OUT of the app entirely — V2 Render, which
+//      always merges every V2 clip into ONE continuous file, then an external
+//      tool (e.g. a style-transfer model), then handleAddToV2, which always
+//      replaces V2 with a single fresh clip.
+//   3. Reconstruct reverses the decisions V1 baked into that file, so V2 holds
+//      the footage as it came off the camera — ready to be cut afresh.
 //
-// Because step 2 ALWAYS collapses V1's clips down to one V2 clip, holds
-// and round-up must be treated as SEQUENCE-level facts about V1, not
-// per-clip ones — exactly like sanitizeHoldPlacement/RaiseButton already
-// treat them (headHold only ever lives on V1's first clip; tail/round
-// only ever on V1's last). Pairing V2 clip i against V1 clip i by index
-// (as an earlier version of this function did) silently ignored anything
-// on V1 clip 0 that wasn't first among V1's holds/reverses, so this
-// works off the WHOLE V1 sequence instead — no assumption that V2's clip
-// count matches V1's.
+// Step 3 is a CUT plus a REORDER, and it has to be: the round-tripped file
+// holds V1's shots laid end to end IN V1'S ORDER, and no single time range can
+// express "put them back where they came from". So Reconstruct cuts V2's clip
+// at V1's own piece boundaries — sequencePieces + pieceOffsetsOnV2, the same
+// arithmetic Batch Analyze cuts with — and emits the survivors in SOURCE order.
+// An earlier version returned one flat clip whose in/out depended only on V1's
+// holds; every quantity it read was symmetric over V1's array, so moving clips
+// around on V1 could not change its output at all — which is exactly the
+// decision most worth reversing.
 //
-// This MODIFIES the clip(s) already on V2 in place; it never pulls in or
-// replaces anything with V1's own sourceName (that would defeat the
-// point — the whole reason V2 has its own file is that it's a different,
-// restyled version of the footage). If V2 somehow holds more than one
-// clip (e.g. Reconstruct was run before ever rendering V2), only the
-// first is treated as the round-tripped result and the rest are left
-// untouched — V2 Render is what's meant to collapse V2 to one clip
-// first.
+// What "reverse the decision" means, field by field. Holds, speed and crop are
+// BAKED IN as real pixels and frames by the time footage comes back from
+// outside the app, so for those the only question is whether the reversal can
+// stop compounding them:
+//   ORDER — reversed by re-sorting the cut pieces into source order: grouped by
+//     source file (a file's first appearance on V1 decides where its run goes),
+//     ascending by the V1 clip's own source IN inside a group. SOURCE seconds,
+//     never the ranges on V2 — a slowed clip occupies more of the file than its
+//     source window, so sorting by the range would put it in the wrong place.
+//   CUTS — pieces that come back adjacent are WELDED into one clip again (see
+//     weldAdjacentRanges), so reversing a reorder costs the fewest clips that
+//     can express it, and a sequence nobody reordered collapses to exactly the
+//     single clip this function used to return.
+//   holds — head/tail/round are duplicate frames the render froze at the
+//     sequence's outer edges. They are their own PIECES here, so they get
+//     dropped rather than trimmed off V2's in/out — which is what makes the
+//     hold removal survive a reorder, and what makes a stale mid-sequence hold
+//     a non-event (sequencePieces applies the render's own first/last rule).
+//   duplicates — DuplicateButton clones sourceName/inSec/outSec verbatim, so
+//     the first clip to use a given window (by EDL event order, i.e. array
+//     index — "EVT001") is the original, and any later clip repeating it is a
+//     duplicate whose footage has no business surviving into a reconstruction.
+//     Cutting per piece means one sitting in the MIDDLE of the sequence can now
+//     be dropped as well; the old flat clip could only shrink its own outSec,
+//     so it had to warn about that case instead of handling it.
+//   reversed — copied per shot, NOT toggled. If V1 played a clip backward, the
+//     round-tripped file holds those frames in that same backward order, so
+//     setting the V2 clip's own flag to the SAME value plays them backward a
+//     second time and lands in true chronological order (two reversals cancel).
+//     Per shot, so V1's clips no longer have to agree on it.
+//   speed — a slow-down is already realized as repeated frames at the stretched
+//     duration, and V2's own speed only ever goes slower, so it resets to 1 and
+//     the shot comes back at its STRETCHED length. Unrecoverable; the caller
+//     warns rather than pretending otherwise.
+//   crop — UNRECOVERABLE: the pixels outside V1's crop box don't exist in the
+//     round-tripped footage. Reset to null instead of faking a restore. (The
+//     route that CAN put a processed region back is V2-as-overlay, not this.)
+//   trim — no separate inversion. The file contains exactly the windows V1
+//     used, so footage V1 never used is simply absent; the caller reports how
+//     many seconds of each source that came to.
 //
-// What "reverse the decision" means differs per field, because holds,
-// speed, and crop are BAKED IN as real pixels/frames by the time footage
-// comes back from outside the app — there's no way to recover data that
-// was literally cropped away or interpolated out, only to stop
-// compounding it further:
-//   reversed — copied directly (NOT toggled), and only when every V1 clip
-//     agrees on it (mixed forward/reversed clips can't be represented by
-//     one flat V2 clip — same unrecoverable situation as crop, see
-//     below). If V1 played backward, the round-tripped file is ALSO in
-//     that reversed frame order, so setting V2's own reversed flag to
-//     the SAME value plays it a second time in reverse — landing back in
-//     true chronological order. (Two reversals cancel: v2.reversed =
-//     v1.reversed, not !v1.reversed.)
-//   holds — V1's SEQUENCE-level head/tail/round hold (headHoldSec on
-//     V1's first clip; tailHoldSec+roundHoldSec on V1's last) are
-//     duplicated frames physically rendered at the very start/end of the
-//     merged output, regardless of any individual clip's own reversed
-//     state (clipTotalSec always adds head before the main body and
-//     tail+round after it, for every clip in the sequence). Trimmed off
-//     V2's own inSec/outSec so that padding isn't carried forward again.
-//   speed — V1's slow-down is already realized as repeated frames at the
-//     stretched duration in the rendered file; V2's own speed is reset to
-//     1 so it isn't slowed a second time on top of already-slow footage.
-//   crop — UNRECOVERABLE: pixels outside V1's crop box don't exist in the
-//     round-tripped footage. Reset to null (no further crop stacked on
-//     top) rather than pretending to restore them.
-// Trim (inSec/outSec) has no separate inversion beyond the hold removal
-// above: the round-tripped file already contains exactly V1's trimmed
-// window's content end to end, so the remaining span (after stripping
-// hold padding) IS the reconstructed range — there's no more-original
-// footage to trim back out to.
+// Two invariants: this only ever MODIFIES the clip(s) already on V2 — it never
+// reads or copies V1's own sourceName, since the whole point is that V2 is a
+// different, restyled version of the footage — and if V2 holds more than one
+// clip, only the first is treated as the round-tripped result and the rest are
+// passed through untouched (V2 Render is what collapses V2 to one clip).
 //
-// Duplicate handling: DuplicateButton clones a clip's sourceName/inSec/
-// outSec verbatim (reversed/speed/crop/holds can differ — see
-// DuplicateButton.jsx), and always inserts the copy right after the
-// original — so the FIRST V1 clip to use a given sourceName+inSec+outSec
-// combination (by EDL event order, i.e. array index — "EVT001") is the
-// original, and any later clip repeating that same window is a duplicate
-// that has no business surviving into a reconstructed V2, exactly like
-// holds/speed/crop don't.
-//
-// Because Reconstruct still collapses to ONE flat V2 clip (never splits
-// into per-clip segments), only a duplicate run that's contiguous with the
-// very end of V1's sequence can be handled by shrinking that one clip's
-// outSec further (the same "trim off known baked-in footage" move already
-// used for tailHold/roundHold above). A duplicate stranded in the true
-// middle of the sequence can't be cut out of a single flat time range
-// without also cutting the real, non-duplicate footage between it and the
-// end — so that case is left alone and reported as a warning instead of
-// guessed at, matching the existing mixed-reversed warning's philosophy.
+// PRECONDITION, load-bearing: V2's file must have been rendered from V1 in the
+// order V1 is in NOW. Reconstruct reads V1 at click time, so reordering V1
+// after that render puts every boundary on the wrong frame — and no length
+// check can catch it, because a permutation preserves total duration. See
+// gotchas.md; the caller warns off V1's own dirty flags.
 function keyForClip(c) {
   return `${c.sourceName}|${c.inSec.toFixed(3)}|${c.outSec.toFixed(3)}`
 }
 
-function findTrailingDuplicateRun(v1Clips) {
+// Which V1 clips repeat a window an earlier clip already used — one boolean per
+// clip, parallel to the array. Structural rather than the clip's own
+// `isDuplicate` flag, which is a LABEL the UI paints and editing can leave
+// behind (gotchas.md): what matters here is whether the footage is already
+// somewhere else in the sequence.
+function duplicateFlags(v1Clips) {
   const seen = new Set()
-  const isDuplicate = v1Clips.map(c => {
+  return v1Clips.map(c => {
     const key = keyForClip(c)
     if (seen.has(key)) return true
     seen.add(key)
     return false
   })
-
-  let trailingSec = 0
-  let trailingCount = 0
-  for (let i = v1Clips.length - 1; i >= 0 && isDuplicate[i]; i--) {
-    trailingSec += clipMainSec(v1Clips[i])
-    trailingCount++
-  }
-
-  const strandedCount = isDuplicate.slice(0, v1Clips.length - trailingCount).filter(Boolean).length
-
-  return { trailingSec, trailingCount, strandedCount }
 }
 
-// Returns { segments, warnings }: warnings cover the hold-padding-too-large
-// case (skips the hold trim for that clip), the mixed-reversed case (leaves
-// V2's own reversed flag alone rather than guessing), and duplicate V1
-// clips stranded mid-sequence (left in V2 untouched — see above).
+// One media FILE, for grouping shots by where they came from. The directory is
+// part of it: input/take1.mp4 and output/take1.mp4 are different footage.
+function sourceKey(c) {
+  return `${c.sourceDir || 'input'}|${c.sourceName}`
+}
+
+// Seconds covered by a set of [from, to] windows, counting footage two windows
+// share only ONCE — so "V1 used 9.00s of the 12.00s file" stays true when two
+// V1 clips overlap in the source. The difference from the plain sum is the
+// repeated footage, which the caller reports on its own.
+function unionSec(windows) {
+  const sorted = [...windows].sort((a, b) => a[0] - b[0])
+  let total = 0
+  let from = null
+  let to = null
+  for (const w of sorted) {
+    if (to === null || w[0] > to) {
+      if (to !== null) total += to - from
+      from = w[0]
+      to = w[1]
+    } else if (w[1] > to) {
+      to = w[1]
+    }
+  }
+  if (to !== null) total += to - from
+  return total
+}
+
+// The order the surviving shots came off the camera: grouped by source file,
+// each file's run sitting where that file FIRST appears on V1, ascending by the
+// V1 clip's own source IN within a run. Ties keep V1's order, so the comparison
+// is total and the sort deterministic.
+//
+// SOURCE seconds, never the ranges these shots occupy on V2: a slowed clip
+// takes up more of the rendered file than its source window does, so ordering
+// by the range would put it in the wrong place.
+function sourceChronologicalOrder(kept, v1Clips) {
+  const firstAppearance = new Map()
+  v1Clips.forEach((c, i) => {
+    const key = sourceKey(c)
+    if (!firstAppearance.has(key)) firstAppearance.set(key, i)
+  })
+
+  return [...kept].sort((a, b) => {
+    const ca = v1Clips[a.v1Index]
+    const cb = v1Clips[b.v1Index]
+    const groupA = firstAppearance.get(sourceKey(ca))
+    const groupB = firstAppearance.get(sourceKey(cb))
+    if (groupA !== groupB) return groupA - groupB
+    if (ca.inSec !== cb.inSec) return ca.inSec - cb.inSec
+    return a.v1Index - b.v1Index
+  })
+}
+
+// Ranges that came back adjacent become ONE clip again: consecutive in the
+// output, contiguous in V2's file, same `reversed`. This is what collapses a
+// reconstruct of a sequence nobody reordered down to the single clip spanning
+// the file that this module used to return, and what "put the order back
+// without any cuts" means when a move IS reversed — un-moving [C][A][B] needs a
+// cut between C and A, but none between A and B.
+//
+// Which SIDE counts as contiguous depends on `reversed`, and getting it
+// backwards silently swaps the pair. A forward clip plays its range low → high,
+// so the shot that follows it in the output must sit immediately AFTER it in the
+// file; a reversed clip plays high → low, so the next shot must sit immediately
+// BEFORE it. Welding two reversed shots on the forward rule would emit them in
+// the opposite order — the very bug this rewrite exists to fix, one clip
+// smaller. A reversed shot never welds to a forward one: a single flag can't
+// play both ways.
+function weldAdjacentRanges(ordered, v1Clips) {
+  const welded = []
+  for (const r of ordered) {
+    const prev = welded[welded.length - 1]
+    const reversed = !!v1Clips[r.v1Index].reversed
+    const contiguous = prev && prev.reversed === reversed && (reversed
+      ? Math.abs(r.to - prev.from) <= CUT_EPSILON
+      : Math.abs(r.from - prev.to) <= CUT_EPSILON)
+
+    if (contiguous) {
+      prev.from = Math.min(prev.from, r.from)
+      prev.to = Math.max(prev.to, r.to)
+      prev.v1Indexes.push(r.v1Index)
+      prev.truncatedSec += r.truncatedSec
+    } else {
+      welded.push({
+        from: r.from,
+        to: r.to,
+        reversed,
+        v1Indexes: [r.v1Index],
+        truncatedSec: r.truncatedSec,
+      })
+    }
+  }
+  return welded
+}
+
+// Returns FACTS, no display strings — the caller owns every word the user reads,
+// the same split batchCutAgainstV1 and handleBatchAnalyze already use:
+//   segments    — V2's FIRST clip replaced by one clip per surviving shot in
+//                 source order, then any further V2 clips verbatim. The SAME
+//                 ARRAY REFERENCE when there is nothing to reconstruct, so
+//                 reduceEdit's reference check spends no undo step on a no-op
+//                 (the moveClip convention in clipMath.js) and the caller can
+//                 detect the no-op with `===`.
+//   shots       — one entry per emitted clip, in output order:
+//                 { v1Indexes, from, to, reversed, truncatedSec }. v1Indexes are
+//                 0-based indexes into v1Clips — every clip welded into that
+//                 segment, in output order — so the caller can print the order
+//                 that was reversed. from/to are seconds from the head of V2's
+//                 window.
+//   welds       — how many shots were absorbed into an earlier segment.
+//   reordered   — whether source order differs from V1's order at all.
+//   sources     — per source file, in first-appearance order: { sourceName,
+//                 sourceDir, shots, speedShots, croppedShots, sourceDurationSec,
+//                 usedSec, unusedSec, overlapSec }. sourceDurationSec and
+//                 unusedSec are null when the duration isn't known, so the
+//                 caller skips that line instead of printing NaN.
+//   bakedSpeeds — the distinct speeds among surviving shots that weren't 1×.
+//   dropped     — what did not survive: holds and duplicates (count + the
+//                 seconds they occupied in V2's file), pastEnd (pieces landing
+//                 entirely past the end of V2's window) and subFrame (ranges
+//                 that snapped to under a frame wide).
+//   overflow /
+//   leftoverSec — as batchCutAgainstV1 measures them, but leftover frames are
+//                 LEFT OUT here rather than kept (see below).
 export function reconstructFromV1(v1Clips, v2Clips) {
-  const warnings = []
-  if (v1Clips.length === 0 || v2Clips.length === 0) return { segments: v2Clips, warnings }
+  const dropped = { holds: 0, holdSec: 0, duplicates: 0, duplicateSec: 0, pastEnd: 0, pastEndSec: 0, subFrame: 0 }
+  const nothing = {
+    segments: v2Clips, shots: [], welds: 0, reordered: false, sources: [],
+    bakedSpeeds: [], dropped, overflow: 0, leftoverSec: 0,
+  }
+
+  const pieces = v2Clips.length > 0 ? sequencePieces(v1Clips) : []
+  if (pieces.length === 0) return nothing
 
   const v2c = v2Clips[0]
-  const headHold = v1Clips[0].headHoldSec || 0
-  const lastV1 = v1Clips[v1Clips.length - 1]
-  const tailHold = (lastV1.tailHoldSec || 0) + (lastV1.roundHoldSec || 0)
-  const { trailingSec: dupTrailSec, trailingCount: dupTrailCount, strandedCount } = findTrailingDuplicateRun(v1Clips)
+  const { offsets, span, overflow, leftoverSec } = pieceOffsetsOnV2(pieces, v2c)
+  const isDuplicate = duplicateFlags(v1Clips)
 
-  if (strandedCount > 0) {
-    warnings.push(
-      `"${v2c.displayName || v2c.sourceName}": ${strandedCount} duplicate ` +
-      `V1 clip(s) sit in the middle of the sequence, not at its end — ` +
-      `they could not be cut out of V2's single reconstructed clip and ` +
-      `were left in place`
-    )
+  // Each piece's own range in V2's file, clamped to V2's window — keeping the
+  // ones that are real footage the reconstruction should still contain, and
+  // accounting for the ones that aren't. Dropped seconds are measured CLAMPED,
+  // i.e. as they exist in V2's file: a hold past the end of a short V2 was never
+  // in the file to remove, so it reports 0s rather than V1's declared length.
+  const kept = []
+  pieces.forEach((p, i) => {
+    const from = Math.min(Math.max(offsets[i], 0), span)
+    const to = Math.min(Math.max(offsets[i + 1], 0), span)
+
+    if (p.kind !== 'main') {
+      // A hold is duplicate frames the render froze at the sequence's outer
+      // edges, so the whole PIECE goes. Dropping the piece rather than trimming
+      // V2's in/out is what makes hold removal survive a reorder: the frozen
+      // frames sit at the file's edges, but the shots they were attached to
+      // needn't end up there.
+      dropped.holds++
+      dropped.holdSec += to - from
+      return
+    }
+    if (isDuplicate[p.clipIndex]) {
+      dropped.duplicates++
+      dropped.duplicateSec += to - from
+      return
+    }
+    if (to - from <= CUT_EPSILON) {
+      // Dropped, NOT merged into the neighbour the way batchCutAgainstV1 merges
+      // a colliding cut. There, dropping a cut just leaves footage where it
+      // already was; here the neighbouring shot would inherit a range that
+      // belongs to a different shot.
+      if (offsets[i] >= span - CUT_EPSILON) {
+        dropped.pastEnd++
+        dropped.pastEndSec += p.sec
+      } else {
+        dropped.subFrame++
+      }
+      return
+    }
+
+    kept.push({ v1Index: p.clipIndex, from, to, truncatedSec: Math.max(0, offsets[i + 1] - span) })
+  })
+
+  // `nothing.dropped` is the object just filled in above, so this reports what
+  // was found and still returns V2 untouched, by reference.
+  if (kept.length === 0) return { ...nothing, overflow, leftoverSec }
+
+  const ordered = sourceChronologicalOrder(kept, v1Clips)
+  const reordered = ordered.some((r, i) => r.v1Index !== kept[i].v1Index)
+  const welded = weldAdjacentRanges(ordered, v1Clips)
+
+  // The last range is deliberately NOT extended to the end of V2's window, the
+  // one thing batchCutAgainstV1 always does to its last segment. In source order
+  // the final segment is rarely the file's final range, so extending it would
+  // splice some other shot's footage onto it — and `leftoverSec`, whatever an
+  // external tool added past V1's total, is footage V1 never had a decision
+  // about, so it is left out rather than glued onto whichever shot happens to
+  // end there. Reporting it is the caller's job.
+  // One id shared by every range this reconstruction emitted, so the lane can
+  // draw them as the single clip they are (clipMath.fuseGroups) and a 1+ V2
+  // Render writes them as one file. Provenance only — whether a run still LOOKS
+  // like one clip is re-derived from the clips themselves on every read, so this
+  // never has to be maintained. Minted only when there is more than one range:
+  // a reconstruction that came back as one clip has no seam to hide, and marking
+  // it would put a `fuseId` on a clip that later spreads into unrelated ones.
+  const fuseId = welded.length > 1 ? crypto.randomUUID() : null
+  const segments = [
+    ...welded.map((r, i) => ({
+      ...v2c,
+      id: crypto.randomUUID(),
+      inSec: v2c.inSec + r.from,
+      outSec: v2c.inSec + r.to,
+      reversed: r.reversed,
+      speed: 1,
+      crop: null,
+      cropKeyframes: [],
+      headHoldSec: 0,
+      tailHoldSec: 0,
+      roundHoldSec: 0,
+      dirty: true,
+      fuseId,
+      displayName: `Reconstructed${String(i + 1).padStart(2, '0')}`,
+    })),
+    ...v2Clips.slice(1),
+  ]
+
+  // Footage accounting, per source file and in SOURCE seconds (the V1 clip's own
+  // in/out) — the only base where "how much of the file V1 never used" means
+  // anything, and a different unit from the ranges above.
+  const sources = []
+  const bySource = new Map()
+  for (const r of kept) {
+    const c = v1Clips[r.v1Index]
+    const key = sourceKey(c)
+    let s = bySource.get(key)
+    if (!s) {
+      const durSec = Number(c.sourceDurationSec)
+      s = {
+        sourceName: c.sourceName,
+        sourceDir: c.sourceDir || 'input',
+        sourceDurationSec: Number.isFinite(durSec) && durSec > 0 ? durSec : null,
+        shots: 0,
+        speedShots: 0,
+        croppedShots: 0,
+        windows: [],
+      }
+      bySource.set(key, s)
+      sources.push(s)
+    }
+    s.shots++
+    if (clipSpeed(c) !== 1) s.speedShots++
+    if (c.crop) s.croppedShots++
+    s.windows.push([Math.min(c.inSec, c.outSec), Math.max(c.inSec, c.outSec)])
+  }
+  for (const s of sources) {
+    const sumSec = s.windows.reduce((total, w) => total + (w[1] - w[0]), 0)
+    s.usedSec = unionSec(s.windows)
+    s.overlapSec = Math.max(0, sumSec - s.usedSec)
+    s.unusedSec = s.sourceDurationSec === null ? null : Math.max(0, s.sourceDurationSec - s.usedSec)
+    delete s.windows
   }
 
-  let inSec = Math.min(v2c.inSec + headHold, v2c.outSec)
-  let outSec = Math.max(v2c.outSec - tailHold - dupTrailSec, v2c.inSec)
-  if (outSec <= inSec) {
-    warnings.push(
-      `"${v2c.displayName || v2c.sourceName}": V1's hold durations plus ` +
-      `${dupTrailCount} trailing duplicate clip(s) ` +
-      `(${(headHold + tailHold + dupTrailSec).toFixed(2)}s total) meet or ` +
-      `exceed the clip's own trimmed length — could not be removed`
-    )
-    inSec = v2c.inSec
-    outSec = v2c.outSec
-  } else if (dupTrailCount > 0) {
-    warnings.push(
-      `"${v2c.displayName || v2c.sourceName}": removed ${dupTrailCount} ` +
-      `trailing duplicate V1 clip(s) worth of footage ` +
-      `(${dupTrailSec.toFixed(2)}s) from the end of V2's reconstructed range`
-    )
+  return {
+    segments,
+    shots: welded.map(r => ({
+      v1Indexes: r.v1Indexes,
+      from: r.from,
+      to: r.to,
+      reversed: r.reversed,
+      truncatedSec: r.truncatedSec,
+    })),
+    welds: kept.length - welded.length,
+    reordered,
+    sources,
+    bakedSpeeds: [...new Set(kept.map(r => clipSpeed(v1Clips[r.v1Index])).filter(s => s !== 1))].sort((a, b) => a - b),
+    dropped,
+    overflow,
+    leftoverSec,
   }
-
-  // Trailing duplicates were just trimmed out of V2 entirely — they no
-  // longer contribute footage, so they shouldn't count toward whether the
-  // SURVIVING clips agree on reversed.
-  const survivingV1Clips = dupTrailCount > 0 ? v1Clips.slice(0, v1Clips.length - dupTrailCount) : v1Clips
-  const allReversed = survivingV1Clips.every(c => !!c.reversed)
-  const noneReversed = survivingV1Clips.every(c => !c.reversed)
-  let reversed = v2c.reversed
-  if (allReversed) {
-    reversed = true
-  } else if (noneReversed) {
-    reversed = false
-  } else {
-    warnings.push(
-      `"${v2c.displayName || v2c.sourceName}": V1's clips don't agree on ` +
-      `reversed (some forward, some reversed) — a single V2 clip can't ` +
-      `represent that, so its own reversed flag was left unchanged`
-    )
-  }
-
-  const reconstructed = {
-    ...v2c,
-    inSec,
-    outSec,
-    reversed,
-    speed: 1,
-    crop: null,
-    cropKeyframes: [],
-    headHoldSec: 0,
-    tailHoldSec: 0,
-    roundHoldSec: 0,
-    dirty: true,
-    displayName: 'Reconstructed01',
-  }
-
-  return { segments: [reconstructed, ...v2Clips.slice(1)], warnings }
 }
 
 // "Batch Analyze" is the plain-cut sibling of Analyze, for a whole sequence
@@ -254,18 +438,65 @@ export function reconstructFromV1(v1Clips, v2Clips) {
 // contain it, and cutting there would put every later boundary on the wrong
 // frame. A zero-length piece is never emitted, so a zero-length clip simply
 // isn't a piece.
+//
+// `clipIndex` is which V1 clip the piece came from ('head' is always clip 0,
+// 'tail'/'round' always the last). Reconstruct needs it to read that clip's own
+// reversed flag and source window back off a piece; Batch Analyze ignores it.
+// An index rather than the clip itself, so a piece stays a plain description of
+// the render's shape that nothing can mutate V1 through.
 export function sequencePieces(v1Clips) {
   const pieces = []
   v1Clips.forEach((c, i) => {
-    if (i === 0 && (c.headHoldSec || 0) > 0) pieces.push({ kind: 'head', sec: c.headHoldSec })
+    if (i === 0 && (c.headHoldSec || 0) > 0) pieces.push({ kind: 'head', sec: c.headHoldSec, clipIndex: i })
     const main = clipMainSec(c)
-    if (main > 0) pieces.push({ kind: 'main', sec: main })
+    if (main > 0) pieces.push({ kind: 'main', sec: main, clipIndex: i })
     if (i === v1Clips.length - 1) {
-      if ((c.tailHoldSec || 0) > 0) pieces.push({ kind: 'tail', sec: c.tailHoldSec })
-      if ((c.roundHoldSec || 0) > 0) pieces.push({ kind: 'round', sec: c.roundHoldSec })
+      if ((c.tailHoldSec || 0) > 0) pieces.push({ kind: 'tail', sec: c.tailHoldSec, clipIndex: i })
+      if ((c.roundHoldSec || 0) > 0) pieces.push({ kind: 'round', sec: c.roundHoldSec, clipIndex: i })
     }
   })
   return pieces
+}
+
+const CUT_EPSILON = 0.001
+
+// Where each piece BEGINS and ENDS in the file the sequence rendered to, in
+// seconds from the head of V2's own window: P pieces give P+1 offsets, with
+// offsets[0] === 0 and offsets[P] the sequence's total.
+//
+// Snapped to V2's own frame grid — V2's fps, not V1's, since these are source
+// times on V2's file — because a boundary is a frame boundary: rounding here
+// means the pieces tile V2's window exactly instead of leaving sub-frame
+// slivers for ffmpeg's `trim` to resolve one way at the end of one piece and
+// the other way at the start of the next.
+//
+// Deliberately UNCLAMPED. An offset past the end of V2's window is returned as
+// it is, because the two consumers want opposite things from that case: V2
+// Batch Analyzer drops the cut and lets the piece merge into the one before it
+// (a cut discards nothing), while Reconstruct clamps and drops the range (a
+// dropped piece must take exactly its own footage with it). Shared so those two
+// can never disagree about which FRAME a boundary lands on, while each keeps
+// its own rule for what to do there.
+export function pieceOffsetsOnV2(pieces, v2Clip) {
+  const span = v2Clip.outSec - v2Clip.inSec
+  const v1Sec = pieces.reduce((sum, p) => sum + p.sec, 0)
+  const fps = v2Clip.fps > 0 ? v2Clip.fps : 0
+  const snap = s => (fps ? Math.round(s * fps) / fps : s)
+
+  const offsets = [0]
+  let elapsed = 0
+  for (const p of pieces) {
+    elapsed += p.sec
+    offsets.push(snap(elapsed))
+  }
+
+  return {
+    offsets,
+    span,
+    v1Sec,
+    overflow: Math.max(0, v1Sec - span),
+    leftoverSec: Math.max(0, span - v1Sec),
+  }
 }
 
 // Where those pieces meet, in seconds from the start of the rendered sequence:
@@ -280,8 +511,6 @@ export function sequenceCutOffsets(v1Clips) {
   }
   return offsets
 }
-
-const CUT_EPSILON = 0.001
 
 // Which name a segment gets, by the kind of V1 piece that starts it.
 const PIECE_NAMES = { main: 'Shot', head: 'Head', tail: 'Tail', round: 'Round' }
@@ -315,18 +544,10 @@ export function batchCutAgainstV1(v1Clips, v2Clips) {
   }
 
   const v2c = v2Clips[0]
-  const span = v2c.outSec - v2c.inSec
-  const v1Sec = pieces.reduce((sum, p) => sum + p.sec, 0)
-  const overflow = Math.max(0, v1Sec - span)
-  const leftoverSec = Math.max(0, span - v1Sec)
-
-  // Snapped to V2's own frame grid: a cut point is a frame boundary, and
-  // rounding to the nearest frame here means the segments tile V2's window
-  // exactly instead of leaving sub-frame slivers for ffmpeg's `trim` to resolve
-  // one way at the end of one shot and the other way at the start of the next.
-  // V2's fps, not V1's — these are source times on V2's file.
-  const fps = v2c.fps > 0 ? v2c.fps : 0
-  const snap = s => (fps ? Math.round(s * fps) / fps : s)
+  // The boundary arithmetic is shared with Reconstruct (see pieceOffsetsOnV2);
+  // what follows — merging a colliding cut and running the last segment to the
+  // end of V2's window — is this function's own, and is where the two differ.
+  const { offsets, span, overflow, leftoverSec } = pieceOffsetsOnV2(pieces, v2c)
 
   // Segment starts, each labelled with the kind of V1 piece that begins there.
   // Only cuts strictly inside V2's window and strictly after the previous
@@ -336,10 +557,8 @@ export function batchCutAgainstV1(v1Clips, v2Clips) {
   // boundary — two pieces whose boundary snaps to the same frame of V2 — has no
   // footage between them. A dropped cut merges its piece into the one before it.
   const edges = [{ at: 0, kind: pieces[0].kind }]
-  let elapsed = 0
   for (let i = 0; i < pieces.length - 1; i++) {
-    elapsed += pieces[i].sec
-    const at = snap(elapsed)
+    const at = offsets[i + 1]
     if (at > edges[edges.length - 1].at + CUT_EPSILON && at < span - CUT_EPSILON) {
       edges.push({ at, kind: pieces[i + 1].kind })
     }
@@ -361,6 +580,12 @@ export function batchCutAgainstV1(v1Clips, v2Clips) {
       tailHoldSec: 0,
       roundHoldSec: 0,
       dirty: true,
+      // Explicitly cleared, not inherited: `...v2c` above would carry a `fuseId`
+      // straight off a reconstructed clip, and these segments are the OPPOSITE of
+      // fused — their whole point is that each cut is its own clip, sitting under
+      // the V1 boundary it came from. Drawing them as one box would also close
+      // the 2px gaps this lane needs to stay aligned with V1's.
+      fuseId: null,
       displayName: `${PIECE_NAMES[edge.kind]}${String(counts[edge.kind]).padStart(2, '0')}`,
     }
   })

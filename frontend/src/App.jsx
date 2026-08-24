@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { listFiles, listOutputs, probe, upload, renderTimeline, renderA1, saveProject, getExportSettings, setExportSettings } from './api'
+import { listFiles, listOutputs, probe, upload, renderTimeline, renderA1, saveProject, getExportSettings, setExportSettings, getVersion } from './api'
 import { useUndoableTracks } from './hooks/useUndoableTracks'
 import { MediaProvider, useMedia } from './context/MediaContext'
 import { TourProvider, useTour } from './context/TourContext'
@@ -30,7 +30,7 @@ import ProjectLibrary from './components/ProjectLibrary'
 import AboutDialog from './components/AboutDialog'
 import FfmpegCustomSettings from './components/FfmpegCustomSettings'
 import Timeline from './components/Timeline/Timeline'
-import { clipBaseSec, roundUpAmount, clampNoiseGainDb, normalizeBeds, bedLaneEndSec, bedInSec } from './clipMath'
+import { clipBaseSec, roundUpAmount, clampNoiseGainDb, normalizeBeds, bedLaneEndSec, bedInSec, fuseGroups } from './clipMath'
 import { loadTrackTags, tagTrack, renameTrackTag, isAudioFile } from './fileList'
 import { analyzeAgainstV1, batchCutAgainstV1, reconstructFromV1, sequencePieces } from './analyzeMath'
 import { mergeExportPresets } from './exportPresets'
@@ -41,6 +41,14 @@ const MIN_RIGHT_PANEL = 260
 const MAX_RIGHT_PANEL = 720
 const MIN_LEFT_PANEL = 180
 const MAX_LEFT_PANEL = 560
+
+// The app's version, from `VERSION` at the repo root — the single source of
+// truth (see CLAUDE.md). vite.config puts it on Vite's env channel, which is
+// the one mechanism that behaves identically in dev and in a build; the alias
+// exists only so the four call sites below don't each spell out the env lookup.
+// Read it, never write it: a literal here would be a second place storing the
+// version, and it would be the one that goes stale.
+const APP_VERSION = import.meta.env.VITE_APP_VERSION
 
 // Same inline-SVG idiom as Timeline's EyeIcon and the frame-grab icons:
 // 24-unit box, stroke: currentColor, so the button's own text color drives it.
@@ -651,10 +659,17 @@ function AppInner() {
   // from the caller already clamped, so every shot in the series is rendered
   // with the exact numbers the joined render would have used. Forgetting it here
   // would make a 1+ series quietly stop matching V1 Render.
+  //
+  // The series runs over GROUPS, not clips (clipMath.fuseGroups): a fused run of
+  // V2 Reconstruct ranges is one clip to the user, so it is one file here, posted
+  // as a multi-clip payload that the server concatenates exactly as the joined
+  // `1`-mode render would. V1 and an unfused V2 lane have no fused runs at all,
+  // so every group is a single clip and this behaves precisely as it did.
   async function renderShots(sourceClips, overlays, baseName, noAudio, noise, settings) {
-    const names = shotOutputNames(baseName, sourceClips.length)
-    for (let i = 0; i < sourceClips.length; i++) {
-      setV2ShotProgress({ done: i, total: sourceClips.length })
+    const groups = fuseGroups(sourceClips)
+    const names = shotOutputNames(baseName, groups.length)
+    for (let i = 0; i < groups.length; i++) {
+      setV2ShotProgress({ done: i, total: groups.length })
       // Holds belong to the SEQUENCE, not to a clip: a head hold opens the
       // sequence and a tail/round hold closes it, which is why both the
       // frontend (sanitizeHoldPlacement) and the server keep them on the first
@@ -665,21 +680,27 @@ function AppInner() {
       // than the same stretch of the joined render. Apply the sequence's rule
       // to the sequence, not to each shot: the run still opens and closes
       // exactly as it does in one file.
+      //
+      // "First"/"last" are the SEQUENCE's, not the group's: with a fused run the
+      // opening hold belongs to the first member of the first group and the
+      // closing one to the last member of the last group, and every other member
+      // is hold-free — the same rule the server applies inside one payload.
+      const members = groups[i].clips
       const isFirst = i === 0
-      const isLast = i === sourceClips.length - 1
-      const shotClip = {
-        ...sourceClips[i],
-        headHoldSec: isFirst ? (sourceClips[i].headHoldSec || 0) : 0,
-        tailHoldSec: isLast ? (sourceClips[i].tailHoldSec || 0) : 0,
-        roundHoldSec: isLast ? (sourceClips[i].roundHoldSec || 0) : 0,
-      }
+      const isLast = i === groups.length - 1
+      const shotClips = members.map((c, k) => ({
+        ...c,
+        headHoldSec: isFirst && k === 0 ? (c.headHoldSec || 0) : 0,
+        tailHoldSec: isLast && k === members.length - 1 ? (c.tailHoldSec || 0) : 0,
+        roundHoldSec: isLast && k === members.length - 1 ? (c.roundHoldSec || 0) : 0,
+      }))
       // The whole overlay list goes in; clipsToPayload pairs by clip id (which
       // the copy above keeps), so a shot with no V2 partner renders without one.
-      const payload = clipsToPayload([shotClip], overlays)
+      const payload = clipsToPayload(shotClips, overlays)
       const result = await renderTimeline(payload, names[i], noAudio, [], noise, settings)
       if (result.error) {
         alert(
-          `Render failed on shot ${i + 1} of ${sourceClips.length}: ` + result.error
+          `Render failed on shot ${i + 1} of ${groups.length}: ` + result.error
           + (result.detail ? '\n' + result.detail : '')
           + (i > 0 ? `\n\nThe ${i} shot${i === 1 ? '' : 's'} before it were written.` : '')
         )
@@ -689,7 +710,7 @@ function AppInner() {
       // series should show up as it lands, which is also the only place the
       // final names (after any server-side de-duplication) are reported.
       setAnalyzeLog(prev => [
-        { kind: 'info', text: `▣ Shot ${i + 1}/${sourceClips.length} → ${result.output}` },
+        { kind: 'info', text: `▣ Shot ${i + 1}/${groups.length} → ${result.output}` },
         ...prev,
       ])
       refresh()
@@ -874,11 +895,28 @@ function AppInner() {
     })
   }, [])
 
+  // This bundle's own version, from Vite's env channel (vite.config feeds it
+  // from the repo-root VERSION file) — no fetch, so the header can draw it
+  // before the backend has answered anything, and it stays right even with the
+  // backend down. The one thing it CANNOT know is whether the server agrees, so
+  // that number is fetched once and only ever used to flag a mismatch. Null
+  // until it answers, and null forever if it never does.
+  const [backendVersion, setBackendVersion] = useState(null)
+  useEffect(() => {
+    getVersion().then(d => setBackendVersion(d.version || null))
+  }, [])
+  const versionMismatch = backendVersion != null && backendVersion !== APP_VERSION
+
   // V1 APPENDS, exactly like A1: a dropped file lands after the last clip and
   // nothing is replaced. That's the opposite of handleAddToV2 below, and the
   // difference is the tracks, not an inconsistency — V2 is a single-slot track
   // (V2 Render collapses it to one file, so a second clip there has no
   // meaning), while V1 is a sequence being built up.
+  //
+  // "Single-slot" is about CLIPS as the user counts them, which since Reconstruct
+  // is not the same as lane entries: a reconstructed clip is several entries
+  // sharing a `fuseId`, drawn as one box and rendered as one file. Still one
+  // slot. Count with clipMath.fuseGroups wherever the number is shown or used.
   //
   // Routed through handleAddToTimeline rather than duplicating its body so a
   // file dropped on V1 behaves identically to the same file added from the
@@ -990,9 +1028,30 @@ function AppInner() {
     ))
   }
 
+  // All three V2 tools below work on `track2Clips[0]` — ONE file, one window.
+  // A reconstructed clip is not that: it is N lane entries drawn as a single
+  // seamless box (clipMath.fuseGroups), and [0] is only its first range. Letting
+  // one through would re-cut that range and leave the others, i.e. break the
+  // one-clip illusion in the worst possible way — one box, half of it
+  // transformed. Nor can we flatten it first: a clip holds exactly ONE in/out
+  // pair, so the ranges become one file only at V2 Render.
+  function fusedV2Blocks(tool) {
+    const group = fuseGroups(track2Clips)[0]
+    if (!group || group.clips.length < 2) return false
+    const lead = group.clips[0]
+    alert(
+      `V2 holds a reconstructed clip made of ${group.clips.length} ranges of `
+      + `"${lead.displayName || lead.sourceName}" — ${tool} needs a single continuous file.\n\n`
+      + 'Render V2 first (V2 Render, mode 1), which joins the ranges into one file, '
+      + 'then drop that file back on V2 and run this again.'
+    )
+    return true
+  }
+
   function handleAnalyze() {
     if (track2Clips.length === 0) { alert('Drop a file on the V2 track first.'); return }
     if (timelineClips.length === 0) { alert('V1 has no clips to analyze against.'); return }
+    if (fusedV2Blocks('V2 Analyzer')) return
     const v2Source = track2Clips[0]
     const { segments, overflow } = analyzeAgainstV1(timelineClips, v2Source)
     if (segments.length === 0) {
@@ -1017,6 +1076,7 @@ function AppInner() {
   function handleBatchAnalyze() {
     if (track2Clips.length === 0) { alert('Drop a file on the V2 track first.'); return }
     if (timelineClips.length === 0) { alert('V1 has no clips to take cut points from.'); return }
+    if (fusedV2Blocks('V2 Batch Analyzer')) return
     // Pieces, not clips: a lone V1 clip with a head hold or a Raise on it still
     // has boundaries to cut at, and four clips with no holds have three.
     const pieces = sequencePieces(timelineClips)
@@ -1045,25 +1105,127 @@ function AppInner() {
     if (leftoverSec > 0.001) {
       notes.push({ kind: 'info', text: `▣ "${name}" runs ${leftoverSec.toFixed(2)}s longer than V1's sequence — the extra footage stayed on the last clip rather than being trimmed off` })
     }
-    if (track2Clips.length > 1) {
-      notes.push({ kind: 'warn', text: `⚠ V2 held ${track2Clips.length} clips — only the first was cut; the rest were left as they were` })
+    // Groups, not clips: a fused run is one clip to the user, so counting raw
+    // entries here would report a lane of 3 where the lane shows 2.
+    const v2Groups = fuseGroups(track2Clips).length
+    if (v2Groups > 1) {
+      notes.push({ kind: 'warn', text: `⚠ V2 held ${v2Groups} clips — only the first was cut; the rest were left as they were` })
     }
     setAnalyzeLog(prev => [...notes, ...prev])
   }
 
+  // "V2 Reconstruct": un-apply V1's decisions from the round-tripped file on V2,
+  // including the MOVES — the shots come back in source order, so V1's [C][A][B]
+  // hands V2 back A B C. reconstructFromV1 returns facts only; every word the
+  // user reads is written here, same as handleBatchAnalyze above.
   function handleReconstruct() {
     if (timelineClips.length === 0) { alert('V1 has no clips to reconstruct from.'); return }
     if (track2Clips.length === 0) { alert('Drop the round-tripped file on V2 first — Reconstruct edits V2\'s own clip(s), it does not create new ones.'); return }
-    const { segments, warnings } = reconstructFromV1(timelineClips, track2Clips)
-    setTrack2Clips(segments)
-    if (warnings.length > 0) {
-      setAnalyzeLog(prev => [
-        ...warnings.map(text => ({ kind: 'warn', text: `⚠ ${text}` })),
-        ...prev,
-      ])
+    if (fusedV2Blocks('V2 Reconstruct')) return
+
+    const v2Source = track2Clips[0]
+    const name = v2Source.displayName || v2Source.sourceName
+    const r = reconstructFromV1(timelineClips, track2Clips)
+    // Reference equality is the no-op signal (reconstructFromV1 returns V2's own
+    // array when nothing survives), which is also why reduceEdit would spend an
+    // undo step on nothing if we set it anyway.
+    if (r.segments === track2Clips) {
+      alert(`Nothing to reconstruct — none of V1's shots fall inside "${name}". Is this the file V1 rendered to?`)
+      return
     }
+    setTrack2Clips(r.segments)
+
+    const shotCount = r.shots.reduce((n, s) => n + s.v1Indexes.length, 0)
+    // RANGES, not clips: the reconstruction is one clip on V2. It is stored as
+    // r.shots.length lane entries only because a clip carries exactly one
+    // in/out pair and these ranges are, by construction, discontiguous in V2's
+    // file — the lane draws them as a single seamless box and V2 Render joins
+    // them into one file. Never call this number "clips" to the user.
+    const ranges = r.shots.length
+    const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`
+    const dropNotes = [
+      r.dropped.holds > 0 ? `${plural(r.dropped.holds, 'hold')} (${r.dropped.holdSec.toFixed(2)}s)` : null,
+      r.dropped.duplicates > 0 ? `${plural(r.dropped.duplicates, 'duplicate')} (${r.dropped.duplicateSec.toFixed(2)}s)` : null,
+    ].filter(Boolean)
+
+    const notes = [{
+      kind: 'info',
+      text: `▣ V2 Reconstruct: ${plural(shotCount, 'shot')} restored from V1 as ONE clip on V2` +
+        (ranges > 1 ? ` — ${ranges} chained ranges of "${name}"` : '') +
+        (r.welds > 0 ? `, ${r.welds} welded back together` : '') +
+        (dropNotes.length > 0 ? `, dropped ${dropNotes.join(' + ')}` : '') +
+        (r.reordered ? '' : ' — already in source order'),
+    }]
+
+    if (ranges > 1) {
+      notes.push({ kind: 'info', text: `▣ Nothing was re-rendered: the ${ranges} ranges are non-adjacent in "${name}", so they sit under one clip on the lane (the ⛓ ${ranges} badge) and are joined into a single file when you press V2 Render on mode 1. Delete removes the whole chain.` })
+    }
+    if (r.reordered) {
+      const order = r.shots.map(s => s.v1Indexes.map(i => i + 1).join('+')).join(' → ')
+      notes.push({ kind: 'info', text: `▣ Reconstruct order: V1 clips ${order} — the moves made on V1 were reversed, so V2 now runs in source order` })
+    }
+    if (r.sources.length > 1) {
+      notes.push({ kind: 'info', text: `▣ V1 drew on ${r.sources.length} source files — V2's shots were regrouped per file (${r.sources.map(s => s.sourceName).join(', ')}), in the order each file first appears on V1` })
+    }
+    for (const s of r.sources) {
+      if (s.unusedSec === null) continue
+      notes.push({
+        kind: 'info',
+        text: `▣ "${s.sourceName}": V1 used ${s.usedSec.toFixed(2)}s of ${s.sourceDurationSec.toFixed(2)}s` +
+          (s.unusedSec > 0.001 ? ` — ${s.unusedSec.toFixed(2)}s of the original was never on V1, and is not in this footage either` : ' — all of it'),
+      })
+    }
+    if (r.bakedSpeeds.length > 0) {
+      const speedShots = r.sources.reduce((n, s) => n + s.speedShots, 0)
+      notes.push({ kind: 'warn', text: `⚠ ${plural(speedShots, 'shot')} ran at ${r.bakedSpeeds.map(s => `${s}×`).join('/')} on V1 — the slowed frames are baked into this footage, so it comes back at the STRETCHED length. Speed was reset to 1× so it isn't slowed twice.` })
+    }
+    const croppedShots = r.sources.reduce((n, s) => n + s.croppedShots, 0)
+    if (croppedShots > 0) {
+      notes.push({ kind: 'warn', text: `⚠ ${plural(croppedShots, 'shot')} was cropped on V1 — the pixels outside the crop box are not in this footage and cannot be restored. Crop was reset. To put a processed REGION back over the original, use V2 as an overlay instead.` })
+    }
+    for (const s of r.sources) {
+      if (s.overlapSec > 0.001) {
+        notes.push({ kind: 'warn', text: `⚠ "${s.sourceName}": V1's clips overlap by ${s.overlapSec.toFixed(2)}s of source time — that footage appears twice on V2 and was kept as-is, since the two stretches are not the same pixels after a round trip` })
+      }
+    }
+    if (r.overflow > 0.001) {
+      // Both halves are reachable on their own: a single shot straddling the end
+      // is truncated with nothing dropped, and a much shorter V2 drops whole
+      // shots without truncating any.
+      const truncated = r.shots.filter(s => s.truncatedSec > 0.001).length
+      const lost = [
+        r.dropped.pastEnd > 0 ? `${plural(r.dropped.pastEnd, 'shot')} fell entirely past it` : null,
+        truncated > 0 ? `${plural(truncated, 'shot')} was cut short` : null,
+      ].filter(Boolean)
+      notes.push({ kind: 'warn', text: `⚠ V1's sequence runs ${r.overflow.toFixed(2)}s past the end of "${name}"${lost.length > 0 ? ` — ${lost.join(', and ')}` : ''}. Is this the file V1 rendered?` })
+    }
+    if (r.leftoverSec > 0.001) {
+      // Deliberately the opposite disposition from V2 Batch Analyzer's line
+      // above, which keeps the extra on its last segment: a cut discards
+      // nothing, a reconstruction only returns footage V1 had a decision about.
+      notes.push({ kind: 'info', text: `▣ "${name}" runs ${r.leftoverSec.toFixed(2)}s longer than V1's sequence — those frames were LEFT OUT of the reconstruction, since no V1 shot accounts for them` })
+    }
+    if (r.dropped.subFrame > 0) {
+      notes.push({ kind: 'warn', text: `⚠ ${plural(r.dropped.subFrame, 'V1 shot')} is shorter than one frame of "${name}" — dropped rather than rounded up onto a neighbour` })
+    }
+    // Groups, not clips — see the same line in handleBatchAnalyze. Counted on
+    // the PRE-reconstruct lane, so the clip this call just created is not in it.
+    const v2Groups = fuseGroups(track2Clips).length
+    if (v2Groups > 1) {
+      notes.push({ kind: 'warn', text: `⚠ V2 held ${v2Groups} clips — only the first was reconstructed; the rest were left as they were` })
+    }
+    if (hasDirty) {
+      notes.push({ kind: 'warn', text: '⚠ V1 has unrendered edits — Reconstruct reads V1\'s CURRENT order and cut lengths, so if V1 changed after the render that produced this file, every boundary above is on the wrong frame. Undo, re-render V1, and drop that file on V2 instead.' })
+    }
+    setAnalyzeLog(prev => [...notes, ...prev])
   }
 
+  // version 8 is V2 clips that can carry `fuseId`: several lane entries stamped
+  // with one id are ONE clip to the user — drawn as a single seamless box and
+  // rendered as a single file. It rides along for free (clips are serialized
+  // wholesale) and absent means "not fused", so a version-7 file reopens
+  // identically. It gets a bump anyway rather than being treated as a cosmetic
+  // label, because the field changes how many FILES a 1+ V2 Render writes.
   // version 7 is A1 clips that can be SPLIT: a clip may carry `inSec`/`outSec`
   // saying which part of its file it plays. Nothing had to change to save them
   // (they ride along on the bed objects) and absent means the whole file, so a
@@ -1083,7 +1245,7 @@ function AppInner() {
   // level nor something the server would accept.
   function buildProject() {
     return {
-      version: 7, clips: timelineClips, track2Clips, audioBeds, selectedId, exportPresets,
+      version: 8, clips: timelineClips, track2Clips, audioBeds, selectedId, exportPresets,
       noiseEnabled,
       noiseGainDb: clampNoiseGainDb(
         noiseGainDb, NOISE_GAIN_DB_DEFAULT, NOISE_GAIN_DB_MIN, NOISE_GAIN_DB_MAX),
@@ -1356,6 +1518,26 @@ function AppInner() {
         <div className="flex items-center gap-2">
           <span className="text-xs font-bold text-white tracking-tight">GENAI EDITOR</span>
           <span className="text-[9px] text-neutral-600 border border-neutral-700 rounded px-1 py-0.5">EDL mode</span>
+          {/* Quiet metadata, not a label: same 9px scale and muted neutral-600 as
+              the "EDL mode" chip beside it, but deliberately WITHOUT its border
+              box — a second outlined pill would read as a second mode. This is
+              the number a bug report is identified by, so it is always visible
+              rather than buried in the About dialog (it is in there too).
+              `APP_VERSION` comes from vite.config by way of the repo-root
+              VERSION file; never hardcode it here. */}
+          <span
+            className={`text-[9px] font-mono ${versionMismatch ? 'text-amber-500' : 'text-neutral-600'}`}
+            title={versionMismatch
+              // Reachable and easy to miss: `npm run dev` keeps serving the
+              // bundle it built while the Flask reloader picks a bumped VERSION
+              // up immediately, so the two genuinely disagree until the page is
+              // reloaded. Worth saying out loud — a stale bundle is the state in
+              // which a bug report's version number lies.
+              ? `Version mismatch — this page was built at ${APP_VERSION} but the backend is running ${backendVersion}. Reload the page; if it persists, restart the Vite dev server.`
+              : `GenAI Editor ${APP_VERSION}${backendVersion ? ' — frontend and backend agree' : ''}`}
+          >
+            v{APP_VERSION}{versionMismatch ? ' ⚠' : ''}
+          </span>
         </div>
         <div data-tour="project" className="flex items-center gap-1.5">
           {projectName && (
@@ -1697,8 +1879,14 @@ function AppInner() {
           // Non-zero only for a 1+ V2 Render, which turns the one name below
           // into that many numbered files — the dialog previews them. V1 Render
           // never splits, so it never passes a count.
+          //
+          // GROUPS, not clips, and for the same reason renderShots iterates
+          // groups: a fused run is one clip to the user and lands as one file.
+          // Counting clips here would preview N names while G files appear —
+          // and shotOutputNames derives its zero-pad width from this number,
+          // so a wrong count also renames every file in the series.
           shotCount={renderTarget !== 'v1' && v2ShotMode === '1+'
-            ? (renderTarget === 'v2' ? track2Clips : timelineClips).length
+            ? fuseGroups(renderTarget === 'v2' ? track2Clips : timelineClips).length
             : 0}
           showNoAudioOption
           onConfirm={handleRenderConfirm}

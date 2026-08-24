@@ -302,6 +302,75 @@ export function sanitizeHoldPlacement(clips) {
   })
 }
 
+// Which runs of clips are ONE clip as far as the user is concerned.
+//
+// V2 Reconstruct has to emit several clips for one piece of footage — putting
+// V1's moves back means the ranges it keeps are out of order in V2's file, and a
+// clip holds exactly one `inSec`/`outSec` pair, so two discontiguous ranges
+// cannot be one clip in the data. They ARE one clip in the render: V2 Render's
+// `1` mode posts the whole lane as a single payload and the server concatenates
+// it in array order into one file. So the multiplicity is an artifact of the data
+// model, and this is where it gets hidden again: members of a group draw as one
+// continuous box, count as one file in a `1+` series, and delete together.
+//
+// `fuseId` is PROVENANCE — "these came out of one reconstruction" — and nothing
+// else. Whether a run actually draws fused is decided HERE, at read time, from
+// the clips as they currently are:
+//
+//   - a run must be CONSECUTIVE. A move or a delete that separates members
+//     dissolves the group with no bookkeeping, and an undo restores it. Deriving
+//     runs from adjacency instead of trusting the flag is what keeps a stale
+//     `fuseId` (inherited through a `{...clip}` spread) from drawing a fused box
+//     across unrelated footage.
+//   - a run must be at least 2 clips. One clip carrying a `fuseId` is just a
+//     clip; there is no seam to hide.
+//   - members must AGREE on the fields one box can only state once: `reversed`,
+//     `speed` and whether a crop is set. A single ◀ badge or one duration label
+//     over members that disagree would be a lie, so a run splits where they do.
+//     Reconstruct can legitimately produce that (it never welds a reversed shot
+//     to a forward one), and so can editing one member — both come out as two
+//     boxes, which is the truth.
+//
+// Every clip is returned in exactly one group, in lane order, so a caller can
+// map over groups instead of clips and lose nothing. Unfused clips come back as
+// single-member groups with `fuseId: null` — which is why V1 (where no clip ever
+// carries one) can be fed through this unchanged and get one group per clip.
+export function fuseGroups(clips) {
+  const groups = []
+  let i = 0
+  while (i < clips.length) {
+    const c = clips[i]
+    let end = i + 1
+    if (c.fuseId) {
+      while (
+        end < clips.length
+        && clips[end].fuseId === c.fuseId
+        && !!clips[end].reversed === !!c.reversed
+        && clipSpeed(clips[end]) === clipSpeed(c)
+        && !!clips[end].crop === !!c.crop
+      ) end++
+    }
+    // A lone member is not a group: fall through to the single-clip shape so the
+    // caller never has to special-case a "fused" run of one.
+    const fused = end - i >= 2
+    groups.push({
+      fuseId: fused ? c.fuseId : null,
+      start: i,
+      clips: fused ? clips.slice(i, end) : [c],
+    })
+    i = fused ? end : i + 1
+  }
+  return groups
+}
+
+// The whole group a clip belongs to, as a Set of ids — what "delete this clip"
+// has to mean when the clip is one member of a box the user sees as single.
+// A clip in no group comes back as just itself.
+export function fuseGroupIds(clips, id) {
+  const g = fuseGroups(clips).find(group => group.clips.some(c => c.id === id))
+  return new Set(g ? g.clips.map(c => c.id) : [id])
+}
+
 function stripExt(name) {
   return name.replace(/\.[^/.]+$/, '')
 }

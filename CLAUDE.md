@@ -2,6 +2,12 @@
 
 A local, macOS-only, EDL-style video editor: Flask + ffmpeg backend (`app.py`, `ffmpeg_utils.py`) and a React 19 + Vite + Tailwind 4 frontend (`frontend/`). Edits are staged as non-destructive decisions on a two-track timeline and applied in a single lossless ffmpeg pass at Render. Source files in `input/` are never modified. Also doubles as a workspace for one-off ffmpeg edits requested directly in chat.
 
+## Versioning
+
+`VERSION` at the repo root is the single source of truth — one semver line, nothing else stores it. `app.py` reads it at import (`APP_VERSION`, served at `GET /api/version`), `frontend/vite.config.js` reads it and exposes it as `import.meta.env.VITE_APP_VERSION` (**not** `define` — see gotchas.md), the **share-project** skill reads it for the archive filename. `frontend/package.json` is a derived copy; the Vite build fails if it drifts.
+
+**Every change that ships gets a version bump in the same commit as the change** — never as a follow-up. `python3 bump_version.py patch|minor|major` moves `VERSION`, syncs `package.json`, and stubs the CHANGELOG section. Patch = fixes, minor = new behavior that breaks nothing, major = anything that changes existing behavior; the number is a compatibility promise, not an effort score. Then write the [CHANGELOG.md](CHANGELOG.md) entry in plain language (newest at top), and tag from the source of truth rather than by typing a number: `git tag -a "v$(cat VERSION)" -m "$(cat VERSION)"` — `v` prefix on the tag, bare number in `VERSION`.
+
 ## Knowledge docs (.claude/docs/)
 
 - [current-work.md](.claude/docs/current-work.md) — **read this first to resume in-progress work** (session checkpoint).

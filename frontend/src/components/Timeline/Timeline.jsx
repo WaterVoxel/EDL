@@ -10,7 +10,7 @@ import TransportBar from './TransportBar'
 import { useMedia } from '../../context/MediaContext'
 import { probe } from '../../api'
 import { useTimelinePlayback } from '../../hooks/useTimelinePlayback'
-import { clipTotalSec, clipTotalPx, clipHeadPx, clipMainPx, sanitizeHoldPlacement, timelinePosToPx, sequenceVideoStartSec, clipStartSec, moveClip, dropTargetIndex } from '../../clipMath'
+import { clipTotalSec, clipTotalPx, clipHeadPx, clipMainPx, clipTailPx, clipRoundPx, clipMainSec, clipSpeed, sanitizeHoldPlacement, timelinePosToPx, sequenceVideoStartSec, clipStartSec, moveClip, dropTargetIndex, fuseGroups, fuseGroupIds } from '../../clipMath'
 import { addKeyframe, removeNearestKeyframe, sampleCropOrigin, clipTFromTimelinePos, retimeKeyframesForTrim } from '../../cropAnimation'
 
 const PPS = 60
@@ -402,12 +402,17 @@ export default function Timeline({
     if (id === selectedId) onSelectId(null)
   }
 
+  // Deletes the whole FUSED RUN when the clip is one member of it — a box drawn
+  // as a single clip has to delete as a single clip, or one × leaves the other
+  // half of it sitting in the lane. One setTrack2Clips call, so it stays one undo
+  // step. An ordinary clip is a group of itself, so this is unchanged for those.
   function handleDelete2(id) {
     if (!setTrack2Clips) return
+    const doomed = fuseGroupIds(track2Clips, id)
     setTrack2Clips(prev => sanitizeHoldPlacement(
-      prev.filter(c => c.id !== id).map(c => ({ ...c, dirty: true }))
+      prev.filter(c => !doomed.has(c.id)).map(c => ({ ...c, dirty: true }))
     ))
-    if (id === selectedId2) selectItem2(null)
+    if (doomed.has(selectedId2)) selectItem2(null)
   }
 
   // Keyboard shortcuts — only active when focus is NOT in a text input.
@@ -670,7 +675,12 @@ export default function Timeline({
   // A/B, where V2's clips are overlays ON V1's cuts rather than cuts of their
   // own. Read only by labels here; App.jsx derives the same count from the same
   // two lists when it actually runs the renders.
-  const v2ShotCount = v2RenderMode === 'AB' ? clips.length : track2Clips.length
+  //
+  // Counted in GROUPS, not clips: a fused run of reconstructed ranges is one cut
+  // and gets one file, which is also what App.renderShots does when it runs the
+  // series. Counting clips here would promise two files for a lane drawing one.
+  const v2Groups = fuseGroups(track2Clips)
+  const v2ShotCount = v2RenderMode === 'AB' ? clips.length : v2Groups.length
   const actionsBar = (
     <div className="grid grid-cols-[1fr_auto_1fr] items-center">
       <div className="flex items-center gap-1.5 justify-self-start">
@@ -685,7 +695,7 @@ export default function Timeline({
         {clips.length > 0 && track2Clips.length > 0 && (
           <button
             onClick={onReconstruct}
-            title="Strip V1's edits (holds, reverse, speed, crop) back out of V2's own clip(s) — for footage that was rendered, taken through an external tool, and dropped back onto V2"
+            title={'Reverse V1\'s decisions on V2\'s own clip(s) — for footage that was rendered from V1, taken through an external tool, and dropped back onto V2.\n\nCuts V2 at V1\'s shot boundaries and puts the shots back in SOURCE order (grouped by file, in the order each file first appears on V1), so moves made on V1 are undone; shots that come back adjacent are welded. Holds and duplicate shots are dropped, reverse is restored per shot.\n\nThe result is ONE clip on V2, with no gaps — the reordered ranges are chained under a single clip (⛓ N) and nothing is re-rendered. V2 Render on mode 1 joins them into one file.\n\nNeeds V2 to be the file V1 rendered in its CURRENT order — reorder V1 after that render and every boundary lands on the wrong frame.\n\nCannot be reversed: slowed footage comes back at the stretched length, and cropped-away pixels are gone.'}
             className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] rounded bg-orange-600 text-white hover:bg-orange-500"
           >
             V2 Reconstruct
@@ -935,29 +945,102 @@ export default function Timeline({
                       onClick={handleTimelineClick}
                       className={`flex items-stretch gap-0.5 bg-neutral-950 px-2 py-1 h-12 cursor-pointer transition-all ${!v2Visible ? 'opacity-35 grayscale pointer-events-none' : ''}`}
                     >
-                      {track2Clips.map((clip, i) => (
-                        <TimelineClip
-                          key={clip.id}
-                          clip={clip}
-                          pps={PPS}
-                          index={i}
-                          selected={clip.id === selectedId2}
-                          selectedPart={clip.id === selectedId2 ? selectedPart2 : null}
-                          onSelect={handleSelect2}
-                          onDeletePart={(part) => {
-                            const field = part === 'head' ? 'headHoldSec' : part === 'tail' ? 'tailHoldSec' : 'roundHoldSec'
-                            setTrack2Clips?.(prev => prev.map(c => c.id === clip.id ? { ...c, [field]: 0, dirty: true } : c))
-                          }}
-                          onTrim={handleTrim2}
-                          onDelete={handleDelete2}
-                          onDragStart={handleDragStart2}
-                          onDragOver={handleDragOver2}
-                          onDrop={handleDrop2}
-                          onDragEnd={handleDragEnd}
-                          dragging={dragFromRef2.current === i && dropAt != null}
-                          dropSide={dropSideFor(2, i, track2Clips.length)}
-                        />
-                      ))}
+                      {/* Grouped, not a flat map: V2 Reconstruct emits one clip
+                          per range it keeps, and a run of them is ONE clip to the
+                          user (clipMath.fuseGroups). The run gets its own wrapper
+                          so the lane's gap-0.5 falls only BETWEEN groups — a flex
+                          gap can't be suppressed per boundary — and the wrapper
+                          carries the things a single clip has exactly one of: the
+                          name, the duration, the badges, the delete × and the
+                          selection ring. An unfused clip comes back as a
+                          single-member group and renders exactly as before. */}
+                      {v2Groups.map(group => {
+                        const members = group.clips
+                        const fused = !!group.fuseId
+                        const runSelected = members.some(c => c.id === selectedId2)
+                        const runDirty = members.some(c => c.dirty)
+                        const lead = members[0]
+                        const boxes = members.map((clip, k) => (
+                          <TimelineClip
+                            key={clip.id}
+                            clip={clip}
+                            pps={PPS}
+                            index={group.start + k}
+                            selected={clip.id === selectedId2}
+                            selectedPart={clip.id === selectedId2 ? selectedPart2 : null}
+                            onSelect={handleSelect2}
+                            onDeletePart={(part) => {
+                              const field = part === 'head' ? 'headHoldSec' : part === 'tail' ? 'tailHoldSec' : 'roundHoldSec'
+                              setTrack2Clips?.(prev => prev.map(c => c.id === clip.id ? { ...c, [field]: 0, dirty: true } : c))
+                            }}
+                            onTrim={handleTrim2}
+                            onDelete={handleDelete2}
+                            onDragStart={handleDragStart2}
+                            onDragOver={handleDragOver2}
+                            onDrop={handleDrop2}
+                            onDragEnd={handleDragEnd}
+                            dragging={dragFromRef2.current === group.start + k && dropAt != null}
+                            dropSide={dropSideFor(2, group.start + k, track2Clips.length)}
+                            fuse={fused ? {
+                              pos: k === 0 ? 'start' : k === members.length - 1 ? 'end' : 'mid',
+                              colorId: group.fuseId,
+                              dirty: runDirty,
+                            } : null}
+                          />
+                        ))
+                        if (!fused) return boxes
+                        // The duration is the sum of the members' RENDERED lengths
+                        // — what the joined file will be — so the one label agrees
+                        // with the one box. Speed is uniform across a run by
+                        // construction (fuseGroups splits where it isn't), so the
+                        // lead clip's is the run's.
+                        const runSec = members.reduce((n, c) => n + clipMainSec(c), 0)
+                        const runSpeed = clipSpeed(lead)
+                        // The wrapper spans the run's HOLD segments too, but a
+                        // single clip draws its name and × inside the main body
+                        // only — so inset the overlay past the run's own holds,
+                        // or the name lands on top of the fuchsia block's own
+                        // "HOLD 1.0s" label. Holds can only sit on the run's
+                        // outer members (the hold placement invariant), so the
+                        // lead's head and the last member's tail/round are the
+                        // only ones there are.
+                        const last = members[members.length - 1]
+                        const padLeft = clipHeadPx(lead, PPS)
+                        const padRight = clipTailPx(last, PPS) + clipRoundPx(last, PPS)
+                        return (
+                          <div
+                            /* The lead clip's id, not the fuseId: one fuseId can
+                               yield two groups when members stop agreeing on
+                               reverse or speed, and two wrappers keyed the same
+                               would collide. */
+                            key={lead.id}
+                            className={`relative flex items-stretch group ${runSelected ? 'rounded ring-2 ring-white ring-offset-1 ring-offset-neutral-950 brightness-110' : ''}`}
+                          >
+                            {boxes}
+                            <div
+                              className="absolute top-0 bottom-0 flex flex-col items-start justify-between px-1.5 py-0.5 pointer-events-none"
+                              style={{ left: padLeft, right: padRight }}
+                            >
+                              <span className="text-[8px] text-neutral-100 truncate max-w-full font-medium">
+                                {lead.reversed && <span title="Reversed">◀ </span>}
+                                {lead.displayName || lead.sourceName}
+                                <span className="text-neutral-400" title={`One clip made of ${members.length} ranges of this file, in this order. V2 Render joins them into a single file.`}> ⛓ {members.length}</span>
+                              </span>
+                              <span className="text-[8px] text-neutral-200 font-mono">
+                                {runSec.toFixed(2)}s{runSpeed !== 1 ? ` · ${Math.round(runSpeed * 100)}%` : ''}
+                              </span>
+                            </div>
+                            <button
+                              onClick={e => { e.stopPropagation(); handleDelete2(lead.id) }}
+                              title={`Delete clip — all ${members.length} ranges`}
+                              className="absolute top-0 w-3.5 h-3.5 flex items-center justify-center bg-black/50 hover:bg-red-600 text-white text-[9px] leading-none opacity-0 group-hover:opacity-100 z-20"
+                              style={{ right: padRight }}
+                            >
+                              ×
+                            </button>
+                          </div>
+                        )
+                      })}
                     </div>
                   )}
                 </div>
