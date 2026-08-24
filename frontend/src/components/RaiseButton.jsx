@@ -1,11 +1,16 @@
-import { sequenceBaseSec, roundUpAmount } from '../clipMath'
+import { sequenceRaise } from '../clipMath'
 
 // Raise rounds up the *whole sequence's* total duration, always by holding
 // the last frame of the last clip — never an individual clip in isolation,
 // since what matters is the final program length landing on a whole second.
+//
+// It measures the RENDER's length, not the timeline's arithmetic length: they
+// differ by up to half a frame per clip, and a slow-down multiplies that. When
+// Raise measured the timeline it would offer a round-up on an already-whole
+// render — and applying it pushed the render a frame past the whole second it
+// advertised — and call a non-whole render "whole". See gotchas.md.
 export default function RaiseButton({ clips, setClips }) {
-  const base = sequenceBaseSec(clips)
-  const amount = clips.length > 0 ? roundUpAmount(base) : 0
+  const { baseSec: base, amountSec: amount, wholeSec, exact } = sequenceRaise(clips)
   const lastClip = clips[clips.length - 1] || null
 
   function apply() {
@@ -23,7 +28,11 @@ export default function RaiseButton({ clips, setClips }) {
       <button
         onClick={apply}
         disabled={amount <= 0}
-        title="Hold the last frame of the sequence to round its total duration up to the next whole second"
+        title={exact
+          ? 'Hold the last frame of the sequence to round its total duration up to the next whole second'
+          : `Holds the last frame to reach ${wholeSec}s. The whole second isn't exactly reachable here — `
+            + `the hold is quantized on the last clip's own frame rate, so the render lands a frame or two `
+            + `past ${wholeSec}s rather than on it (never short of it).`}
         className="px-1.5 py-0.5 text-[8px] rounded bg-amber-600 text-white hover:bg-amber-500 disabled:bg-neutral-700 disabled:text-neutral-500"
       >
         Round Up
@@ -33,7 +42,8 @@ export default function RaiseButton({ clips, setClips }) {
       ) : amount <= 0 ? (
         <span className="text-[8px] text-neutral-600">whole ({base.toFixed(1)}s)</span>
       ) : (
-        <span className="text-[8px] text-amber-400 whitespace-nowrap">+{amount.toFixed(2)}s → {(base + amount).toFixed(0)}s</span>
+        // "≈" when the render can't land exactly on the second — see the tooltip.
+        <span className="text-[8px] text-amber-400 whitespace-nowrap">+{amount.toFixed(2)}s → {exact ? '' : '≈'}{wholeSec.toFixed(0)}s</span>
       )}
     </div>
   )

@@ -15,6 +15,78 @@ the day the version file appeared. There are no tags for them and never will be 
 `v0.25.0` is the first real tag. Treat the older entries as a history, not a
 download list.
 
+## 0.26.1 — 2026-08-24
+
+**Reconstruct now cuts on the right frame when V1 changed any timing**
+
+Reconstruct works out where each of V1's shots ended up in the rendered file and
+cuts V2 there. It was working that out in plain seconds, but a render lays footage
+down in whole **frames** — it rounds each shot to a frame boundary, and it stretches
+a slowed shot by repeating frames. So the two disagreed, slightly, and the
+disagreement piled up shot after shot.
+
+The effect was a cut landing a frame or several off. On a real 3-shot render here
+(24fps, hand-dragged trim points, one shot at 0.75× and one at 0.5×, with head,
+tail and Raise holds) the second shot was being cut **two frames early** — so
+Reconstruct handed back that shot two frames short with two frames of the *next*
+shot stuck on the end, and reported the sequence a frame shorter than it was.
+Worst case measured across 3000 generated sequences was 27 frames — nearly half a
+second at 60fps.
+
+It now counts in frames the same way the render does, so the boundaries match
+exactly. That was verified against an actual render, not just on paper: predicted
+92 frames, rendered 92 frames, every cut on a whole frame.
+
+The error was worst on exactly the shots whose speed you had changed, because a
+slow-down multiplies it — a 0.2× shot could be off by five frames on its own.
+Sequences with frame-aligned trim points and no speed changes were already
+correct and are unaffected.
+
+**Half-frames now round the way ffmpeg rounds them**
+
+A shot's length in frames often works out to exactly a half — a 0.4× or 0.2×
+shot does it constantly. ffmpeg breaks that tie by rounding to the nearest *even*
+frame; the app was rounding up. So on roughly one timeline in five, one shot was
+predicted a frame longer than it renders, and everything after it shifted. Fixed
+at the root, so Reconstruct, the V2 Batch Analyzer and Raise all agree with the
+render now. Checked against 2500 generated timelines run through the real
+renderer, 632 of whose shots land on exactly a half frame: every one matches.
+
+**Round Up now lands on the whole second**
+
+Round Up measured the timeline instead of the render, so it was wrong both ways:
+it offered a round-up on a sequence that already came out whole — and pressing it
+made the render a frame *longer* than the second it promised — and it said
+"whole" about sequences that didn't come out whole. On a real 30fps render that
+comes out at exactly 4.5s, it offered "+0.48s → 5s", and that actually rendered
+to 4.967s. It now offers +0.50s, which renders to exactly 5.000s.
+
+Where the whole second genuinely can't be hit — the freeze is measured on the
+last clip's frame rate, so on a mixed-frame-rate timeline it moves the total in
+steps bigger than one frame — it adds the smallest freeze that reaches the second
+rather than falling short of it, and the readout says `≈ 5s` with the reason in
+its tooltip instead of promising a number it won't hit.
+
+**Reconstruct says how much slow-down is baked in, not just that some is**
+
+Its warning about slowed shots now gives the numbers: how many seconds of original
+footage are sitting there as how many seconds of stretched footage, and how much of
+that is repeated frames. It also says plainly that the app has no speed-up to
+compress it back with, and that the cut points themselves *do* account for the
+stretch — so the warning describes one specific limit instead of sounding like
+Reconstruct ignored speed altogether.
+
+**No more "not rounded up" warnings about clips that come out whole**
+
+The log's per-clip round-up warning measured a clip on its own. A hold that sits
+in the middle of the sequence is discarded by the render, and a clip's length is
+counted on the sequence's frame rate rather than its own — so the log could warn
+that a clip needed rounding while the render landed it exactly on a whole second
+and Round Up sat greyed out beside it. It now measures each clip's real
+contribution to the render.
+
+**V2 Batch Analyzer** cuts on the same boundaries, so it got the same fix.
+
 ## 0.26.0 — 2026-08-24
 
 **A warning when a V1 edit throws footage away for good**

@@ -31,7 +31,7 @@ import AboutDialog from './components/AboutDialog'
 import FootageLossDialog from './components/FootageLossDialog'
 import FfmpegCustomSettings from './components/FfmpegCustomSettings'
 import Timeline from './components/Timeline/Timeline'
-import { clipBaseSec, roundUpAmount, clampNoiseGainDb, normalizeBeds, bedLaneEndSec, bedInSec, fuseGroups } from './clipMath'
+import { sequenceTargetFps, clipRenderFrames, roundUpAmount, clampNoiseGainDb, normalizeBeds, bedLaneEndSec, bedInSec, fuseGroups } from './clipMath'
 import { loadTrackTags, tagTrack, renameTrackTag, isAudioFile, loadHideFootageLossWarning, saveHideFootageLossWarning } from './fileList'
 import { analyzeAgainstV1, batchCutAgainstV1, reconstructFromV1, sequencePieces } from './analyzeMath'
 import { mergeExportPresets } from './exportPresets'
@@ -441,14 +441,24 @@ function AppInner() {
 
   const logMessages = (() => {
     const msgs = []
-    for (const c of timelineClips) {
-      if (c.roundHoldSec > 0) continue
-      const base = clipBaseSec(c)
+    // The clip's contribution to the RENDER, measured the way the render
+    // measures it: whole frames on the output grid, with the first/last hold
+    // rule applied. Measured raw — or with a mid-sequence hold counted that the
+    // render discards — this warns about clips the render already lands whole.
+    const logTargetFps = sequenceTargetFps(timelineClips)
+    timelineClips.forEach((c, i) => {
+      if (c.roundHoldSec > 0) return
+      const { totalFrames } = clipRenderFrames(c, {
+        isFirst: i === 0,
+        isLast: i === timelineClips.length - 1,
+        targetFps: logTargetFps,
+      })
+      const base = totalFrames / logTargetFps
       const amount = roundUpAmount(base)
       if (amount > 0) {
         msgs.push({ kind: 'warn', text: `⚠ "${c.displayName || c.sourceName}" duration is not rounded up (${base.toFixed(1)}s) — use Raise to round to ${(base + amount).toFixed(0)}s` })
       }
-    }
+    })
     // Overlay near-misses (a size that doesn't match the crop box, a missing
     // crop box) are surfaced here rather than as an alert: they're derived
     // continuously, so an alert would fire on every keystroke of a resize.
@@ -1247,7 +1257,8 @@ function AppInner() {
     }
     if (r.bakedSpeeds.length > 0) {
       const speedShots = r.sources.reduce((n, s) => n + s.speedShots, 0)
-      notes.push({ kind: 'warn', text: `⚠ ${plural(speedShots, 'shot')} ran at ${r.bakedSpeeds.map(s => `${s}×`).join('/')} on V1 — the slowed frames are baked into this footage, so it comes back at the STRETCHED length. Speed was reset to 1× so it isn't slowed twice.` })
+      const { stretchedSec, sourceSec } = r.bakedSpeedSec
+      notes.push({ kind: 'warn', text: `⚠ ${plural(speedShots, 'shot')} ran at ${r.bakedSpeeds.map(s => `${s}×`).join('/')} on V1 — the slowed frames are baked into this footage, so it comes back at the STRETCHED length: ${sourceSec.toFixed(2)}s of source occupies ${stretchedSec.toFixed(2)}s here (+${(stretchedSec - sourceSec).toFixed(2)}s of repeated frames). Speed was reset to 1× so it isn't slowed twice; this app has no speed-up to compress it back with. The cut boundaries themselves DO account for the stretch.` })
     }
     const croppedShots = r.sources.reduce((n, s) => n + s.croppedShots, 0)
     if (croppedShots > 0) {

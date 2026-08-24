@@ -1,4 +1,4 @@
-import { clipMainSec, clipSpeed } from './clipMath.js'
+import { clipSpeed, sequenceTargetFps, clipRenderFrames } from './clipMath.js'
 
 // "Analyze" applies the V1 timeline's cut structure directly onto a
 // different file dropped on V2: each V2 segment uses the SAME inSec/outSec
@@ -73,7 +73,20 @@ import { clipMainSec, clipSpeed } from './clipMath.js'
 //   speed — a slow-down is already realized as repeated frames at the stretched
 //     duration, and V2's own speed only ever goes slower, so it resets to 1 and
 //     the shot comes back at its STRETCHED length. Unrecoverable; the caller
-//     warns rather than pretending otherwise.
+//     warns rather than pretending otherwise, and `bakedSpeedSec` says by how
+//     many seconds so the warning is a measurement instead of a caveat.
+//     Un-stretching it would mean emitting the reciprocal speed on V2, and speed
+//     above 1x does not exist in this app — SpeedForm offers only slow-downs and
+//     BOTH render routes reject `speed > 1` outright (app.py: "only slow-down is
+//     supported"). So the honest reset is the only reachable answer here, not a
+//     shortcut.
+//   TIMING — every piece boundary is measured in whole FRAMES, via
+//     clipRenderFrames, because that is how the render lays footage
+//     down (ffmpeg_utils.clip_timing). Measuring in raw seconds instead puts each
+//     boundary up to a frame off, multiplies that by 1/speed on a slowed shot,
+//     and accumulates it down the sequence — which is the one error a
+//     reconstruction cannot recover from, since a cut on the wrong frame splices
+//     a neighbouring shot's frames onto this one.
 //   crop — UNRECOVERABLE: the pixels outside V1's crop box don't exist in the
 //     round-tripped footage. Reset to null instead of faking a restore. (The
 //     route that CAN put a processed region back is V2-as-overlay, not this.)
@@ -240,7 +253,8 @@ export function reconstructFromV1(v1Clips, v2Clips) {
   const dropped = { holds: 0, holdSec: 0, duplicates: 0, duplicateSec: 0, pastEnd: 0, pastEndSec: 0, subFrame: 0 }
   const nothing = {
     segments: v2Clips, shots: [], welds: 0, reordered: false, sources: [],
-    bakedSpeeds: [], dropped, overflow: 0, leftoverSec: 0,
+    bakedSpeeds: [], bakedSpeedSec: { stretchedSec: 0, sourceSec: 0 },
+    dropped, overflow: 0, leftoverSec: 0,
   }
 
   const pieces = v2Clips.length > 0 ? sequencePieces(v1Clips) : []
@@ -371,6 +385,21 @@ export function reconstructFromV1(v1Clips, v2Clips) {
     delete s.windows
   }
 
+  // What the slow-downs actually cost, in SECONDS rather than a bare list of
+  // multipliers — the number the user needs to judge how far off the returned
+  // footage's timing is. A range on V2 already IS the stretched length, so
+  // multiplying it back by the V1 clip's own speed recovers the source length it
+  // was stretched from; the difference is the padding the render inserted as
+  // repeated frames.
+  let stretchedSec = 0
+  let sourceSec = 0
+  for (const r of kept) {
+    const sp = clipSpeed(v1Clips[r.v1Index])
+    if (sp === 1) continue
+    stretchedSec += r.to - r.from
+    sourceSec += (r.to - r.from) * sp
+  }
+
   return {
     segments,
     shots: welded.map(r => ({
@@ -384,6 +413,7 @@ export function reconstructFromV1(v1Clips, v2Clips) {
     reordered,
     sources,
     bakedSpeeds: [...new Set(kept.map(r => clipSpeed(v1Clips[r.v1Index])).filter(s => s !== 1))].sort((a, b) => a - b),
+    bakedSpeedSec: { stretchedSec, sourceSec },
     dropped,
     overflow,
     leftoverSec,
@@ -445,15 +475,24 @@ export function reconstructFromV1(v1Clips, v2Clips) {
 // An index rather than the clip itself, so a piece stays a plain description of
 // the render's shape that nothing can mutate V1 through.
 export function sequencePieces(v1Clips) {
+  // Every `sec` below is a whole number of frames on the render's own OUTPUT
+  // grid, because a boundary in a rendered file is a running sum of per-clip
+  // integer frame counts (clipRenderFrames mirrors both of the render's
+  // quantizations). Rounding a cumulative total of real durations instead is off
+  // by up to half a frame per clip at any speed whose stretch is not a whole
+  // number of frames — 0.75x and 0.4x, both of them presets.
+  //
+  // Tail and round-up are separate pieces even though the render lays them as
+  // one block, because Batch Analyze names segments by piece kind and a hidden
+  // round-up inside "the tail hold" would misname them.
+  const targetFps = sequenceTargetFps(v1Clips)
   const pieces = []
   v1Clips.forEach((c, i) => {
-    if (i === 0 && (c.headHoldSec || 0) > 0) pieces.push({ kind: 'head', sec: c.headHoldSec, clipIndex: i })
-    const main = clipMainSec(c)
-    if (main > 0) pieces.push({ kind: 'main', sec: main, clipIndex: i })
-    if (i === v1Clips.length - 1) {
-      if ((c.tailHoldSec || 0) > 0) pieces.push({ kind: 'tail', sec: c.tailHoldSec, clipIndex: i })
-      if ((c.roundHoldSec || 0) > 0) pieces.push({ kind: 'round', sec: c.roundHoldSec, clipIndex: i })
-    }
+    const f = clipRenderFrames(c, { isFirst: i === 0, isLast: i === v1Clips.length - 1, targetFps })
+    if (f.headFrames > 0) pieces.push({ kind: 'head', sec: f.headFrames / targetFps, clipIndex: i })
+    if (f.mainFrames > 0) pieces.push({ kind: 'main', sec: f.mainFrames / targetFps, clipIndex: i })
+    if (f.tailFrames > 0) pieces.push({ kind: 'tail', sec: f.tailFrames / targetFps, clipIndex: i })
+    if (f.raiseFrames > 0) pieces.push({ kind: 'round', sec: f.raiseFrames / targetFps, clipIndex: i })
   })
   return pieces
 }

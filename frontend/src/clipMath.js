@@ -15,17 +15,175 @@ export function clipTotalSec(clip) {
   return (clip.headHoldSec || 0) + clipMainSec(clip) + (clip.tailHoldSec || 0) + (clip.roundHoldSec || 0)
 }
 
-// Total duration excluding any "Raise" round-up extension — this is what
-// Raise measures against to decide how much rounding is needed.
-export function clipBaseSec(clip) {
-  return (clip.headHoldSec || 0) + clipMainSec(clip) + (clip.tailHoldSec || 0)
+// ─── The render's own frame arithmetic, mirrored ─────────────────────────────
+//
+// `ffmpeg_utils.clip_timing` is THE source of truth for how long a clip occupies
+// a render, and it counts in whole FRAMES: the body is
+// ceil(outSec*fps) - ceil(inSec*fps) frames, and each hold is round(H*fps)
+// frames. clipMainSec's raw `outSec - inSec` is the right answer for laying the
+// timeline out on screen and the WRONG one for predicting which frame the render
+// put a cut on.
+//
+// The difference is not cosmetic. It is up to a frame per clip, it is multiplied
+// by 1/speed — a 0.2x shot can be off by five frames on its own — and it
+// ACCUMULATES down the sequence, so a reconstruction's later boundaries land
+// further out than its earlier ones. Measured at 1-4 frames on ordinary
+// sequences with edge-dragged (i.e. not frame-aligned) trims.
+//
+// This duplicates Python arithmetic, which clip_timing's own docstring warns
+// against. It is unavoidable here: these cuts are decided in the browser with no
+// render in flight to ask. The two must therefore be changed together — see
+// gotchas.md.
+export function clipFps(clip) {
+  return clip.fps > 0 ? clip.fps : 30
 }
 
-// Sum of clipBaseSec across the whole sequence (excludes any roundHoldSec
-// anywhere) — Raise always rounds the *sequence* total, not any individual
-// clip, since the round-up extension only ever attaches to the last clip.
-export function sequenceBaseSec(clips) {
-  return clips.reduce((sum, c) => sum + clipBaseSec(c), 0)
+// Python's round(), which is the one the render uses: a tie goes to the EVEN
+// integer, not upward. Math.round(72.5) is 73 where Python's round(72.5) is 72,
+// and `expected_sec * fps` lands exactly on .5 constantly — an odd source-frame
+// count at 0.4x (×2.5) or 0.2x (×5) does it every time, and both are presets. So
+// Math.round in this block is not a pedantic difference; it is a one-frame error
+// on ordinary input that then accumulates down the sequence. Every rounding in
+// the mirror goes through here.
+export function roundFrames(x) {
+  const r = Math.round(x)
+  return Math.abs(x % 1) === 0.5 && r % 2 !== 0 ? r - 1 : r
+}
+
+// A hold's real length: it contributes round(H*fps) whole frames, never its
+// requested duration raw.
+export function holdFrames(sec, fps) {
+  return sec > 0 ? roundFrames(sec * fps) : 0
+}
+
+// Whole frames the trim window selects, exactly as the render counts them —
+// including the render's clamp of outSec to the video stream's last frame, since
+// a window reaching past that frame selects nothing, and its floor of one frame.
+export function clipMainFrames(clip) {
+  const fps = clipFps(clip)
+  const eps = 1e-6
+  const videoDur = clip.sourceDurationSec > 0 ? clip.sourceDurationSec : clip.outSec
+  const lastFrame = Math.max(roundFrames(videoDur * fps) - 1, 0)
+  const firstSel = Math.max(Math.ceil(clip.inSec * fps - eps), 0)
+  const lastSelExcl = Math.min(Math.ceil(clip.outSec * fps - eps), lastFrame + 1)
+  return Math.max(lastSelExcl - firstSel, 1)
+}
+
+// clipMainSec's frame-exact counterpart: what the RENDER gives the main body,
+// slow-down included. Use this, not clipMainSec, for anything that has to line
+// up with rendered footage.
+export function clipRenderedMainSec(clip) {
+  return (clipMainFrames(clip) / clipFps(clip)) / clipSpeed(clip)
+}
+
+// There is deliberately no per-clip "how long does this clip render to" helper
+// that takes a clip ALONE. Two existed — one raw (clipBaseSec) and one
+// frame-exact but position-blind — and both were wrong, for two different
+// reasons: raw seconds miss the frame quantization, and a clip's rendered length
+// depends on WHERE it sits (the render zeroes any hold that isn't at the
+// sequence's outer edge, and quantizes onto the sequence's output grid, not the
+// clip's own). Anything asking that question must go through clipRenderFrames
+// with isFirst/isLast/targetFps. See the Raise entry in gotchas.md.
+
+// The render's ONE output frame rate for a whole sequence: the max fps across
+// its inputs (app.py's target_fps). Every boundary and every duration in a
+// rendered file lives on this grid, never on an individual clip's.
+export function sequenceTargetFps(clips) {
+  return clips.reduce((m, c) => Math.max(m, clipFps(c)), 0) || 30
+}
+
+// One clip's frame budget inside a rendered sequence, split the way the render
+// splits it, every count on the sequence's OUTPUT grid.
+//
+// Two quantizations happen here and the order matters: the holds are rounded on
+// the CLIP's own fps (that is the grid clip_timing rounds them on), and then the
+// clip's whole budget is rounded onto the output grid (n_norm_frames,
+// ffmpeg_utils). So the pieces are carved OUT of totalFrames rather than each
+// being rounded independently — that way they always sum to exactly what the
+// render gives the clip, even when the two grids differ.
+export function clipRenderFrames(clip, { isFirst, isLast, targetFps }) {
+  const fps = clipFps(clip)
+  // app.py zeroes any hold that is not at the sequence's outer edge, and sums
+  // the tail hold with the Raise round-up BEFORE quantizing them.
+  const leadFrames = isFirst ? holdFrames(clip.headHoldSec || 0, fps) : 0
+  const tailHold = isLast ? (clip.tailHoldSec || 0) : 0
+  const raiseHold = isLast ? (clip.roundHoldSec || 0) : 0
+  const trailFrames = holdFrames(tailHold + raiseHold, fps)
+
+  const expectedSec = (leadFrames + trailFrames) / fps + clipRenderedMainSec(clip)
+  const totalFrames = Math.max(roundFrames(expectedSec * targetFps), 1)
+  const headFrames = roundFrames((leadFrames / fps) * targetFps)
+  const trailTarget = roundFrames((trailFrames / fps) * targetFps)
+  // The render lays ONE trail block — it has no tail/Raise boundary — so the
+  // split between them is put back on a frame boundary here instead of each
+  // half being rounded on its own, which can miss the render's single rounding.
+  const tailFrames = Math.min(roundFrames((holdFrames(tailHold, fps) / fps) * targetFps), trailTarget)
+  return {
+    headFrames,
+    mainFrames: totalFrames - headFrames - trailTarget,
+    tailFrames,
+    raiseFrames: trailTarget - tailFrames,
+    totalFrames,
+  }
+}
+
+// Total frames the sequence renders to. A sum of per-clip integers, which is
+// what makes a rendered file's length differ from the rounded sum of its clips'
+// real durations — the distinction the whole frame-arithmetic block exists for.
+export function sequenceRenderFrames(clips, targetFps = sequenceTargetFps(clips)) {
+  return clips.reduce((sum, c, i) => sum + clipRenderFrames(c, {
+    isFirst: i === 0,
+    isLast: i === clips.length - 1,
+    targetFps,
+  }).totalFrames, 0)
+}
+
+// Everything Raise needs: the sequence's rendered length with any existing
+// round-up stripped, and the hold that lands the RENDER exactly on the next
+// whole second. `amountSec` is 0 when the render is already whole.
+export function sequenceRaise(clips) {
+  if (clips.length === 0) return { baseSec: 0, amountSec: 0, wholeSec: 0, exact: true }
+  const targetFps = sequenceTargetFps(clips)
+  // Measured with every round-up removed: Raise replaces its own previous
+  // answer rather than stacking a second hold on top of it.
+  const base = clips.map(c => (c.roundHoldSec ? { ...c, roundHoldSec: 0 } : c))
+  const baseFrames = sequenceRenderFrames(base, targetFps)
+  const baseSec = baseFrames / targetFps
+  const wholeSec = Math.ceil(baseSec - ROUND_EPSILON)
+  const wantFrames = roundFrames(wholeSec * targetFps)
+  if (wantFrames <= baseFrames) return { baseSec, amountSec: 0, wholeSec: baseSec, exact: true }
+
+  // The hold is stored in SECONDS, but the render rounds it on the LAST CLIP's
+  // own fps and only then re-rounds that clip's budget onto the output grid. So
+  // the reachable sequence lengths are not "every output frame": they step by
+  // targetFps/lastFps output frames at a time. Converting the shortfall to
+  // seconds in one division therefore lands a frame off, which is what the old
+  // raw-seconds Raise did.
+  //
+  // Instead: walk the hold up one LAST-CLIP frame at a time and take the first
+  // one whose whole render reaches the whole second. The render length is
+  // monotonic in the hold, so the first hit is also the smallest — Raise must add
+  // as little as it can. The scan is bounded by one second of hold because a
+  // round-up is by definition under a second, and each step is pure arithmetic.
+  const lastFps = clipFps(base[base.length - 1])
+  const probe = h => sequenceRenderFrames(
+    base.map((c, i) => (i === base.length - 1 ? { ...c, roundHoldSec: h / lastFps } : c)),
+    targetFps,
+  )
+  const maxHoldFrames = Math.ceil(lastFps) + 2
+  for (let h = 1; h <= maxHoldFrames; h++) {
+    const total = probe(h)
+    if (total >= wantFrames) {
+      // total > wantFrames means the whole second sits BETWEEN two reachable
+      // lengths — only possible when the last clip is slower than the output
+      // rate, since then one hold frame is several output frames and no hold
+      // expresses the gap. Overshooting by under a frame of output is the honest
+      // answer (the sequence is at least the whole second, never short of it),
+      // and `exact` says so rather than the UI promising a length it won't hit.
+      return { baseSec, amountSec: h / lastFps, wholeSec, exact: total === wantFrames }
+    }
+  }
+  return { baseSec, amountSec: maxHoldFrames / lastFps, wholeSec, exact: false }
 }
 
 // How much SOURCE footage a trim to [newIn, newOut] removes from this clip.
