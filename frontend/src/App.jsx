@@ -28,10 +28,11 @@ import ReformatPanel from './components/ReformatPanel'
 import LogPanel from './components/LogPanel'
 import ProjectLibrary from './components/ProjectLibrary'
 import AboutDialog from './components/AboutDialog'
+import FootageLossDialog from './components/FootageLossDialog'
 import FfmpegCustomSettings from './components/FfmpegCustomSettings'
 import Timeline from './components/Timeline/Timeline'
 import { clipBaseSec, roundUpAmount, clampNoiseGainDb, normalizeBeds, bedLaneEndSec, bedInSec, fuseGroups } from './clipMath'
-import { loadTrackTags, tagTrack, renameTrackTag, isAudioFile } from './fileList'
+import { loadTrackTags, tagTrack, renameTrackTag, isAudioFile, loadHideFootageLossWarning, saveHideFootageLossWarning } from './fileList'
 import { analyzeAgainstV1, batchCutAgainstV1, reconstructFromV1, sequencePieces } from './analyzeMath'
 import { mergeExportPresets } from './exportPresets'
 import { matchOverlays } from './overlayMatch'
@@ -41,6 +42,12 @@ const MIN_RIGHT_PANEL = 260
 const MAX_RIGHT_PANEL = 720
 const MIN_LEFT_PANEL = 180
 const MAX_LEFT_PANEL = 560
+
+// Below this, a V1 trim isn't a decision anyone made — an edge drag converts
+// screen pixels to seconds, so a single stray pointermove can shave a fraction
+// of a frame off a clip. Warning about that would train the user to dismiss the
+// popup without reading it, which is the only way this warning can fail.
+const MIN_LOSS_SEC = 0.02
 
 // The app's version, from `VERSION` at the repo root — the single source of
 // truth (see CLAUDE.md). vite.config puts it on Vite's env channel, which is
@@ -325,6 +332,69 @@ function AppInner() {
   const setActiveClips = focusedTrack === 2 ? setTrack2Clips : setTimelineClips
   const activeSelectedClip = focusedTrack === 2 ? selectedClip2 : selectedClip
   const setActiveSelectedId = focusedTrack === 2 ? setSelectedId2 : setSelectedId
+
+  // ---------- V1 footage-loss warning ----------
+  // A V1 trim or delete drops source footage from the sequence, and V2's
+  // Reconstruct can only rebuild what a V1 render CONTAINS — so those frames are
+  // gone for good. Warn once, at the moment it happens, while Cmd+Z is still an
+  // easy way back. Payload for the dialog; null when it's closed.
+  const [footageLoss, setFootageLoss] = useState(null)
+  // Refs, not state, on purpose: an edge drag calls the reporter on every
+  // pointermove, and none of this bookkeeping should cost a re-render.
+  //   shownThisSessionRef — the "once per session" half. Resets on reload, so a
+  //     new session warns again even without the persisted pref.
+  //   hideForeverRef      — the "don't show again" pref, read from localStorage
+  //     once rather than on every pointermove.
+  //   pendingLossRef      — the current gesture's running total.
+  const shownThisSessionRef = useRef(false)
+  const hideForeverRef = useRef(loadHideFootageLossWarning())
+  const pendingLossRef = useRef(null)
+
+  // `deltaSec` is SIGNED source seconds (see clipMath.trimLossSec): positive
+  // dropped footage, negative brought it back. Summing the signed deltas across
+  // one gesture is what makes a drag pulled inward and then back out past its
+  // start silent — no snapshot of the pre-drag window is needed.
+  //
+  // TIMING: TimelineClip's edge drag fires onTrim on every pointermove and has
+  // no commit-on-release callback, so showing the dialog straight from the first
+  // narrowing move would drop a modal into the middle of the user's drag. With a
+  // `gesture` token we therefore accumulate and settle up on the pointerup that
+  // ends that drag. Without one (× button, EDL row, Delete key, TrimForm Apply)
+  // there is no gesture to wait out, so it fires immediately.
+  const handleFootageLoss = useCallback(({ deltaSec, gesture, sourceName }) => {
+    if (shownThisSessionRef.current || hideForeverRef.current) return
+    if (!Number.isFinite(deltaSec)) return
+
+    function settle() {
+      const p = pendingLossRef.current
+      pendingLossRef.current = null
+      if (!p || p.sumSec <= MIN_LOSS_SEC) return
+      // Latch before showing: the settling pointerup and a queued render can
+      // otherwise both get here and stack two identical dialogs.
+      shownThisSessionRef.current = true
+      setFootageLoss({ lostSec: p.sumSec, sourceName: p.sourceName })
+    }
+
+    const p = pendingLossRef.current
+    if (gesture != null && p && p.gesture === gesture) {
+      p.sumSec += deltaSec
+      return  // listener from the first report of this gesture is still armed
+    }
+    pendingLossRef.current = { gesture: gesture ?? null, sumSec: deltaSec, sourceName }
+    if (gesture == null) {
+      settle()
+      return
+    }
+    document.addEventListener('pointerup', settle, { once: true })
+  }, [])
+
+  function handleFootageLossClose(dontShowAgain) {
+    if (dontShowAgain) {
+      hideForeverRef.current = true
+      saveHideFootageLossWarning(true)
+    }
+    setFootageLoss(null)
+  }
 
   // Persistent notices from Analyze (e.g. V1's cut points running past the
   // end of the file dropped on V2) — kept separate from the derived
@@ -1311,13 +1381,13 @@ function AppInner() {
       // Match the Save button's own disabled/blocked conditions exactly, so
       // the shortcut is never a second path to something the button won't do.
       if (timelineClips.length === 0) return
-      if (showRenderDialog || showLibrary || showAbout || showFfmpegSettings) return
+      if (showRenderDialog || showLibrary || showAbout || showFfmpegSettings || footageLoss) return
       savingRef.current = true
       Promise.resolve(saveRef.current?.()).finally(() => { savingRef.current = false })
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [timelineClips.length, showRenderDialog, showLibrary, showAbout, showFfmpegSettings])
+  }, [timelineClips.length, showRenderDialog, showLibrary, showAbout, showFfmpegSettings, footageLoss])
 
   function handleLibraryOpen(name, project) {
     // One reset for all three lanes, so the freshly-loaded project starts with
@@ -1472,7 +1542,10 @@ function AppInner() {
       <div className="w-px h-3.5 bg-neutral-700" />
       <HoldFrameForm clips={activeClips} setClips={setActiveClips} />
       <div className="w-px h-3.5 bg-neutral-700" />
-      <TrimForm selectedClip={activeSelectedClip} setClips={setActiveClips} displayMode={timeDisplayMode} />
+      {/* onFootageLoss gated on V1: this form writes through setActiveClips, so
+          it edits whichever lane is focused, and only V1's losses cost anything. */}
+      <TrimForm selectedClip={activeSelectedClip} setClips={setActiveClips} displayMode={timeDisplayMode}
+        onFootageLoss={focusedTrack === 1 ? handleFootageLoss : null} />
       <div className="w-px h-3.5 bg-neutral-700" />
       <DuplicateButton selectedClip={activeSelectedClip} clips={activeClips} setClips={setActiveClips} onSelectId={setActiveSelectedId} />
       <div className="w-px h-3.5 bg-neutral-700" />
@@ -1804,6 +1877,7 @@ function AppInner() {
                   noiseEnabled={noiseEnabled}
                   barSlot={timelineBarSlot}
                   toolbar={editToolbar}
+                  onFootageLoss={handleFootageLoss}
                 />
               </div>
             )}
@@ -1843,6 +1917,14 @@ function AppInner() {
       </div>
 
       {showAbout && <AboutDialog onClose={() => setShowAbout(false)} />}
+
+      {footageLoss && (
+        <FootageLossDialog
+          lostSec={footageLoss.lostSec}
+          sourceName={footageLoss.sourceName}
+          onClose={handleFootageLossClose}
+        />
+      )}
 
       {showFfmpegSettings && (
         <FfmpegCustomSettings

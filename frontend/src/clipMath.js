@@ -28,6 +28,29 @@ export function sequenceBaseSec(clips) {
   return clips.reduce((sum, c) => sum + clipBaseSec(c), 0)
 }
 
+// How much SOURCE footage a trim to [newIn, newOut] removes from this clip.
+// SIGNED on purpose: positive means footage left the sequence, negative means a
+// widened window brought footage back. The sign is what lets a caller sum the
+// dozens of pointermove updates in one edge drag and learn the NET result — a
+// drag pulled inward and then back out past its start cancels to ~0, so nothing
+// has to snapshot the window at gesture start.
+//
+// Source seconds, NOT timeline seconds: speed stretches what a window occupies
+// on the timeline but changes no frame's existence, so clipMainSec's /speed
+// would report a 0.5-speed clip as losing twice what it lost. Never interchange
+// the two here.
+export function trimLossSec(clip, newIn, newOut) {
+  return (newIn - clip.inSec) + (clip.outSec - newOut)
+}
+
+// Deleting a clip drops its whole source window. Slight over-report when an
+// identical duplicate clip elsewhere in the sequence still covers the same
+// range; correcting that needs a union across every clip on the track on every
+// edit, which is not worth it for an advisory number (see the warning's plan).
+export function deleteLossSec(clip) {
+  return Math.max(0, clip.outSec - clip.inSec)
+}
+
 export function clipHeadPx(clip, pps) {
   return (clip.headHoldSec || 0) * pps
 }

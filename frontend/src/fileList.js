@@ -97,6 +97,33 @@ function saveTrackTags(tags) {
   }
 }
 
+// "Don't show this again" for the V1 footage-loss warning — the popup that
+// explains why Reconstruct cannot recover trimmed or deleted footage. Lives
+// beside the other persisted UI prefs above rather than in its own module: this
+// file is already where localStorage is spoken, and a second storage mechanism
+// for one boolean would be the wrong call. Absent the flag the warning still
+// only fires once per session, so the pref only ever silences it further.
+const HIDE_FOOTAGE_LOSS_KEY = 'nara-hide-footage-loss-warning'
+
+export function loadHideFootageLossWarning() {
+  try {
+    return localStorage.getItem(HIDE_FOOTAGE_LOSS_KEY) === '1'
+  } catch {
+    // localStorage unavailable (e.g. private mode) — fall back to warning once
+    // per session, which is the sane degradation rather than never warning.
+    return false
+  }
+}
+
+export function saveHideFootageLossWarning(hide) {
+  try {
+    if (hide) localStorage.setItem(HIDE_FOOTAGE_LOSS_KEY, '1')
+    else localStorage.removeItem(HIDE_FOOTAGE_LOSS_KEY)
+  } catch {
+    // localStorage unavailable — the choice just won't outlive this session.
+  }
+}
+
 // Stamp `name` with `track` ('v1' | 'v2') if not already tagged, persisting
 // the result. Returns a new tags object, or the same object unchanged (and
 // no write) when the tag was already present — so callers can skip a

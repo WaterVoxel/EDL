@@ -10,7 +10,7 @@ import TransportBar from './TransportBar'
 import { useMedia } from '../../context/MediaContext'
 import { probe } from '../../api'
 import { useTimelinePlayback } from '../../hooks/useTimelinePlayback'
-import { clipTotalSec, clipTotalPx, clipHeadPx, clipMainPx, clipTailPx, clipRoundPx, clipMainSec, clipSpeed, sanitizeHoldPlacement, timelinePosToPx, sequenceVideoStartSec, clipStartSec, moveClip, dropTargetIndex, fuseGroups, fuseGroupIds } from '../../clipMath'
+import { clipTotalSec, clipTotalPx, clipHeadPx, clipMainPx, clipTailPx, clipRoundPx, clipMainSec, clipSpeed, sanitizeHoldPlacement, timelinePosToPx, sequenceVideoStartSec, clipStartSec, moveClip, dropTargetIndex, fuseGroups, fuseGroupIds, trimLossSec, deleteLossSec } from '../../clipMath'
 import { addKeyframe, removeNearestKeyframe, sampleCropOrigin, clipTFromTimelinePos, retimeKeyframesForTrim } from '../../cropAnimation'
 
 const PPS = 60
@@ -49,6 +49,10 @@ export default function Timeline({
   audioBeds = [], onAddToA1, onRemoveBed, a1Visible = true, onToggleA1,
   selectedBedIndex = null, onSelectBed, laneClockRef = null, timelineSeekRef = null,
   a1Muted = false, noiseEnabled = false,
+  // Called from V1's trim and delete with the SIGNED source seconds the edit
+  // removes; null disables the report entirely. V1 only — V2 is a reconstruct's
+  // destination, not its input, so footage dropped there costs nothing.
+  onFootageLoss = null,
   // The two halves of the bar swap, so each one is rendered where the other
   // used to be: `toolbar` is App.jsx's clip edit row, handed down as a node
   // and drawn as this card's first row; `barSlot` is the DOM element up in
@@ -384,7 +388,17 @@ export default function Timeline({
   // `gesture` arrives from TimelineClip's edge drag and folds that drag's whole
   // stream of pointermove updates into one undo step. Undefined for any other
   // caller, which then behaves as a normal single edit.
+  //
+  // V1 only: reports how much source footage this trim removes, because footage
+  // V1 drops is footage V2's Reconstruct can never recover (see App's
+  // handleFootageLoss). Measured against the CURRENT `clips` prop rather than
+  // inside the updater — an updater must stay pure, and StrictMode double-runs
+  // it, which would double-count every pointermove.
   function handleTrim(id, inSec, outSec, gesture) {
+    if (onFootageLoss) {
+      const c = clips.find(x => x.id === id)
+      if (c) onFootageLoss({ deltaSec: trimLossSec(c, inSec, outSec), gesture, sourceName: c.sourceName })
+    }
     setClips(prev => prev.map(c => c.id === id ? trimClip(c, inSec, outSec) : c), { coalesce: gesture })
   }
 
@@ -394,6 +408,14 @@ export default function Timeline({
   }
 
   function handleDelete(id) {
+    // The one V1 delete path — the × button, the EDL row's delete and the
+    // Delete/Backspace key (via handleDeleteSelected) all land here, so the
+    // footage-loss report only needs writing once. No gesture: there is no drag
+    // to wait out, so App shows the warning immediately.
+    if (onFootageLoss) {
+      const c = clips.find(x => x.id === id)
+      if (c) onFootageLoss({ deltaSec: deleteLossSec(c), gesture: null, sourceName: c.sourceName })
+    }
     // Removing a clip changes the rendered sequence even though the
     // remaining clips themselves are unedited, so mark them dirty too.
     setClips(prev => sanitizeHoldPlacement(

@@ -15,6 +15,33 @@ the day the version file appeared. There are no tags for them and never will be 
 `v0.25.0` is the first real tag. Treat the older entries as a history, not a
 download list.
 
+## 0.26.0 — 2026-08-24
+
+**A warning when a V1 edit throws footage away for good**
+
+Reconstruct on V2 can only rebuild what a V1 render actually contains. Footage
+you trim off or delete is never written to the file, so there is nothing left for
+it to restore from — and until now the app said nothing about it until you tried
+to reconstruct and got back less than you expected.
+
+Narrowing a V1 clip's trim or deleting a V1 clip now raises a short popup saying
+how many seconds of which file just left the sequence, and why Reconstruct can't
+get them back. It's informational: the edit stands, one OK dismisses it, and
+Cmd+Z still undoes the edit if you changed your mind.
+
+It appears **once per session** — trimming is the most common thing you do here,
+so a popup on every trim would just be noise — and there's a **Don't show this
+again** checkbox if you don't want it at all.
+
+Deliberately quiet about things that don't lose footage: moving clips, splitting
+them, deleting a hold segment, widening a trim, or Reset. Dragging an edge inward
+and back out again nets to nothing and stays silent too. V2 edits never warn —
+V2 is where a reconstruction lands, not what it's built from.
+
+Speed and crop changes are equally impossible for Reconstruct to undo, but they
+aren't something you do by accident, and Reconstruct already reports both in its
+own log, so they don't trigger the popup.
+
 ## 0.25.0 — 2026-08-21
 
 **V2 Reconstruct now reverses clip moves**

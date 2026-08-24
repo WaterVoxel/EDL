@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import NumericStepper from './NumericStepper'
 import { retimeKeyframesForTrim } from '../cropAnimation'
+import { trimLossSec } from '../clipMath'
 
 // Formats/parses a source-time value in whichever unit the shared
 // timecode/frames toggle (TransportBar) is currently set to, so Trim's
@@ -14,7 +15,10 @@ function fromDisplay(value, mode, fps) {
   return mode === 'frames' ? n / fps : n
 }
 
-export default function TrimForm({ selectedClip, setClips, displayMode = 'timecode' }) {
+// `onFootageLoss` is null unless V1 is the focused track: this form writes
+// through `setActiveClips`, so it edits whichever lane has focus, and only V1's
+// losses matter to Reconstruct. App.jsx does that gating.
+export default function TrimForm({ selectedClip, setClips, displayMode = 'timecode', onFootageLoss = null }) {
   const [inVal, setInVal] = useState('')
   const [outVal, setOutVal] = useState('')
   const fps = selectedClip?.fps || 24
@@ -36,6 +40,18 @@ export default function TrimForm({ selectedClip, setClips, displayMode = 'timeco
     if (Number.isNaN(newIn) || Number.isNaN(newOut)) return
     const clampedIn = Math.max(0, Math.min(newIn, selectedClip.sourceDurationSec - 0.1))
     const clampedOut = Math.min(selectedClip.sourceDurationSec, Math.max(newOut, clampedIn + 0.1))
+    // Report against the CLAMPED values, so the number the warning shows is the
+    // footage actually dropped rather than what was typed. No gesture token:
+    // this is one discrete Apply, not a drag, so App warns immediately.
+    // `reset()` needs no equivalent — widening back to the full source produces
+    // a negative delta, which is silent by construction.
+    if (onFootageLoss) {
+      onFootageLoss({
+        deltaSec: trimLossSec(selectedClip, clampedIn, clampedOut),
+        gesture: null,
+        sourceName: selectedClip.sourceName,
+      })
+    }
     // Crop keyframes are indexed from inSec, so a trim has to rebase them —
     // see cropAnimation.retimeKeyframesForTrim (an out-of-range keyframe
     // makes Render fail validation outright).
