@@ -84,3 +84,5 @@ Terms a new engineer needs before touching this codebase.
 - **PPS** — pixels per second (60) for timeline layout math (`clipMainPx` etc. in `clipMath.js`).
 
 - **Media Bin / Exports** — left panel = source files in `input/`; right panel = rendered files in the export dir. Both have localStorage favorites, filter, and sort (`fileList.js`, keys `nara-favorites-<dir>`).
+
+- **Bin folder** — a grouping of Media Bin files, and **not a directory**. `input/` stays flat; the folder is a label held in localStorage as `{ [folderName]: [filename] }` (`nara-bin-folders`), so a file's identity never changes when it's filed. That is the whole point: a clip resolves its media by bare filename, so a real subdirectory would be a rename, and renames are refused while the timeline points at a file. Virtual folders mean even an in-use file can be organised. Cost: invisible in Finder, per-browser, and not carried in a `.nara`. Exports has none — only the bin.

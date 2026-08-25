@@ -700,7 +700,12 @@ export default function AboutDialog({ onClose }) {
               picker · right-click <strong>Rename</strong>, <strong>Show destination</strong> and{' '}
               <strong>Delete</strong> in both media bins (renaming is blocked while a clip on the
               timeline — or the A1 bed — still points at that file) · favorites, sorting, and
-              filtering in both media panels.
+              filtering in both media panels · <strong>folders in the Media Bin</strong>: drag a file
+              onto one to file it, drag it out to the top level again. They group the bin rather than
+              moving anything — <code>input/</code> stays flat, so filing a file can never break a
+              clip that points at it, and you can organise a file V1 is using right now. The
+              trade-off is that they don't show up in Finder and are remembered per browser, like
+              favorites are.
             </p>
           </Section>
 

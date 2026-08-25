@@ -4,7 +4,12 @@ import { useMedia } from '../context/MediaContext'
 import ClearButton from './ClearButton'
 import Dropzone from './Dropzone'
 import SortFilterBar from './SortFilterBar'
-import { loadFavorites, toggleFavorite, renameFavorite, sortFiles, filterFiles, filterByTrack } from '../fileList'
+import {
+  loadFavorites, toggleFavorite, renameFavorite,
+  loadBinFolders, createBinFolder, renameBinFolder, deleteBinFolder,
+  moveToBinFolder, folderOfFile, renameBinFolderFile, buildBinRows,
+  DEFAULT_FOLDER_NAME,
+} from '../fileList'
 
 const TRACK_FILTERS = [
   { key: 'all', label: 'All' },
@@ -12,6 +17,30 @@ const TRACK_FILTERS = [
   { key: 'v2', label: 'V2' },
   { key: 'a1', label: 'A1' },
 ]
+
+// Stroked 24-grid icons in the house style (see FrameGrabButtons) rather than a
+// glyph, because ▶ and ★ next to a 📁 emoji would read as three different eras.
+function FolderIcon({ plus = false }) {
+  return (
+    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3.5 6.5a1.8 1.8 0 0 1 1.8-1.8h3.3a1.8 1.8 0 0 1 1.4.7l1.1 1.4h7.2a1.8 1.8 0 0 1 1.8 1.8v8.7a1.8 1.8 0 0 1-1.8 1.8H5.3a1.8 1.8 0 0 1-1.8-1.8V6.5Z" />
+      {plus && <path d="M12 10.8v5" />}
+      {plus && <path d="M9.5 13.3h5" />}
+    </svg>
+  )
+}
+
+function ChevronIcon({ open }) {
+  return (
+    <svg
+      viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor"
+      strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"
+      className={`transition-transform ${open ? 'rotate-90' : ''}`}
+    >
+      <path d="M9 5.5l7 6.5-7 6.5" />
+    </svg>
+  )
+}
 
 // `inUseNames` is the set of source filenames the timeline currently points at
 // (V1 + V2 clips and the A1 bed), passed down from App.jsx because it owns
@@ -31,8 +60,29 @@ export default function MediaLibrary({ files, trackTags = {}, inUseNames = null,
   // files sticky-tagged for that track — see fileList.filterByTrack).
   const [trackFilter, setTrackFilter] = useState('all')
   const [selectedName, setSelectedName] = useState(null)
-  // Right-click context menu: {name, x, y} in viewport coords, or null.
+  // Right-click context menu: {kind: 'file'|'folder'|'empty', name, x, y} in
+  // viewport coords, or null. `name` is null for 'empty'.
   const [menu, setMenu] = useState(null)
+  // Bin folders: { [folderName]: [filename] }. A grouping over input/, not
+  // directories on disk — see fileList.js for why that distinction matters.
+  const [folders, setFolders] = useState(() => loadBinFolders())
+  // Which folders are shut. Collapse is view state, not a preference: unlike
+  // favorites and the folders themselves it isn't persisted, so a reload opens
+  // everything. The panel stays mounted for the session, so it survives
+  // everything short of that.
+  const [collapsed, setCollapsed] = useState(() => new Set())
+  // The folder whose name is being edited inline, or null.
+  const [editingFolder, setEditingFolder] = useState(null)
+  // Escape has to cancel an edit, but removing the focused input also blurs it,
+  // and blur is what commits. A ref (not state) so the blur handler firing in
+  // the same tick sees the flag.
+  const cancelEditRef = useRef(false)
+  // The file being dragged, or null when no internal drag is in flight. Doubles
+  // as the "this is our drag, not an OS file drop" test — an internal drag
+  // carries no dataTransfer items, so there is nothing on the event to read.
+  const [dragName, setDragName] = useState(null)
+  // Folder under the cursor mid-drag; null means the top level.
+  const [dropFolder, setDropFolder] = useState(null)
 
   useEffect(() => { setFavorites(loadFavorites('input')) }, [])
 
@@ -63,10 +113,22 @@ export default function MediaLibrary({ files, trackTags = {}, inUseNames = null,
     setFavorites(toggleFavorite('input', name, favorites))
   }
 
-  const visible = sortFiles(
-    filterByTrack(filterFiles(files, query), trackFilter, trackTags),
-    favorites, sortBy, sortDir
-  )
+  // One flat row list — folder rows and file rows interleaved in display order.
+  // All of the sorting and both filters still happen in fileList, applied within
+  // each folder as well as at the top level.
+  const rows = buildBinRows({ files, folders, favorites, query, trackFilter, trackTags, sortBy, sortDir, collapsed, pinnedFolder: editingFolder })
+  // The files the arrow keys can reach: rows only, in the order shown, so the
+  // walk skips folder rows and anything inside a collapsed folder.
+  const visible = rows.filter(r => r.type === 'file').map(r => r.file)
+  // Highlight the list as a drop target only when dropping there would actually
+  // move something — dragging a top-level file around the top level shouldn't
+  // light anything up.
+  const rootDropActive = Boolean(dragName) && dropFolder === null && folderOfFile(dragName, folders) !== null
+  // Mirrors buildBinRows' own `filtering` test. A filter forces every folder
+  // open — a match inside a shut folder would be unreachable — which means the
+  // collapse control genuinely can't act, so it's shown disabled rather than
+  // left as a button that does nothing.
+  const foldersForcedOpen = Boolean(query) || trackFilter !== 'all'
 
   // Move the selection up/down through the currently-visible (filtered +
   // sorted) list and preview the newly-selected file. Wraps at neither end;
@@ -82,6 +144,10 @@ export default function MediaLibrary({ files, trackTags = {}, inUseNames = null,
   }
 
   function handleKeyDown(e) {
+    // The folder-rename input is inside this list, so its keystrokes bubble
+    // here. Backspace while naming a folder would otherwise delete the selected
+    // FILE off disk.
+    if (e.target.tagName === 'INPUT') return
     if (e.key === 'ArrowDown') { e.preventDefault(); moveSelection(1) }
     else if (e.key === 'ArrowUp') { e.preventDefault(); moveSelection(-1) }
     else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedName) {
@@ -91,8 +157,88 @@ export default function MediaLibrary({ files, trackTags = {}, inUseNames = null,
 
   function handleContextMenu(e, name) {
     e.preventDefault()
+    e.stopPropagation()
     selectFile(name)
-    setMenu({ name, x: e.clientX, y: e.clientY })
+    setMenu({ kind: 'file', name, x: e.clientX, y: e.clientY })
+  }
+
+  // --- Folders ------------------------------------------------------------
+
+  function setFolderOpen(name, open) {
+    setCollapsed(prev => {
+      if (open === !prev.has(name)) return prev
+      const next = new Set(prev)
+      if (open) next.delete(name)
+      else next.add(name)
+      return next
+    })
+  }
+
+  function handleNewFolder() {
+    setMenu(null)
+    const { folders: next, name } = createBinFolder(DEFAULT_FOLDER_NAME, folders)
+    setFolders(next)
+    // Open (a folder of this name may have been collapsed, removed and remade)
+    // and go straight into rename mode, so the folder gets named in the same
+    // gesture that created it rather than needing a second click.
+    setFolderOpen(name, true)
+    setEditingFolder(name)
+  }
+
+  function commitFolderName(oldName, value) {
+    setEditingFolder(null)
+    if (cancelEditRef.current) { cancelEditRef.current = false; return }
+    const { folders: next, name } = renameBinFolder(oldName, value, folders)
+    if (next === folders) return
+    setFolders(next)
+    // Carry the collapse state across so a renamed folder doesn't spring open.
+    setCollapsed(prev => {
+      if (!prev.has(oldName)) return prev
+      const s = new Set(prev)
+      s.delete(oldName)
+      s.add(name)
+      return s
+    })
+  }
+
+  function handleRemoveFolder(name) {
+    setMenu(null)
+    // Counted against what's actually in input/, not against the stored
+    // assignments — a file deleted from the bin leaves its assignment behind,
+    // and the confirm must say the same number the folder row shows.
+    const count = (folders[name] || []).filter(n => files.some(f => f.name === n)).length
+    // Nothing leaves input/ — only the grouping goes — so this doesn't warrant
+    // the same warning file Delete gets, just a heads-up when files are inside.
+    if (count > 0 && !window.confirm(`Remove the folder "${name}"? Its ${count} file${count === 1 ? '' : 's'} go back to the top level. Nothing is deleted from input/.`)) return
+    setFolders(deleteBinFolder(name, folders))
+  }
+
+  // --- Dragging a file between folders ------------------------------------
+  // HTML5 drag events, following the timeline's clip reorder (TimelineClip.jsx)
+  // rather than conventions.md's pointer-listener idiom: this is a drag between
+  // list rows, which is what the native API is for, and the two need to look
+  // and feel the same.
+
+  // `dragName` gates every handler so an OS file drop passing over the list is
+  // left entirely to Dropzone — we never preventDefault on someone else's drag.
+  function handleRowDragOver(e, folder) {
+    if (!dragName) return
+    e.preventDefault()
+    e.stopPropagation()
+    e.dataTransfer.dropEffect = 'move'
+    if (folder !== dropFolder) setDropFolder(folder)
+  }
+
+  function handleRowDrop(e, folder) {
+    if (!dragName) return
+    e.preventDefault()
+    e.stopPropagation()
+    setFolders(moveToBinFolder(dragName, folder, folders))
+    // Dropping into a collapsed folder would swallow the file with no sign it
+    // arrived anywhere.
+    if (folder) setFolderOpen(folder, true)
+    setDragName(null)
+    setDropFolder(null)
   }
 
   async function handleShowDestination(name) {
@@ -121,10 +267,11 @@ export default function MediaLibrary({ files, trackTags = {}, inUseNames = null,
     if (!trimmed || trimmed === stem) return
     const result = await renameFile(name, trimmed, 'input')
     if (result.error) { alert('Rename failed: ' + result.error); return }
-    // Both sticky per-file states are keyed by filename, so carry them over:
-    // the ★ belongs to this component, the track tag to App.jsx (onRenamed,
-    // which also refreshes the list from disk).
+    // Every sticky per-file state is keyed by filename, so carry them over: the
+    // ★ and the bin folder belong to this component, the track tag to App.jsx
+    // (onRenamed, which also refreshes the list from disk).
     setFavorites(renameFavorite('input', name, result.name, favorites))
+    setFolders(renameBinFolderFile(name, result.name, folders))
     // Keep the preview/Media Info In on the same file under its new name.
     if (name === selectedName) selectFile(result.name)
     onRenamed?.(name, result.name)
@@ -177,6 +324,13 @@ export default function MediaLibrary({ files, trackTags = {}, inUseNames = null,
         <div className="shrink-0 flex items-center justify-between px-2 py-1 border-b border-neutral-800">
           <span className="text-[9px] font-semibold uppercase tracking-wide text-neutral-500">Media Bin ({files.length})</span>
           <div className="flex items-center gap-1">
+            <button
+              onClick={handleNewFolder}
+              title="New folder — groups files in the bin. Nothing moves in input/."
+              className="px-1 py-0.5 rounded border border-neutral-700 text-neutral-500 hover:text-indigo-300 hover:border-indigo-500 flex items-center"
+            >
+              <FolderIcon plus />
+            </button>
             <ClearButton
               label="Clear"
               confirmText="Delete all files in input/? This cannot be undone."
@@ -206,38 +360,106 @@ export default function MediaLibrary({ files, trackTags = {}, inUseNames = null,
           ))}
         </div>
         {/* tabIndex makes the list focusable so Arrow Up/Down (and Delete)
-            reach handleKeyDown; clicking a file focuses it via the list. */}
+            reach handleKeyDown; clicking a file focuses it via the list.
+            The list itself is the top-level drop target: folder and file rows
+            stop propagation so whichever row is under the cursor wins, and
+            anything else — including the empty stretch below the last row —
+            falls through to here and means "out of every folder". */}
         <ul
           ref={listRef}
           tabIndex={0}
           onKeyDown={handleKeyDown}
-          className="flex-1 min-h-0 overflow-y-auto divide-y divide-neutral-800 outline-none focus:ring-1 focus:ring-inset focus:ring-indigo-700/50"
+          onContextMenu={e => { e.preventDefault(); setMenu({ kind: 'empty', name: null, x: e.clientX, y: e.clientY }) }}
+          onDragOver={e => handleRowDragOver(e, null)}
+          onDrop={e => handleRowDrop(e, null)}
+          className={`flex-1 min-h-0 overflow-y-auto divide-y divide-neutral-800 outline-none ${
+            rootDropActive ? 'ring-1 ring-inset ring-indigo-400' : 'focus:ring-1 focus:ring-inset focus:ring-indigo-700/50'
+          }`}
         >
-          {visible.map(f => (
+          {rows.map(row => row.type === 'folder' ? (
             <li
-              key={f.name}
-              onContextMenu={e => handleContextMenu(e, f.name)}
-              className={`flex items-center justify-between gap-1.5 px-2 py-1 text-[11px] ${f.name === selectedName ? 'bg-indigo-900/40 text-indigo-300' : 'hover:bg-neutral-800/70'}`}
+              key={`folder:${row.name}`}
+              onContextMenu={e => { e.preventDefault(); e.stopPropagation(); setMenu({ kind: 'folder', name: row.name, x: e.clientX, y: e.clientY }) }}
+              onDragOver={e => handleRowDragOver(e, row.name)}
+              onDrop={e => handleRowDrop(e, row.name)}
+              className={`flex items-center gap-1.5 px-2 py-1 text-[11px] ${
+                dragName && dropFolder === row.name
+                  ? 'bg-indigo-900/40 ring-1 ring-inset ring-indigo-400'
+                  : 'hover:bg-neutral-800/70'
+              }`}
             >
               <button
-                onClick={() => handleToggleFavorite(f.name)}
+                onClick={() => setFolderOpen(row.name, !row.open)}
+                disabled={foldersForcedOpen}
+                title={foldersForcedOpen ? 'Folders stay open while a filter is active' : row.open ? 'Collapse' : 'Expand'}
+                className="shrink-0 w-3 h-4 flex items-center justify-center text-neutral-500 enabled:hover:text-neutral-300 disabled:opacity-40"
+              ><ChevronIcon open={row.open} /></button>
+              <span className="shrink-0 text-neutral-500"><FolderIcon /></span>
+              {editingFolder === row.name ? (
+                /* Mounted straight into edit mode by handleNewFolder, so a new
+                   folder is named in one gesture. Enter blurs (blur commits),
+                   Escape cancels via the ref, and keystrokes are stopped here so
+                   Backspace never reaches the list's own key handler. */
+                <input
+                  autoFocus
+                  defaultValue={row.name}
+                  onFocus={e => e.target.select()}
+                  onKeyDown={e => {
+                    e.stopPropagation()
+                    if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur() }
+                    else if (e.key === 'Escape') { e.preventDefault(); cancelEditRef.current = true; setEditingFolder(null) }
+                  }}
+                  onBlur={e => commitFolderName(row.name, e.target.value)}
+                  className="flex-1 min-w-0 px-1 py-0 text-[9px] rounded bg-neutral-950 border border-indigo-500 text-neutral-200 outline-none"
+                />
+              ) : (
+                <button
+                  onClick={() => { if (!foldersForcedOpen) setFolderOpen(row.name, !row.open) }}
+                  onDoubleClick={() => setEditingFolder(row.name)}
+                  title={foldersForcedOpen ? 'Double-click to rename' : 'Click to open or close, double-click to rename'}
+                  className="flex-1 min-w-0 text-left"
+                ><span className="block truncate text-[9px] text-neutral-300">{row.name}</span></button>
+              )}
+              <span className="shrink-0 text-[9px] text-neutral-600">{row.count}</span>
+            </li>
+          ) : (
+            <li
+              key={`file:${row.folder ?? ''}/${row.file.name}`}
+              onContextMenu={e => handleContextMenu(e, row.file.name)}
+              // Drag to file away; a file row reports its own container, so
+              // dropping onto a file inside a folder means that folder.
+              draggable
+              onDragStart={e => { e.dataTransfer.effectAllowed = 'move'; setDragName(row.file.name); setDropFolder(row.folder) }}
+              // Fires even on an abandoned drag (Esc, or a drop outside the
+              // list), which is what clears the indicator.
+              onDragEnd={() => { setDragName(null); setDropFolder(null) }}
+              onDragOver={e => handleRowDragOver(e, row.folder)}
+              onDrop={e => handleRowDrop(e, row.folder)}
+              className={`flex items-center justify-between gap-1.5 py-1 text-[11px] ${row.folder ? 'pl-7 pr-2' : 'px-2'} ${
+                dragName === row.file.name ? 'opacity-40' : ''
+              } ${row.file.name === selectedName ? 'bg-indigo-900/40 text-indigo-300' : 'hover:bg-neutral-800/70'}`}
+            >
+              <button
+                onClick={() => handleToggleFavorite(row.file.name)}
                 title="Favorite"
-                className={`shrink-0 text-[11px] ${favorites.has(f.name) ? 'text-amber-400' : 'text-neutral-600 hover:text-neutral-400'}`}
+                className={`shrink-0 text-[11px] ${favorites.has(row.file.name) ? 'text-amber-400' : 'text-neutral-600 hover:text-neutral-400'}`}
               >★</button>
               <button
-                onClick={() => { handleClick(f.name); listRef.current?.focus() }}
+                onClick={() => { handleClick(row.file.name); listRef.current?.focus() }}
                 className="flex-1 flex items-center gap-1.5 min-w-0 text-left"
               >
                 <span className="w-4 h-4 shrink-0 rounded bg-neutral-700 flex items-center justify-center text-[8px] text-neutral-400">▶</span>
-                <span className={`truncate text-[9px] ${f.name === selectedName ? 'text-indigo-300' : 'text-neutral-300'}`}>{f.name}</span>
+                <span className={`truncate text-[9px] ${row.file.name === selectedName ? 'text-indigo-300' : 'text-neutral-300'}`}>{row.file.name}</span>
               </button>
               <button
-                onClick={() => onAddToTimeline(f.name)}
+                onClick={() => onAddToTimeline(row.file.name)}
                 title="Add to timeline"
                 className="shrink-0 w-4 h-4 flex items-center justify-center rounded bg-neutral-700 text-neutral-400 hover:text-neutral-200 text-[11px] leading-none"
               >+</button>
             </li>
           ))}
+          {/* Counts files, not rows — an empty folder is a row, but the bin is
+              still empty and should say so. */}
           {visible.length === 0 && (
             <li className="px-2 py-2 text-[11px] text-neutral-600 text-center">
               {files.length === 0
@@ -259,22 +481,63 @@ export default function MediaLibrary({ files, trackTags = {}, inUseNames = null,
           onPointerDown={e => e.stopPropagation()}
           className="fixed z-50 min-w-32 rounded-md border border-neutral-700 bg-neutral-900 shadow-xl py-1 text-[11px]"
         >
+          {menu.kind === 'file' && (
+            <>
+              <button
+                onClick={() => handleRename(menu.name)}
+                title="Rename the file in input/ (blocked while it's on the timeline)"
+                className="block w-full text-left px-3 py-1 text-neutral-200 hover:bg-neutral-800"
+              >Rename</button>
+              <button
+                onClick={() => handleShowDestination(menu.name)}
+                title="Reveal the file in Finder"
+                className="block w-full text-left px-3 py-1 text-neutral-200 hover:bg-neutral-800"
+              >Show destination</button>
+              {/* The keyboard-and-menu way out of a folder, so a mis-drop doesn't
+                  need a second precise drag to undo. */}
+              {folderOfFile(menu.name, folders) && (
+                <button
+                  onClick={() => { setMenu(null); setFolders(moveToBinFolder(menu.name, null, folders)) }}
+                  title="Move this file back to the top level of the bin"
+                  className="block w-full text-left px-3 py-1 text-neutral-200 hover:bg-neutral-800"
+                >Move out of folder</button>
+              )}
+            </>
+          )}
+          {menu.kind === 'folder' && (
+            <button
+              onClick={() => { setMenu(null); setEditingFolder(menu.name) }}
+              title="Rename this folder"
+              className="block w-full text-left px-3 py-1 text-neutral-200 hover:bg-neutral-800"
+            >Rename folder</button>
+          )}
           <button
-            onClick={() => handleRename(menu.name)}
-            title="Rename the file in input/ (blocked while it's on the timeline)"
+            onClick={handleNewFolder}
+            title="New folder — groups files in the bin. Nothing moves in input/."
             className="block w-full text-left px-3 py-1 text-neutral-200 hover:bg-neutral-800"
-          >Rename</button>
-          <button
-            onClick={() => handleShowDestination(menu.name)}
-            title="Reveal the file in Finder"
-            className="block w-full text-left px-3 py-1 text-neutral-200 hover:bg-neutral-800"
-          >Show destination</button>
-          {/* Delete stays visually separate — it's the only irreversible one. */}
-          <div className="my-1 border-t border-neutral-800" />
-          <button
-            onClick={() => handleDelete(menu.name)}
-            className="block w-full text-left px-3 py-1 text-red-400 hover:bg-red-500/10 hover:text-red-300"
-          >Delete</button>
+          >New Folder</button>
+          {menu.kind === 'folder' && (
+            <>
+              {/* Not red: this removes the grouping and nothing else — the files
+                  stay in input/ and reappear at the top level. */}
+              <div className="my-1 border-t border-neutral-800" />
+              <button
+                onClick={() => handleRemoveFolder(menu.name)}
+                title="Remove the folder. Its files go back to the top level; nothing is deleted."
+                className="block w-full text-left px-3 py-1 text-neutral-200 hover:bg-neutral-800"
+              >Remove folder</button>
+            </>
+          )}
+          {menu.kind === 'file' && (
+            <>
+              {/* Delete stays visually separate — it's the only irreversible one. */}
+              <div className="my-1 border-t border-neutral-800" />
+              <button
+                onClick={() => handleDelete(menu.name)}
+                className="block w-full text-left px-3 py-1 text-red-400 hover:bg-red-500/10 hover:text-red-300"
+              >Delete</button>
+            </>
+          )}
         </div>
       )}
     </div>

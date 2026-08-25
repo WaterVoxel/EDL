@@ -34,7 +34,7 @@ Patterns actually used in this repo — match them when editing.
 - Deliberate color coding per feature — keep it consistent:
   indigo = V1/primary/selection · fuchsia = HOLD segments · amber = ROUND + dirty/pending/warnings + favorites · teal = V2/Analyze · cyan = Reconstruct · emerald = Render/success · orange = reversed-active + non-default speed · sky = Splice · violet = Duplicate · red = playhead/stop/destructive.
 - Modals: `fixed inset-0 bg-black/60` overlay, close on backdrop click, `stopPropagation` on the panel.
-- Drag interactions: pointer events with document-level listeners added on pointerdown, removed on pointerup.
+- Drag interactions, two idioms and they are not interchangeable. **Dragging a value** (trim edges, playhead, crop handles, gain) = pointer events with document-level listeners added on pointerdown, removed on pointerup, because it needs every intermediate position. **Dragging a thing into a place** (timeline clip reorder in `TimelineClip.jsx`, filing a bin file into a folder in `MediaLibrary.jsx`) = native HTML5 drag — `draggable` + `onDragStart`/`onDragOver`/`onDrop`, `effectAllowed = 'move'`, and state cleared in `onDragEnd` so an abandoned drag (Esc, drop outside) still tidies up. Any HTML5 drop target that can also receive an **OS file drop** must tell them apart with `Array.from(e.dataTransfer?.types || []).includes('Files')` and `preventDefault` only for the one it owns (`Timeline.jsx`, `Dropzone.jsx`).
 
 ## Verification culture
 

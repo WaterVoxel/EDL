@@ -1,6 +1,12 @@
 import { useState, useRef } from 'react'
 import { upload } from '../api'
 
+// Only an OS file drag can be an upload. The bin's own rows are draggable too
+// (filing a file into a folder), and without this test dragging one over here
+// would light the button up and promise an upload that has no file to make.
+// Same test the timeline lane uses to tell the two apart.
+const isFileDrag = e => Array.from(e.dataTransfer?.types || []).includes('Files')
+
 // Compact upload control: click opens a file picker, or drag files directly
 // onto it. Lives in the Media Bin header, next to Clear.
 export default function Dropzone({ onUpload }) {
@@ -18,10 +24,10 @@ export default function Dropzone({ onUpload }) {
 
   return (
     <div
-      onDragOver={e => { e.preventDefault(); setOver(true) }}
-      onDragEnter={e => { e.preventDefault(); setOver(true) }}
+      onDragOver={e => { if (!isFileDrag(e)) return; e.preventDefault(); setOver(true) }}
+      onDragEnter={e => { if (!isFileDrag(e)) return; e.preventDefault(); setOver(true) }}
       onDragLeave={() => setOver(false)}
-      onDrop={e => { e.preventDefault(); setOver(false); handleFiles(e.dataTransfer.files) }}
+      onDrop={e => { if (!isFileDrag(e)) return; e.preventDefault(); setOver(false); handleFiles(e.dataTransfer.files) }}
       onClick={() => inputRef.current?.click()}
       title="Drop a video file here, or click to choose one"
       className={`px-1.5 py-0.5 text-[9px] rounded cursor-pointer transition-colors ${

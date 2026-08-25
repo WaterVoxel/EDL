@@ -15,6 +15,53 @@ the day the version file appeared. There are no tags for them and never will be 
 `v0.25.0` is the first real tag. Treat the older entries as a history, not a
 download list.
 
+## 0.28.0 — 2026-08-24
+
+**Folders in the Media Bin**
+
+The bin groups files now. There's a folder button in its header next to Clear,
+and **New Folder** on the right-click menu — on a file, on a folder, or on empty
+space in the list. A new folder arrives with its name already selected for
+typing, so naming it is part of making it rather than a second click. Enter or
+clicking away keeps the name; Escape leaves it as "New Folder"; double-clicking a
+folder's name renames it later.
+
+Drag a file onto a folder to file it there. The folder under the cursor lights up
+so you can see where it's going, and the file you're dragging goes faint. Drag it
+onto empty space in the list to bring it back out to the top level, or use **Move
+out of folder** on its right-click menu. Folders open and close with the arrow
+beside them, and dropping a file into a closed folder opens it so you can see the
+file land.
+
+Sorting, the Filter box, the V1/V2/A1 track buttons and the preview all work as
+before. Sort and favourites now apply *inside* each folder as well as at the top
+level — a ★ file still floats to the top of wherever it lives. Folders sit above
+the loose files, in name order, and the number beside a folder is how many of its
+files you're currently looking at.
+
+**One thing worth knowing: these folders are a view of the bin, not folders on
+disk.** Your files stay exactly where they are in `input/`, so nothing you drag
+in the bin can ever break a clip on the timeline — you can file away a file that
+V1 is using right now, which is usually the one you most want to tidy. That's the
+trade: **the folders don't appear in Finder**, and because they're remembered in
+this browser (the same place favourites and the V1/V2 tags live), they don't
+travel with a saved `.nara` project and won't be there in a different browser.
+
+Two smaller consequences of the same design:
+
+- **Clear** empties `input/`, so the folders stay behind, empty. Filing is
+  remembered per filename — the way favourites and track tags already are — so
+  re-adding a file with the same name puts it back in the folder it was in.
+- Removing a folder deletes nothing. Its files go back to the top level.
+
+While the Filter box has something in it, or a track button other than All is
+selected, folders are held open and the collapse arrows grey out — a file that
+matched your search would otherwise be hidden inside a shut folder. Folders with
+no match drop out of the list entirely while you're searching.
+
+Also fixed: dragging a file *within* the bin no longer lights up the upload
+button as though it were about to upload something.
+
 ## 0.27.0 — 2026-08-24
 
 **Reconstruct now undoes a slow-down instead of reporting it**
