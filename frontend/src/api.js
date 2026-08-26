@@ -1,24 +1,74 @@
+// Thrown when the server's reply cannot be read as JSON at all, or when the
+// request never completed. `status` is the HTTP status, or 0 when nothing came
+// back. Typed so a call site can tell "the backend is down" (status 0) from "the
+// backend answered with something unreadable" — they need different advice.
+export class ApiError extends Error {
+  constructor(message, status) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
+// Every call in this file goes through here. It has exactly two jobs.
+//
+// 1. A JSON body is returned AS-IS, success or failure alike. This is load-
+//    bearing: every call site already reads `result.error` (and Save reads
+//    `result.exists` off a 409), so an error the server described on purpose
+//    must keep arriving as a parsed object, NOT as a thrown exception. Adding a
+//    bare `r.ok` check here would have broken all of that.
+// 2. A body that is NOT JSON becomes a thrown ApiError. This is the fix: Flask
+//    answers anything unplanned with an HTML page, `r.json()` rejects on it, and
+//    with no .catch anywhere the rejection went nowhere — the spinner cleared,
+//    no alert fired, and the user was left with a UI that had simply stopped.
+//    The backend now returns JSON for those cases too, so this is the second
+//    line of defence: a dev-server proxy error, a truncated reply, or a route
+//    added later that forgets the shape.
+async function apiFetch(path, init) {
+  let r
+  try {
+    r = await fetch(path, init)
+  } catch {
+    // fetch rejects only when the request never completed: backend not running,
+    // Flask restarting mid-call (the reloader does this on every save), or the
+    // connection dropped. The browser's own text for this is "Failed to fetch",
+    // which tells the user nothing they can act on.
+    throw new ApiError('cannot reach the backend — is the server on 127.0.0.1:5001 running?', 0)
+  }
+  const text = await r.text()
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new ApiError(
+      r.status >= 400
+        ? `server error ${r.status}${r.statusText ? ' ' + r.statusText : ''}`
+        : `unreadable reply from the server (HTTP ${r.status})`,
+      r.status,
+    )
+  }
+}
+
 function postJSON(path, body) {
-  return fetch(path, {
+  return apiFetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  }).then(r => r.json())
+  })
 }
 
-export const listFiles = () => fetch('/api/files').then(r => r.json())
-export const listOutputs = () => fetch('/api/outputs').then(r => r.json())
+export const listFiles = () => apiFetch('/api/files')
+export const listOutputs = () => apiFetch('/api/outputs')
 export const probe = (name, dir = 'input') =>
-  fetch(`/api/probe/${encodeURIComponent(name)}?dir=${dir}`).then(r => r.json())
+  apiFetch(`/api/probe/${encodeURIComponent(name)}?dir=${dir}`)
 export const upload = (file) => {
   const fd = new FormData()
   fd.append('file', file)
-  return fetch('/api/upload', { method: 'POST', body: fd }).then(r => r.json())
+  return apiFetch('/api/upload', { method: 'POST', body: fd })
 }
-export const clearInput = () => fetch('/api/clear_input', { method: 'POST' }).then(r => r.json())
-export const deleteInputFile = (name) => fetch(`/api/files/${encodeURIComponent(name)}`, { method: 'DELETE' }).then(r => r.json())
-export const clearOutput = () => fetch('/api/clear_output', { method: 'POST' }).then(r => r.json())
-export const deleteOutputFile = (name) => fetch(`/api/outputs/${encodeURIComponent(name)}`, { method: 'DELETE' }).then(r => r.json())
+export const clearInput = () => apiFetch('/api/clear_input', { method: 'POST' })
+export const deleteInputFile = (name) => apiFetch(`/api/files/${encodeURIComponent(name)}`, { method: 'DELETE' })
+export const clearOutput = () => apiFetch('/api/clear_output', { method: 'POST' })
+export const deleteOutputFile = (name) => apiFetch(`/api/outputs/${encodeURIComponent(name)}`, { method: 'DELETE' })
 // audioBeds is the A1 lane in lane order — the order the clips play in, which
 // is the order the server concatenates them in.
 // fillNoise is a plain boolean: the server owns the asset path, so there is
@@ -37,11 +87,16 @@ export const renderTimeline = (clips, output, noAudio = false, audioBeds = [], f
 export const renderA1 = (clips, output, audioBeds = [], fillNoise = false, settings = {}) =>
   postJSON('/api/render_a1', { clips, output, audioBeds, fillNoise, ...settings })
 export const reformat = (input, dir, resolution, ratio, output) => postJSON('/api/reformat', { input, dir, resolution, ratio, output })
-export const listProjects = () => fetch('/api/projects').then(r => r.json())
-export const saveProject = (name, project) => postJSON('/api/projects', { name, project })
-export const loadProject = (name) => fetch(`/api/projects/${encodeURIComponent(name)}`).then(r => r.json())
-export const deleteProject = (name) => fetch(`/api/projects/${encodeURIComponent(name)}`, { method: 'DELETE' }).then(r => r.json())
-export const getExportSettings = () => fetch('/api/export_settings').then(r => r.json())
+export const listProjects = () => apiFetch('/api/projects')
+// `overwrite` defaults to false so a save can never silently replace an existing
+// project: the server answers 409 with {exists} and the caller asks the user
+// first. Pass true only after that confirmation, or when saving the project
+// already open (where replacing the file is the whole point).
+export const saveProject = (name, project, overwrite = false) =>
+  postJSON('/api/projects', { name, project, overwrite })
+export const loadProject = (name) => apiFetch(`/api/projects/${encodeURIComponent(name)}`)
+export const deleteProject = (name) => apiFetch(`/api/projects/${encodeURIComponent(name)}`, { method: 'DELETE' })
+export const getExportSettings = () => apiFetch('/api/export_settings')
 export const setExportSettings = (settings) => postJSON('/api/export_settings', settings)
 export const browseDirectory = (initial) => postJSON('/api/browse_directory', { initial })
 // Both take the bin they act on, same 'input'|'output' vocabulary probe() uses,
@@ -56,4 +111,4 @@ export const execute = (command) => postJSON('/api/execute', { command })
 // holding a stale bundle against a restarted server. Resolves to `{}` rather
 // than rejecting: the version readout is metadata, and it must never be the
 // thing that breaks a mount if the backend is down.
-export const getVersion = () => fetch('/api/version').then(r => r.json()).catch(() => ({}))
+export const getVersion = () => apiFetch('/api/version').catch(() => ({}))

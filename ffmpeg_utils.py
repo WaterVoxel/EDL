@@ -935,9 +935,28 @@ def get_or_make_preview(path):
 
 
 def run_ffmpeg(args, timeout=600):
-    """args must NOT include the ffmpeg binary itself; -y is always added."""
-    cmd = [FFMPEG, "-y"] + args
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    """args must NOT include the ffmpeg binary itself; -nostdin and -y are
+    always added.
+
+    Both halves of the stdin handling are load-bearing, and each is sufficient
+    on its own. ffmpeg's startup calls tcsetattr on fd 0 so it can read single
+    keypresses ("Press [q] to stop"); from a process group that is not the
+    terminal's FOREGROUND group that raises SIGTTOU, which stops the entire
+    group — ffmpeg, Flask and the reloader alike — at 0%, with nothing written
+    and no error anywhere. subprocess.run leaves the child in our own process
+    group, which is why the server goes down with the encoder rather than just
+    the one request, and why the timeout never fires: the process that would
+    raise TimeoutExpired is itself stopped. The launch this project documents
+    (`nohup python3 app.py > log 2>&1 &`) lands in exactly that position when
+    it is typed into an interactive Terminal, because nohup redirects stdout
+    and stderr but never stdin. -nostdin skips the tcsetattr; DEVNULL leaves no
+    tty on fd 0 to touch. Both, because a user-supplied `-stdin` in the
+    custom-export extra args is appended after these globals and would undo the
+    flag, while DEVNULL cannot be overridden that way.
+    """
+    cmd = [FFMPEG, "-nostdin", "-y"] + args
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                          stdin=subprocess.DEVNULL)
 
 
 def unique_output_name(name):
@@ -1127,6 +1146,30 @@ def clip_timing(spec):
     n_main = max(last_sel_excl - first_sel, 1)
     expected_sec = (lead_frames + trail_frames) / fps + (n_main / fps) / speed
     return lead_frames, trail_frames, expected_sec
+
+
+def quantized_timing(spec, target_fps):
+    """clip_timing(spec) re-snapped to the OUTPUT frame grid, and that frame
+    count: (lead_frames, trail_frames, expected_sec, n_norm_frames).
+
+    clip_timing counts frames on the SOURCE clip's own fps, which is the right
+    grid for choosing which source frames to select but the wrong one for
+    measuring the result: the graph resamples every segment to target_fps and
+    hard-caps it at n_norm_frames frames, so n_norm_frames / target_fps — not
+    clip_timing's expected_sec — is how long the clip actually occupies the
+    rendered sequence. The two differ whenever a clip's own fps is not
+    target_fps, or a speed change lands the stretched body between two output
+    frames (0.75x and 0.4x, both of them presets).
+
+    Everything that has to line up with the picture measures itself from here:
+    the per-clip audio pad, the A1 bed, room tone's placement, and the A1 stem.
+    Sized off clip_timing's seconds instead, a clip's audio could outlast its own
+    video segment, and concat — which advances by the LONGEST stream — then
+    pushed every later cut further out of position with each clip.
+    """
+    lead_frames, trail_frames, expected_sec = clip_timing(spec)
+    n_norm_frames = max(int(round(expected_sec * target_fps)), 1)
+    return lead_frames, trail_frames, n_norm_frames / target_fps, n_norm_frames
 
 
 def normalize_bed_placements(bed_placements, n_beds):
@@ -1461,9 +1504,13 @@ def noise_fill_seconds(plan):
     return sum(dur for runs in plan for is_tone, dur in runs if is_tone)
 
 
-def noise_fill_summary(clip_specs, sample_rate=44100, bed_placements=()):
+def noise_fill_summary(clip_specs, target_fps, sample_rate=44100, bed_placements=()):
     """(tone_sec, total_sec) for a timeline: how much silence room tone would
     fill, and how long the sequence runs.
+
+    target_fps is the render's output frame rate, for the reason quantized_timing
+    gives: it is what the reported length is measured on, so the number here is
+    the length the render actually produces rather than one a few frames off it.
 
     bed_placements is the A1 lane (see normalize_bed_placements); an empty lane is
     an empty tuple, which is why the old `has_bed` flag is gone — the placement
@@ -1477,7 +1524,7 @@ def noise_fill_summary(clip_specs, sample_rate=44100, bed_placements=()):
     second return value threaded out of two builders would be paid for on every
     render including the ones with the toggle off.
     """
-    timings = [clip_timing(spec) for spec in clip_specs]
+    timings = [quantized_timing(spec, target_fps)[:3] for spec in clip_specs]
     plan = noise_fill_plan(clip_specs, timings, sample_rate,
                            bed_spans(clip_specs, timings, bed_placements))
     return noise_fill_seconds(plan), sum(t[2] for t in timings)
@@ -1584,7 +1631,7 @@ def bed_spans(clip_specs, timings, bed_placements):
     return spans
 
 
-def build_a1_filter(clip_specs, sample_rate=44100, channel_layout="stereo",
+def build_a1_filter(clip_specs, target_fps, sample_rate=44100, channel_layout="stereo",
                     audio_beds=None, fill_noise=None, bed_placements=(),
                     bed_trims=(), noise_gain_db=NOISE_GAIN_DB):
     """Build a filter_complex that renders the A1 track ALONE as [outa].
@@ -1596,10 +1643,15 @@ def build_a1_filter(clip_specs, sample_rate=44100, channel_layout="stereo",
     the V1 file.
 
     That equivalence is why this function reuses the pieces rather than
-    reimplementing them: clip_timing for the length (bed offset = clip 0's
+    reimplementing them: quantized_timing for the length (bed offset = clip 0's
     lead_frames/fps, total = the sum of every clip's expected_sec, the same
-    frame-quantized truth the V1 graph pads its bed to) and the same adelay →
-    aformat → apad/atrim → volume=BED_GAIN bed chain, node for node.
+    output-frame-quantized truth the V1 graph pads its bed to) and the same
+    adelay → aformat → apad/atrim → volume=BED_GAIN bed chain, node for node.
+
+    target_fps must be the SAME rate the matching V1 render is given
+    (max of the clips' fps), because that is the grid both lengths are snapped
+    to; a stem quantized on a different grid is the drift this parameter exists
+    to prevent.
 
     clip_specs needs the timing keys (inSec, outSec, fps, speed, lead_hold_sec,
     trail_hold_sec, video_duration); crop, overlay and reverse cannot change a
@@ -1627,7 +1679,7 @@ def build_a1_filter(clip_specs, sample_rate=44100, channel_layout="stereo",
     if not clip_specs:
         raise ValueError("build_a1_filter needs at least one clip to take its timing from")
 
-    timings = [clip_timing(spec) for spec in clip_specs]
+    timings = [quantized_timing(spec, target_fps)[:3] for spec in clip_specs]
     # The bed's delay, and the whole stem's length: clip 0's head hold (the only
     # clip a lead hold may live on) and the sum of every clip's expected_sec.
     # Individual gap durations come from the per-clip loop below, not from here.
@@ -2085,14 +2137,13 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
         trail_sample_start, trail_sample_end = frame_window(first_idx if is_reversed else last_idx)
 
         # Exact frame budget for this clip's normalized segment (see
-        # clip_timing). The fps normalization filter can emit one spurious
+        # quantized_timing). The fps normalization filter can emit one spurious
         # duplicate frame at EOF (the concat graph runs in a 1/1000000
         # timebase, and an end timestamp landing exactly on a frame tick rounds
         # into an extra output frame), so the per-clip chain is hard-capped at
         # this count — and the audio is padded/cut to the same length — or every
         # clip boundary drifts another 1/fps out of sync.
-        lead_frames, trail_frames, expected_sec = clip_timing(spec)
-        n_norm_frames = max(int(round(expected_sec * target_fps)), 1)
+        lead_frames, trail_frames, expected_sec, n_norm_frames = quantized_timing(spec, target_fps)
         expected_secs.append(expected_sec)
         timings.append((lead_frames, trail_frames, expected_sec))
         if i == 0:

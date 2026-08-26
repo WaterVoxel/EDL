@@ -21,7 +21,20 @@ export default function ChatPanel({ onResult, selectedClipName }) {
     setLoading(true)
     scrollBottom()
 
-    const data = await chat(msg, sessionId, selectedClipName)
+    // Needs its own catch rather than leaning on main.jsx's global handler: the
+    // rejection used to skip setLoading(false) below, which left "Thinking…" on
+    // screen and Send disabled for good — the tab was unusable until a reload.
+    // The error goes in the message log because that is where this panel's other
+    // errors already go (the `data.error` branch just below uses role: 'error').
+    let data
+    try {
+      data = await chat(msg, sessionId, selectedClipName)
+    } catch (e) {
+      setLoading(false)
+      setMessages(prev => [...prev, { role: 'error', text: e.message }])
+      scrollBottom()
+      return
+    }
     setLoading(false)
     if (data.session_id) setSessionId(data.session_id)
 
@@ -39,7 +52,16 @@ export default function ChatPanel({ onResult, selectedClipName }) {
 
   async function handleRun(command, idx) {
     setMessages(prev => prev.map((m, i) => i === idx ? { ...m, running: true } : m))
-    const res = await execute(command)
+    // Same reason as handleSend: without this the `running: true` set above is
+    // never cleared, so the command sits marked as still running forever. Reuses
+    // the existing execError field, which is how this row already shows failures.
+    let res
+    try {
+      res = await execute(command)
+    } catch (e) {
+      setMessages(prev => prev.map((m, i) => i === idx ? { ...m, running: false, execError: e.message } : m))
+      return
+    }
     if (res.error) {
       setMessages(prev => prev.map((m, i) => i === idx ? { ...m, running: false, execError: res.error + (res.detail ? ' — ' + res.detail : '') } : m))
     } else {

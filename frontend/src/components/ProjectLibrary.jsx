@@ -6,18 +6,36 @@ export default function ProjectLibrary({ onOpen, onClose }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
+  // setLoading(false) lived inside the .then, so a failed listing left the dialog
+  // reading "Loading…" forever with the error state never set — the library
+  // looked like it was still working when it had already given up. The catch puts
+  // the reason in the banner this component already renders and stops the spin.
   function refresh() {
     setLoading(true)
     listProjects().then(items => {
       setProjects([...items].sort((a, b) => b.modified - a.modified))
+      setLoading(false)
+    }).catch(e => {
+      setError(e.message)
       setLoading(false)
     })
   }
 
   useEffect(() => { refresh() }, [])
 
+  // The try/catch is the backstop for a reply that is not JSON at all: r.json()
+  // REJECTS on one, and with nothing catching it the click did literally nothing
+  // — no error, no open, no clue. The server now answers a corrupt .nara with a
+  // JSON 400, so project.error covers that case; this covers the rest (backend
+  // down mid-session, an HTML error page from anything else).
   async function handleOpen(name) {
-    const project = await loadProject(name)
+    let project
+    try {
+      project = await loadProject(name)
+    } catch (e) {
+      setError(`Could not open "${name}": ${e.message}`)
+      return
+    }
     if (project.error) { setError(project.error); return }
     onOpen(name, project)
   }

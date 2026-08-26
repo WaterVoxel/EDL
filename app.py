@@ -5,6 +5,7 @@ import subprocess
 import time
 
 from flask import Flask, jsonify, render_template, request, send_from_directory
+from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
 import ffmpeg_utils as fu
@@ -56,6 +57,55 @@ CHAT_SCHEMA = json.dumps({
     },
     "required": ["ffmpeg_command", "explanation"],
 })
+
+
+# ---------- errors ----------
+
+# The frontend reads EVERY response as JSON (`api.js`), so a reply that isn't
+# JSON is a reply it cannot report at all: `r.json()` rejects, and a rejection
+# with nothing catching it shows the user nothing — the spinner just stops.
+# Flask's defaults hand back an HTML page for anything unplanned, which is
+# exactly that case. Verified, each one returning `text/html`:
+#
+#   a render that hits its ffmpeg timeout  -> HTML 500. TimeoutExpired is a
+#     SubprocessError, so every `except RuntimeError` in this file misses it.
+#   any exception nobody predicted         -> HTML 500
+#   a typo'd URL, or a wrong method        -> HTML 404 / 405
+#   an upload over MAX_CONTENT_LENGTH      -> HTML 413
+#
+# These three handlers make the envelope unconditional: every error leaving this
+# app is JSON carrying an `error` key, which is the shape every call site already
+# reads. They deliberately do NOT replace the per-route `except RuntimeError`
+# handling — those give specific, actionable messages and run first. This is the
+# floor under them, for what they don't anticipate.
+
+@app.errorhandler(subprocess.TimeoutExpired)
+def _handle_timeout(e):
+    # 504 rather than 500: the work may have been perfectly valid and merely too
+    # long, and that distinction is what tells the user whether to retry with a
+    # shorter timeline or to go fix something.
+    tool = os.path.basename(e.cmd[0]) if isinstance(e.cmd, (list, tuple)) and e.cmd else "the command"
+    app.logger.error("timed out after %ss: %s", e.timeout, e.cmd)
+    return jsonify({"error": "the operation timed out",
+                    "detail": f"{tool} was still running after {e.timeout}s and was stopped"}), 504
+
+
+@app.errorhandler(HTTPException)
+def _handle_http_exception(e):
+    # Keeps Flask's own status and wording ("Not Found", "Request Entity Too
+    # Large"); the only thing that changes is HTML -> JSON.
+    return jsonify({"error": e.description or e.name, "status": e.code}), e.code or 500
+
+
+@app.errorhandler(Exception)
+def _handle_unexpected(e):
+    # Registering this suppresses Flask's own traceback logging, so log it here.
+    # Without this line a crash would go quiet in the terminal too, which is the
+    # opposite of the point: the browser gets a readable error AND the developer
+    # keeps the full traceback.
+    app.logger.exception("unhandled exception on %s %s", request.method, request.path)
+    return jsonify({"error": "internal server error",
+                    "detail": f"{type(e).__name__}: {e}"}), 500
 
 
 # ---------- version ----------
@@ -205,18 +255,74 @@ def list_projects():
     return jsonify(items)
 
 
+def _project_filename(raw):
+    """Turn a user-typed project name into a `.nara` filename, or raise PathError.
+
+    Deliberately NOT secure_filename, which REWRITES the name instead of judging
+    it and so silently merges distinct projects onto one file: it strips every
+    non-ASCII character (`видео` and `日本語` both collapse to the empty string,
+    leaving a hidden `.nara` dotfile) and turns spaces into underscores, which is
+    what let "Save As → `Batch 1 V002`" land on an existing `Batch_1_V002.nara`
+    and replace it. A `.nara` is the only record of a timeline, so a name
+    collision is data loss.
+
+    This validates instead: the name the user typed is the name on disk. Only
+    what actually cannot be a filename here is refused — a path separator or NUL
+    (which would escape PROJECTS_DIR), a leading dot (a hidden file the user
+    could not find again), and a name that is empty once the extension is
+    accounted for.
+    """
+    name = (raw or "").strip()
+    if not name.endswith(".nara"):
+        name += ".nara"
+    if not name[:-len(".nara")]:
+        raise fu.PathError("project name is required")
+    if "/" in name or "\\" in name or os.sep in name or "\x00" in name:
+        raise fu.PathError("project name cannot contain a path separator")
+    if name.startswith("."):
+        raise fu.PathError("project name cannot start with a dot")
+    return name
+
+
 @app.route("/api/projects", methods=["POST"])
 def save_project():
     data = request.get_json(force=True)
-    name = secure_filename(data.get("name") or "project.nara")
-    if not name.endswith(".nara"):
-        name += ".nara"
+    try:
+        name = _project_filename(data.get("name"))
+    except fu.PathError as e:
+        return jsonify({"error": str(e)}), 400
     project = data.get("project")
     if not isinstance(project, dict) or not isinstance(project.get("clips"), list):
         return jsonify({"error": "invalid project payload — expected {clips: [...]}"}), 400
     os.makedirs(PROJECTS_DIR, exist_ok=True)
-    with open(os.path.join(PROJECTS_DIR, name), "w") as f:
-        json.dump(project, f, indent=2)
+    path = os.path.join(PROJECTS_DIR, name)
+
+    # Replacing a project is destructive and has no undo, so it takes an explicit
+    # say-so. The client sends overwrite=true only after the user confirms, or
+    # when saving the project it already has open (where replacing the file IS
+    # the point). Note the app already warns before the far less destructive
+    # Delete — this closes that asymmetry.
+    if os.path.exists(path) and not data.get("overwrite"):
+        return jsonify({"error": f"a project named \"{name}\" already exists",
+                        "exists": name}), 409
+
+    # Temp file + os.replace, because the previous truncate-in-place meant a
+    # crash or a full disk mid-write destroyed the old project before the new one
+    # was complete, leaving a corrupt .nara and no good copy. os.replace is
+    # atomic within a directory, so the file a reader sees is always one whole
+    # project or the other. The temp name deliberately keeps the .nara suffix
+    # off the end, so a leftover can never show up in the library listing.
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(project, f, indent=2)
+        os.replace(tmp, path)
+    except OSError as e:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return jsonify({"error": f"could not save project: {e}"}), 500
     return jsonify({"ok": True, "name": name})
 
 
@@ -228,8 +334,18 @@ def load_project(name):
         return jsonify({"error": str(e)}), 400
     if not os.path.exists(path):
         return jsonify({"error": "project not found"}), 404
-    with open(path) as f:
-        return jsonify(json.load(f))
+    # A damaged .nara used to raise here and return Flask's HTML 500 page, which
+    # the client cannot parse as JSON — so clicking the project in the library
+    # did nothing at all, with no message. Say what is wrong instead: a project
+    # that silently does nothing is far harder to diagnose than one that reports
+    # a corrupt file.
+    try:
+        with open(path) as f:
+            return jsonify(json.load(f))
+    except json.JSONDecodeError as e:
+        return jsonify({"error": f"project file is corrupt: {e}"}), 400
+    except OSError as e:
+        return jsonify({"error": f"could not read project: {e}"}), 500
 
 
 @app.route("/api/projects/<name>", methods=["DELETE"])
@@ -1308,7 +1424,7 @@ def render_timeline():
     noise_report = {}
     if noise_index is not None:
         tone_sec, seq_sec = fu.noise_fill_summary(
-            clip_specs, bed_placements=bed_placements
+            clip_specs, target_fps, bed_placements=bed_placements
         )
         noise_report = {"noise_fill_sec": round(tone_sec, 3),
                         "sequence_sec": round(seq_sec, 3),
@@ -1479,8 +1595,14 @@ def render_a1():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
+    # The grid both lengths are snapped to. Derived from the V1 clips exactly as
+    # /api/render_timeline derives it, because a stem quantized on a different
+    # rate than the render it accompanies is the drift build_a1_filter exists to
+    # avoid — the number has to come from the same clips by the same rule.
+    target_fps = max(i["fps"] or 30 for i in infos)
+
     try:
-        filt = fu.build_a1_filter(clip_specs, audio_beds=bed_indexes,
+        filt = fu.build_a1_filter(clip_specs, target_fps, audio_beds=bed_indexes,
                                   fill_noise=noise_index, bed_placements=bed_placements,
                                   bed_trims=bed_trims, noise_gain_db=noise_gain_db)
     except ValueError as e:
@@ -1506,7 +1628,7 @@ def render_a1():
     noise_report = {}
     if noise_index is not None:
         tone_sec, seq_sec = fu.noise_fill_summary(
-            clip_specs, bed_placements=bed_placements
+            clip_specs, target_fps, bed_placements=bed_placements
         )
         noise_report = {"noise_fill_sec": round(tone_sec, 3),
                         "sequence_sec": round(seq_sec, 3),
@@ -1881,13 +2003,38 @@ def execute():
     if not ok:
         return jsonify({"error": reason}), 400
 
+    # -nostdin for the reason run_ffmpeg passes it (see its docstring): without
+    # it, a server launched into a background process group has this ffmpeg —
+    # and itself — stopped by SIGTTOU the moment the encoder touches the tty.
+    argv = argv[:1] + ["-nostdin"] + argv[1:]
+
     try:
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=600)
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=600,
+                                stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return jsonify({"error": "ffmpeg timed out after 600s"}), 504
 
     if result.returncode != 0:
         return jsonify({"error": "ffmpeg failed", "detail": result.stderr[-4000:]}), 500
+
+    # ffmpeg exits **0** when it refuses to overwrite an existing output, so the
+    # returncode alone would report a write that never happened and the chat
+    # panel would repoint the clip at a stale file. This route has no -y of its
+    # own (validate_ffmpeg_command doesn't add one), so the refusal is ordinary,
+    # not exotic: any command naming a target that already exists hits it. It
+    # used to be invisible because the prompt blocked on the tty and surfaced as
+    # the 600s timeout above; -nostdin makes ffmpeg decline immediately instead.
+    # Keyed on ffmpeg's own message rather than on stat'ing the output, because
+    # the output arg is not always a literal path that appears on disk — image2
+    # and `-f segment` write printf patterns (`frame%03d.png`), and stat'ing
+    # those reported a successful export as a failure. Verified on ffmpeg 8.1.2:
+    # "already exists" appears for the refusal (single- AND multi-output forms)
+    # and for no successful run, including both pattern muxers with -y and
+    # without.
+    if "already exists" in result.stderr:
+        return jsonify({"error": "ffmpeg refused to overwrite an existing file, "
+                                 "so nothing was written",
+                        "detail": result.stderr[-4000:]}), 500
 
     return jsonify({"ok": True, "stderr_tail": result.stderr[-1000:], "output": _output_arg_info(argv)})
 

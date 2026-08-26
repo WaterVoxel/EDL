@@ -15,6 +15,146 @@ the day the version file appeared. There are no tags for them and never will be 
 `v0.25.0` is the first real tag. Treat the older entries as a history, not a
 download list.
 
+## 0.31.0 — 2026-08-26
+
+**Renders no longer freeze the whole app when the engine was started from a Terminal window**
+
+If you started the engine by typing the background command from `agentic_installation.MD`
+into Terminal — the line ending in `&` — then every Render would sit at 0% forever.
+Nothing was written, nothing appeared in the log, and the app stopped answering
+anything else at all: the Media Bin, the file list, the version readout, all of it went
+dead until you force-quit and started over. It looked exactly like a crash, but nothing
+had crashed.
+
+The cause was one flag. ffmpeg tries to listen for the `q` keystroke that stops an
+encode, and to do that it reaches for the Terminal window the engine was launched from.
+A background job is not allowed to touch that window, so macOS *suspended* ffmpeg the
+instant it tried — and because ffmpeg was suspended as part of the engine's own group,
+the engine was suspended right along with it. The half-hour render timeout could not
+save you either, since the timer was suspended too. ffmpeg is now told not to listen
+for keystrokes at all, which it never needed to here.
+
+Two things worth knowing:
+
+- **Your finished renders are unaffected.** This changes when ffmpeg runs, never what
+  it produces. Five kinds of render — a plain trim, a multi-clip sequence with holds
+  and reverse and a speed change, both size-capped two-pass modes, and an A1 audio
+  stem — came out identical to the frame on a patched and an unpatched copy.
+- **If renders have always worked for you, nothing was wrong and nothing changes.**
+  This only ever affected engines started as a background job from a Terminal window.
+  Started any other way, the flag was never needed.
+
+**The Agent tab now tells you when ffmpeg declined to replace a file**
+
+Ask the Agent for an edit whose output filename is already taken and ffmpeg refuses to
+overwrite it — which is what protects your existing files. Previously that refusal was
+invisible: the request just hung until it timed out. Now you get a clear message saying
+nothing was written, so you can rename and try again. The same refusal is what keeps a
+file in `input/` from being replaced, and that still holds.
+
+**Numbering note:** minor rather than patch. The fix itself changes no behavior anyone
+relied on, but the Agent tab now returns a real error where it used to time out, and
+that is a visible change to how an existing feature responds. Same reasoning as 0.27.0.
+
+## 0.30.0 — 2026-08-26
+
+**Renders no longer drift out of step with the timeline**
+
+If your timeline mixed clips at different frame rates, or used the 0.75× or 0.4×
+speed presets, the rendered file could come out slightly longer than the timeline
+said — and every cut after the first one landed a little later than where you put
+it. The error built up clip by clip, so the further into the sequence you looked,
+the further off it was. On a 20-clip mix of 24 and 30 fps footage the last cut
+ended up two frames late; twelve clips at 0.75× ended up four frames late.
+
+The cause was each clip's audio being measured on a slightly different grid than
+its picture. When the two disagreed, the longer of the two won and pushed
+everything after it along. The picture itself was always right — the frames were
+correct and in the correct order — but the file's timing around them wasn't, which
+also made the render come out with a variable frame rate instead of a steady one.
+
+Two things follow from this. **Round-tripping through V2 now cuts in the right
+place**: Batch Analyze and Reconstruct work out where each shot begins by
+predicting the render's own frame count, so previously they were cutting on
+boundaries the file had moved out from under them. And **the A1 audio stem now
+matches the render it belongs to exactly** — it could be up to 100 ms off before,
+which is enough to notice when you drop it into another tool alongside the video.
+
+The same fix closes the opposite case, which nobody had reported: on some
+combinations the audio was *shorter* than its picture instead of longer, leaving up
+to 21 ms of silence at the end of each clip.
+
+**Nothing about the picture changes.** Every rendered frame is byte-for-byte what
+it was — verified across 195 filter graphs, where no video-only render differed by
+a single character, plus a frame-hash check of holds and reverse against the
+source. Timelines from a single-frame-rate source at normal speed — the common
+case, and why this went unnoticed — rendered correctly before and are untouched.
+
+**Numbering note:** this changes what existing timelines render to, so by the rule
+at the top of this file it is a breaking change. It gets a **minor** bump for the
+same reason 0.27.0 did: `0.x` means no stability promises yet, and `1.0.0` should
+mean the app is stable rather than merely that it once changed a behavior.
+
+## 0.29.1 — 2026-08-26
+
+**Failures say so now, instead of the app quietly stopping**
+
+Some things could go wrong and tell you nothing at all. A render that ran past its
+time limit is the clearest case: the spinner stopped, no error appeared, and the
+only clue was that no file showed up in the Export Bin. It looked exactly like a
+render that had worked. The same silence covered a few other places — the Media
+Bin showing an empty list when the backend wasn't actually running, the AGENT tab
+sitting on "Thinking…" with Send greyed out until you reloaded the page, and the
+Project Library stuck on "Loading…".
+
+All of those now say what happened. A render that times out says so and suggests
+retrying. A backend that isn't running says *"cannot reach the backend — is the
+server on 127.0.0.1:5001 running?"* rather than looking like an empty project
+folder. The AGENT tab puts the failure in the conversation and lets you type
+again. And anything unexpected that the app doesn't have a specific message for
+now produces a readable error rather than nothing.
+
+Nothing that already worked changes, and errors the app already reported well —
+"need at least 1 clip", "input file not found", the new overwrite prompt from
+0.29.0 — read exactly as before. The terminal running the server also still gets
+the full technical traceback, which is unchanged.
+
+## 0.29.0 — 2026-08-26
+
+**Saving a project can no longer quietly destroy a different one**
+
+Saving under a name that already belongs to another project now asks first —
+*"Batch 1 V002.nara already exists. Replace it? This cannot be undone."* — and
+does nothing if you say no. Before, it replaced that project on the spot, with no
+prompt and no way back. Delete has always warned; Save was the more destructive
+of the two and didn't.
+
+The worst version of this was invisible. Project names used to be rewritten
+before being saved: spaces became underscores and accented or non-Latin
+characters were dropped entirely. So **Save As → `Batch 1 V002`** landed on the
+existing `Batch_1_V002.nara` and overwrote it, and a project named `видео` saved
+itself to a hidden file with no name at all. Names are now kept exactly as you
+type them — spaces, accents, any alphabet — and only names that genuinely cannot
+be filenames here are refused (a slash, or a leading dot). Existing projects are
+unaffected and open as before.
+
+Saving a project you already have open still just saves, with no prompt. That is
+what Save means.
+
+Two smaller fixes in the same area:
+
+- A save that fails partway — disk full, or the app quitting mid-write — used to
+  leave the project truncated and unopenable, with the previous good copy already
+  gone. The file is now written beside the old one and swapped in only once it is
+  complete, so a failed save leaves the previous version intact.
+- Clicking a damaged project in the library did nothing at all: no error, no
+  open, no clue. It now says the file is corrupt.
+
+Numbering note: the same reasoning as 0.27.0 applies. This changes behavior that
+existed before — Save As asks, and typed names keep their spaces — which the
+project's rule calls a major bump, but the behavior that changed *was* the bug,
+and `0.x` puts that in the minor slot.
+
 ## 0.28.0 — 2026-08-24
 
 **Folders in the Media Bin**

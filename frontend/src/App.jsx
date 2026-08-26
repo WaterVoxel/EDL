@@ -478,6 +478,12 @@ function AppInner() {
     return [...analyzeLog, ...msgs]
   })()
 
+  // No .catch here on purpose. With the backend down these two rejections carry
+  // the same message, so main.jsx's global handler reports them as one alert —
+  // which is what fixes the misleading part of this surface: an empty bin is a
+  // normal state, so "no files" was indistinguishable from "no server". Catching
+  // them here would mark them handled and suppress that alert; whatever the bin
+  // was already showing stays on screen either way.
   const refresh = useCallback(() => {
     listFiles().then(setInputFiles)
     listOutputs().then(setOutputFiles)
@@ -882,6 +888,13 @@ function AppInner() {
         setTrack2Clips(prev => prev.map(c => ({ ...c, dirty: false })), { silent: true })
       }
       refresh()
+    } catch (e) {
+      // Was try/finally with no catch: the finally cleared the spinner and the
+      // rejection went nowhere, so a render that died — timed out, backend
+      // restarted mid-encode — looked exactly like one that had finished, except
+      // no file appeared. RenderDialog calls onConfirm without awaiting it, so
+      // the rejection cannot be caught there; it has to be caught here.
+      alert('Render failed: ' + e.message)
     } finally {
       setRendering(false)
       setV2ShotProgress(null)
@@ -1349,11 +1362,24 @@ function AppInner() {
 
   async function handleSave() {
     let name = projectName
+    // Saving a project that is already open writes straight back over its own
+    // file — that IS what Save means, so it passes overwrite and never asks.
+    // Only a name the user has just typed can land on a DIFFERENT project, so
+    // only that case has to check.
+    const overwrite = Boolean(projectName)
     if (!name) {
       name = prompt('Project name:', 'project')
       if (!name) return
     }
-    const result = await saveProject(name, buildProject())
+    // Built once and reused for the retry: buildProject() reads current state,
+    // and the confirm below is blocking, so re-reading it after the answer could
+    // pick up a different timeline than the one the user agreed to save.
+    const payload = buildProject()
+    let result = await saveProject(name, payload, overwrite)
+    if (result.exists) {
+      if (!confirm(`"${result.exists}" already exists. Replace it? This cannot be undone.`)) return
+      result = await saveProject(name, payload, true)
+    }
     if (result.error) { alert('Save failed: ' + result.error); return }
     setProjectName(result.name)
     setSaveStatus('Saved ' + new Date().toLocaleTimeString())
@@ -1363,14 +1389,21 @@ function AppInner() {
   // Save As: always ask for a new name and save a copy under it, leaving the
   // currently-open project file untouched. The default seeds a "copy" name so
   // hitting Enter never overwrites the original. The active project switches
-  // to the new name, so subsequent Saves target the copy.
+  // to the new name, so subsequent Saves target the copy. Typing the name of
+  // SOME OTHER existing project used to replace it outright; now the server
+  // refuses and the confirm below asks first.
   async function handleSaveAs() {
     const suggested = projectName
       ? projectName.replace(/\.nara$/, '') + ' copy'
       : 'project'
     const name = prompt('Save project as:', suggested)
     if (!name) return
-    const result = await saveProject(name, buildProject())
+    const payload = buildProject()
+    let result = await saveProject(name, payload)
+    if (result.exists) {
+      if (!confirm(`"${result.exists}" already exists. Replace it? This cannot be undone.`)) return
+      result = await saveProject(name, payload, true)
+    }
     if (result.error) { alert('Save failed: ' + result.error); return }
     setProjectName(result.name)
     setSaveStatus('Saved ' + new Date().toLocaleTimeString())
