@@ -1,4 +1,12 @@
-export const GAP_PX = 2
+// Pixels of flex `gap` between clips on a lane. ZERO on purpose, and load-bearing:
+// a gap consumes width but represents NO time, so any non-zero value makes a
+// lane's seconds-to-pixels scale a function of that lane's own clip count. V1,
+// V2 and the ruler do not share a clip count, so at 2px they could never agree —
+// a 6-clip V1 drew 10px (4 frames at 60px/s and 24fps) longer than its own
+// duration while a 1-clip V2 drew exactly its duration, which made a V2 file ONE
+// FRAME LONGER than V1 end 7.5px SHORT of it. Clips are told apart by the 2px
+// palette border each one already carries, which meet as a 4px seam.
+export const GAP_PX = 0
 export const ROUND_EPSILON = 0.0005
 
 export function clipSpeed(clip) {
@@ -240,8 +248,8 @@ export function clipRenderedPx(clip, pps) {
 }
 
 // Map a timeline position to an X offset inside a lane laid out exactly like
-// V1's: per-clip RENDERED widths separated by `gapPx` (the flex `gap-0.5`
-// between clips). This is the one definition of "under the video on V1" — the
+// V1's: per-clip RENDERED widths separated by `gapPx` (the lane's flex `gap`,
+// which is 0 — see GAP_PX). This is the one definition of "under the video on V1" — the
 // A1 bed measures every edge with it, so the bed's boundaries land on the same
 // pixel as the V1 frame playing at that instant. Head/tail holds need no
 // special case: they're already inside clipTotalSec, so the span a hold

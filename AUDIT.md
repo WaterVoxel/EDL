@@ -74,23 +74,26 @@ found independently by 5 of them).
 | # | Urgency | Root cause | Where | Confidence | Status |
 |---|---------|-----------|-------|-----------|--------|
 | 1 | HIGH | Audio/video drift: renders disagree with the timeline | `ffmpeg_utils.py:2199` | VERIFIED | **FIXED** (0.30.0) |
-| 2 | HIGH | Two same-name renders destroy each other | `app.py:1271` | VERIFIED *(unjudged)* | NOT STARTED |
-| 3 | HIGH | A failed preview poisons the cache permanently | `ffmpeg_utils.py:928` | VERIFIED | NOT STARTED |
-| 4 | HIGH | Export-Bin split-brain: lists one dir, reads another | `app.py:91,130` | VERIFIED | NOT STARTED |
+| 2 | HIGH | Two same-name renders destroy each other | `app.py:1271` | VERIFIED *(judged on re-run)* | **FIXED** (0.35.0) |
+| 3 | HIGH | A failed preview poisons the cache permanently | `ffmpeg_utils.py:928` | VERIFIED | **FIXED (0.33.0)** |
+| 4 | HIGH | Export-Bin split-brain: lists one dir, reads another | `app.py:91,130` | VERIFIED | **FIXED** (0.36.0) |
 | 5 | HIGH | Saving a project can destroy another with no prompt | `app.py:211` | VERIFIED | **FIXED** (0.29.0) |
 | 6 | HIGH | Silent failure: timeouts + non-JSON errors show nothing | `frontend/src/api.js:6` | VERIFIED | **FIXED** (0.29.1) |
 | 7 | HIGH | Every render hangs if the server started as a bg job | `ffmpeg_utils.py:940` | VERIFIED | **FIXED** (0.31.0) |
 | 8 | MEDIUM | No cancellation; abandoned renders burn CPU | `app.py:1901` | VERIFIED | NOT STARTED |
-| 9 | MEDIUM | Failed renders leave corrupt partials in the Export Bin | `app.py:651` | VERIFIED | NOT STARTED |
+| 9 | MEDIUM | Failed renders leave corrupt partials in the Export Bin | `app.py:651` | VERIFIED | **FIXED** (0.34.0) |
 | 10 | MEDIUM | Frontend races and wedges | `MediaLibrary.jsx:91` | VERIFIED | NOT STARTED |
 | 11 | MEDIUM | Malformed payloads produce HTML 500s, not 400s | `app.py:681` | VERIFIED | NOT STARTED |
 | 12 | MEDIUM | Fresh-machine setup failures | `app.py:110` | VERIFIED | NOT STARTED |
 | 13 | LOW | `.preview_cache` never evicted (414 MB, 211 MB dead) | `ffmpeg_utils.py:924` | VERIFIED | NOT STARTED |
 | 14 | LOW | Remaining sharp edges (5 small items) | various | mixed | NOT STARTED |
-| 15 | HIGH | Documented launch command stops the server at boot | `_reloader.py:429` | VERIFIED | NOT STARTED |
-| 16 | HIGH | The Agent tab can overwrite source media in `input/` | `ffmpeg_utils.py:2410` | VERIFIED | NOT STARTED |
+| 15 | HIGH | Documented launch command stops the server at boot | `_reloader.py:429` | VERIFIED | **FIXED** (0.31.1) |
+| 16 | HIGH | The Agent tab can overwrite source media in `input/` | `ffmpeg_utils.py:2410` | VERIFIED | **FIXED** (0.32.0) |
+| 17 | HIGH | Hold Frame fails on every silent source — all 27 of this machine's videos | `ffmpeg_utils.py` `build_holdframe_filter` | VERIFIED | **FIXED** (0.38.0) |
+| 18 | HIGH | V2's lane drew short of V1's; its end read frame 356, not 361 | `clipMath.js:9`, `Timeline.jsx:18` | VERIFIED | **FIXED** (0.37.0) |
 
-Items 15 and 16 were found while fixing #7 and are new since the original audit.
+Items 15 and 16 were found while fixing #7 and are new since the original audit. Item 17 was found
+by #4's real-installation smoke test. Item 18 was reported by the user.
 
 **Recommended order:** #6 first (one change makes ~8 other failures visible and therefore
 diagnosable), then #1 (correctness), then #3 + #9 together (same temp+rename pattern), then #4
@@ -319,11 +322,14 @@ test renders and the two generated test files removed from `output/` and `input/
 
 ---
 
-## 2. HIGH — Two same-name renders destroy each other *(unjudged: no adversary reviewed this)*
+## 2. HIGH — Two same-name renders destroy each other
 
-**Status:** NOT STARTED — **re-run the refutation pass before acting**
+**Status:** FIXED in 0.35.0 — see [Resolution](#resolution-2)
 **Confidence:** VERIFIED by the finder (5/5 reproductions); code shape confirmed by reading. Its
-refuter crashed on a credentials error, so this is the one entry no adversary attacked.
+refuter crashed on a credentials error, so this was the one entry no adversary attacked — **the
+refutation was re-run before fixing** (see the Resolution's *Re-judging* section: the finder's two
+reproductions were both already dead, and what remained was a third, narrower race the finder had not
+described).
 **Where:** `app.py:1271` (uniqueness loop), `ffmpeg_utils.py:698` (shared passlog)
 
 ### What's wrong
@@ -362,11 +368,164 @@ The frontend guard is per-tab only: `Timeline.jsx:778`/`:878` disable the button
 
 **Effort:** 1–2h.
 
+<a id="resolution-2"></a>
+### Resolution — 0.35.0 (2026-08-27)
+
+#### Re-judging the finding first
+This was the only entry no adversary ever attacked, so the refutation pass was re-run against the
+current code before writing any fix — on a scratch instance (port 5098, `/tmp/g2`), with a
+high-entropy source built specifically to make the window wide: `input/big.mp4`, 15s 1080p noise,
+1.4 GB, ~8s to re-encode losslessly. Both of the finder's reproductions are **dead**, killed as a side
+effect of #9's staging (0.34.0), and each was verified by frame hash rather than by exit code:
+
+| The finder's claim | Current behavior |
+|---|---|
+| Single-pass: two concurrent renders both return `{"output":"collide.mp4"}`, one file survives (5/5) | `collide.mp4` **and** `collide_1.mp4`, both valid, `frame0` of each matching its own source window exactly |
+| Two-pass: both fail on a shared stats file, leaving a 0-byte file listed as an export | both `200`, both valid, **0** stats-file errors in the log, **0** 0-byte files, **0** passlog leftovers |
+
+The reason is that #9 moved every render into `<export dir>/.partials/<pid>.<tid>/`, and
+`stats_prefix = out_path + ".ffpass"` (`ffmpeg_utils.py:699`, `:844`) derives from that path — so two
+two-pass renders can no longer address the same stats file even in principle.
+
+**What survived re-judging is a third race the finder did not describe**, one that 0.34.0 introduced
+in `commit_output` while fixing #9: the commit chose its name with `while os.path.exists(final)` and
+then called `os.replace`. Check-then-act again, just moved — the window shrank from "the whole of pass
+1" to the microseconds between those two calls, but a lost render is a lost render. An end-to-end test
+cannot honestly settle a window that small, so it was settled at the function level: with the gap
+artificially widened to 0.3s, **two concurrent commits left one file** and both reported the same
+name; at 8 threads, **7 of 8 payloads were destroyed** and all 8 reported `shared.mp4`.
+
+#### Changes made
+One function, `commit_output` in `ffmpeg_utils.py`. Nothing else in either file changed — no route, no
+name picker, no encoder argument.
+
+```python
+while True:
+    try:
+        fd = os.open(final, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        final = f"{base}_{n}{ext}"
+        n += 1
+        continue
+    os.close(fd)
+    break
+try:
+    os.replace(staged, final)
+except OSError:
+    try:
+        os.remove(final)
+    except OSError:
+        pass
+    raise
+```
+
+#### Reasoning
+- **`O_CREAT|O_EXCL` is a claim; `os.path.exists` is only a question.** The kernel guarantees exactly
+  one caller can create a given path, so the name is allocated in one indivisible step. This is the
+  audit entry's own first suggestion, applied at the point that now actually allocates names.
+- **No lock, no queue, no semaphore.** A `threading.Lock` would work for threads in one process but
+  not for a second `app.py` (the audit's own repro is *two clients*, and nothing stops a user starting
+  a second backend). `O_EXCL` is filesystem-level, so it holds across processes, and it adds no
+  serialization: renders still run fully concurrently and only the name claim is exclusive.
+- **The placeholder is removed if `os.replace` fails.** The reservation creates a 0-byte file; leaving
+  it behind on a failed move would re-create finding #9's exact symptom (a 0-byte export listed in the
+  Bin). Verified by forcing `os.replace` to raise `OSError(ENOSPC)`: the exception propagates
+  unchanged and the export directory is left empty.
+- **The routes' own uniqueness loops were deliberately left alone** (`unique_output_name`,
+  `render_a1`'s loop, `render_timeline`'s loop at `:1271`). They are now advisory — they pick the name
+  a request *asks* for, and `commit_output` is what decides the name it *gets*, which is what every
+  route already reports back. Rewriting four call sites to also reserve atomically would be
+  restructuring for no behavior gain, and the audit's line pointer (`app.py:1271`) is only where the
+  wrong name is guessed, not where damage happens.
+- **The third bullet of the suggested fix — a `Semaphore(1)` CPU cap — was not implemented.** It is
+  not this defect: throttling concurrency saves CPU but nothing about it prevents a lost file, and
+  serializing renders would be new behavior (a second render would silently wait instead of running).
+  Left to #8, where cancellation and concurrency policy belong.
+
+#### Observations
+- **0.34.0's fix contained a smaller copy of the bug it fixed.** Worth recording as a pattern rather
+  than an embarrassment: "move the write somewhere private, then rename into place" removes the
+  *partial-file* hazard but not the *name-allocation* hazard, and the second one is invisible unless
+  the check-and-act window is deliberately widened. Any future fix of this shape needs the same
+  treatment.
+- **Every writer benefits from the one edit** because #9 had already funnelled all of them through
+  `commit_output`: `render_timeline`, `trim`, `splice`, `hold_frame`, `reverse`, `reformat`,
+  `render_a1`, and all six size-capped/custom export routes via `multipass_export_render`. Confirmed
+  by grep that no render path reaches the export directory any other way — the only other
+  `os.replace` calls in the backend are the project save (#5, fixed in 0.29.0) and the preview cache
+  (#3, whose name is content-derived, so two writers there produce identical bytes by construction).
+- **A residual worth stating plainly:** between the reservation and the move there is now a
+  microsecond-scale moment where a 0-byte file with the final name exists, so a request to
+  `/api/outputs` landing exactly in it could list a 0-byte export. It is a strictly better trade than
+  losing a render, it is orders of magnitude narrower than the window #9 closed (which lasted for the
+  whole render), and a `kill -9` inside it would leave a 0-byte file — the same SIGKILL caveat already
+  recorded for #3 and #9.
+- **The frontend needs nothing.** The finder correctly noted the button guard is per-tab
+  (`Timeline.jsx:778`/`:878` from `App.jsx:209` `rendering`), but the fix belongs in the backend
+  precisely *because* the frontend cannot be trusted to coordinate two tabs or survive a reload. No
+  frontend file was touched.
+- **New measurement supporting the audit's CPU-thrash bullet, which is #8's to act on.** Two
+  concurrent `under50mb_hevc` renders of a 1.6s real clip took **~8 minutes** of wall clock on the
+  live install — two libx265 two-pass encodes fighting for the same cores, each running both of its
+  passes. Nothing is lost or corrupted (that is what this fix guarantees), but "the app feels frozen"
+  is a fair description of the experience, and it is the concrete case for the concurrency cap the
+  entry suggests. Recorded here; deliberately not implemented, because capping concurrency changes
+  what a second render *does* rather than fixing what it *breaks*.
+
+#### Verification
+Scratch instance only (port 5098, `/tmp/g2`); the real `input/`, `output/`, `projects/` were never
+test targets. Function-level race harnesses: `/tmp/g2race.py` (2 threads) and `/tmp/g2race8.py`
+(N threads, configurable window). `/tmp/g2old` holds a copy of the code with **only**
+`commit_output` reverted to its 0.34.0 body, so the comparison isolates this one change.
+
+| Race harness | 0.34.0 (`exists` loop) | 0.35.0 (`O_EXCL`) |
+|---|---|---|
+| 2 threads, window widened 0.3s | 1 file, **1 payload destroyed**, both reported `x.mp4` | `x.mp4` + `x_1.mp4`, both payloads intact |
+| 8 threads, window widened 0.3s | 1 file, **7 payloads destroyed**, all 8 reported `shared.mp4` | 8 files, 8 payloads, 8 distinct names |
+| 24 threads, real timing (no widening) | — | 24 files, 24 payloads, 0 lost |
+| `os.replace` forced to fail after reservation | — | `OSError` propagates, **0** files left (no 0-byte placeholder) |
+| single commit (the ordinary case) | `y.mp4` | `y.mp4` — unchanged |
+
+End-to-end battery (`/tmp/g2rep.sh`, nine cases, all `200` unless noted), every file probed and its
+first video frame hashed against the exact source window it should contain:
+
+- **1** two simultaneous lossless renders, one name → `collide.mp4` + `collide_1.mp4`, frame hashes
+  `1ae73191…` / `e02197ff…` matching big@0s / big@10s respectively.
+- **2** two simultaneous `under50mb_h264` → `tp.mp4` + `tp_1.mp4`, 0 stats errors, 0 0-byte files,
+  0 passlog leftovers.
+- **3** two simultaneous `under50mb_hevc` (a different stats mechanism — `-x265-params pass/stats`)
+  → `hv.mp4` + `hv_1.mp4`, both valid.
+- **4** mixed lossless + two-pass together → `mix.mp4` + `mix_1.mp4`.
+- **5** three simultaneous renders, one name → three files, **3 of 3 distinct** frame hashes.
+- **6** two simultaneous A1 stems → `stem.wav` + `stem_1.wav`, both valid.
+- **7** the real-world path — first request abandoned after 1s (`curl -m 1`, render continues per #8),
+  then the same name requested again → `reload.mp4` + `reload_1.mp4`, both valid, each with its own
+  content.
+- **8** *cross-route* collision, `/api/trim` against `/api/render_timeline` on one name (two different
+  name pickers) → `cross.mp4` + `cross_1.mp4`.
+- **9** two simultaneous `/api/reformat` on one name → `rf.mp4` at 872x490 and `rf_1.mp4` at 1280x720,
+  i.e. each response's file really is the resolution that request asked for.
+- 0 tracebacks; `.partials` cleaned in every case.
+
+Real installation (5001, restarted onto the new code, `/api/version` → `0.35.0`, Vite 5173 `200`):
+two simultaneous renders of one output name on the user's own media, under **their** existing
+`under50mb_hevc` setting (untouched, and the slowest real path there is). Both `200`; the second
+request won `audit2_smoke.mp4` (12,689,608 B) and the first was bumped to `audit2_smoke_1.mp4`
+(12,048,937 B); both valid, with different first-frame hashes — i.e. each file holds its own render.
+Both test files were then deleted, leaving no `audit*`, `.part*`, `.partials`, or 0-byte file anywhere
+in `input/` or `output/` (checked with `find`), and the user's export settings unchanged
+(`under50mb_hevc`, default export dir).
+
+Note on directory counts: unlike the earlier resolutions in this document, absolute counts are not
+quoted as a before/after here, because the user was working in the app during this session — `input/`
+and `output/` legitimately grew with their own uploads and exports (timestamped 11:48–12:03 the same
+morning). The cleanup claim above is therefore made by name and by pattern, not by count.
+
 ---
 
 ## 3. HIGH — A failed preview poisons the cache permanently
 
-**Status:** NOT STARTED
+**Status:** FIXED in 0.33.0 — see [Resolution](#resolution-3) below
 **Confidence:** VERIFIED (found independently by 5 lanes; the code was read and confirmed by hand)
 **Where:** `ffmpeg_utils.py:928-935`
 
@@ -408,11 +567,112 @@ final path only ever exists complete; unlink the `.part` on failure. Optionally 
 
 **Effort:** ~30 min.
 
+<a id="resolution-3"></a>
+### Resolution — 0.33.0 (2026-08-26)
+
+#### Changes made
+Two edits, both in `ffmpeg_utils.py`, both inside `get_or_make_preview`'s existing
+`if not os.path.exists(cached):` block. No route, no caller, and no other function changed.
+
+1. `import threading` added to the import block (needed for the temp name — see below).
+2. The transcode now writes to a private temp path and is moved into place only on success:
+
+```python
+part = f"{cached}.{os.getpid()}.{threading.get_ident()}.part.mp4"
+args = ["-i", path, "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-movflags", "+faststart", part]
+try:
+    result = run_ffmpeg(args)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr[-2000:])
+    os.replace(part, cached)
+finally:
+    try:
+        os.remove(part)
+    except OSError:
+        pass
+```
+
+The ffmpeg arguments are otherwise byte-for-byte what they were; only the output path changed. The
+raised `RuntimeError` and its `stderr[-2000:]` payload are unchanged, so `/preview`'s existing 500
+handler and error shape still apply.
+
+#### Reasoning
+- **`os.replace`, not a rename dance.** It is atomic within a directory, so a concurrent reader sees
+  either no file at all or a complete one — never a growing one. An already-open fd on a replaced
+  file also stays valid, which matters because Flask's `send_file` may still be streaming.
+- **pid + thread id in the temp name, not a bare `.part`.** Flask serves these threaded
+  (`app.run` defaults `threaded=True`) and one click can issue two requests for the same file
+  (`MediaLibrary.jsx` and `ReformatPanel.jsx` both mount a `<video>` on the same bin selection). A
+  single shared `.part` would just move the collision from the final path to the temp path.
+- **`finally`, not an `except`.** The temp file has to go whether ffmpeg failed, `os.replace` failed,
+  or the thread was interrupted. On the success path `os.replace` already moved it, so the
+  `os.remove` raises `ENOENT` and is swallowed — that is the expected case, not an error.
+- **No per-key lock**, though the audit entry offered one as an option. It would save the duplicate
+  encode, but it would make the second request block for the entire transcode — a fresh hang in
+  place of a fixed one, and hangs are what this audit is mostly about. Two requests now transcode
+  twice and both get a valid file; the waste is CPU, which is recoverable, unlike a stuck UI. Left
+  as a deliberate non-fix rather than an oversight.
+
+#### Observations
+- **My first attempt broke previews outright, and only running it caught that.** I named the temp
+  file `…preview.mp4.<pid>.<tid>.part`. ffmpeg picks its muxer from the output extension, so it
+  refused every single preview — *"Unable to find a suitable output format for
+  '….part'; use a standard extension for the filename or specify the format manually"* — with
+  `http=500` on **every** request including ones that had succeeded before the change. Reading the
+  diff would not have shown this; the repro script did, immediately. The temp name now ends in
+  `.part.mp4`. Recorded here because the mistake is easy to repeat: any future temp-file fix in this
+  codebase must keep a real extension last, or pass `-f` explicitly.
+- **Nothing enumerates `.preview_cache`.** A lookup is an exact match on
+  `"<basename>.<mtime>.preview.mp4"`, so a leftover temp file can never be mistaken for a preview.
+  Verified by grep: `PREVIEW_CACHE_DIR` appears only at its definition and inside this one function.
+- **A `kill -9` of the Flask process still leaves one stray temp file** — no `finally` can run
+  through SIGKILL. Confirmed by measurement. It is harmless in the way that matters: the *cache
+  entry* is absent, so the next request re-transcodes and succeeds. The stray is disk waste only,
+  and it belongs to finding #13 (`.preview_cache` has no eviction at all — 301 entries in the live
+  install today). Not fixed here; that is #13's scope.
+- **Pre-existing poisoned entries are not healed.** This change prevents new ones; it cannot tell an
+  old bad file from a good one, since both simply exist. The live cache was checked and is clean
+  (301 entries, 0 strays, no truncated files), so no user-visible cleanup is owed — but the
+  CHANGELOG says plainly that deleting `.preview_cache` is the cure if anyone is already stuck.
+- The audit entry's measured numbers (48 bytes, 250,820 bytes) came from a smaller source file than
+  the one used here; this session's repro used a 174 MB ProRes/PCM source and saw the same two
+  failures at a different scale (262,192 and 524,336 bytes). The defect is the same; only the sizes
+  differ with source and timing.
+
+#### Verification
+Scratch instance only (port 5097, `/tmp/g3`, a 174 MB ProRes+PCM `input/big.mov` with
+`browser_playable: False`). `/tmp/g3rep.sh` was written **before** the fix and re-run **unchanged**
+after it. The real `input/`, `output/`, and `projects/` were never used as test targets.
+
+| Case | Before | After |
+|---|---|---|
+| req1, cold cache | `200`, 1,215,759 B, valid | `200`, 1,215,759 B, valid |
+| req2, arriving 2.0s into the transcode | `200`, **262,192 B, BROKEN** | `200`, 1,215,759 B, **valid** |
+| ffmpeg killed mid-transcode | `500` | `500` (unchanged — correct) |
+| cache contents after that failure | `big.mov….preview.mp4` 524,336 B, **BROKEN** | **empty** |
+| next request for the same file | `200`, 524,336 B, **BROKEN — poisoned forever** | `200`, 1,215,759 B, **valid** |
+| tracebacks in the log | 0 | 0 |
+
+Then I attacked the fix rather than stopping at the repro:
+
+- **4 simultaneous cold requests:** all four `200` and all four playable, exactly one cache entry
+  left behind, **0** stray temp files.
+- **`kill -9` on the Flask process mid-transcode:** one stray `.part.mp4`, and — the part that
+  matters — **no** cache entry, so the next request rebuilds instead of serving junk.
+- **Real installation** (5001, restarted onto the new code, both branches exercised on the user's own
+  media): cache-hit path `200` / 1,728,283 B / playable; cold-transcode path `200` / 1,827,307 B /
+  playable; cache 301 → 302 entries, 0 strays, 0 tracebacks. `input/` 54, `output/` 13,
+  `projects/` 7 — all unchanged.
+
+No frontend file was touched, so no rebuild was required beyond the version bundle.
+
 ---
 
 ## 4. HIGH — Export-Bin split-brain: the app lists one directory and reads another
 
-**Status:** NOT STARTED
+**Status:** FIXED in 0.36.0 — every claim below re-measured on a scratch instance first, then fixed
+in one pass, then re-measured with the identical script. See [Resolution](#resolution-4).
 **Confidence:** VERIFIED by running (own test, output quoted below)
 **Where:** `app.py:91` and `app.py:130` (readers); `app.py:633,701,1640,1703` (writers);
 `ffmpeg_utils.py:948` (`unique_output_name`)
@@ -457,6 +717,178 @@ parameter (then delete the inlined duplicate loop in `render_timeline` in favour
 call sites in one pass — fixing a subset just moves the split.
 
 **Effort:** ~15 lines, mechanical.
+
+<a id="resolution-4"></a>
+### Resolution — 0.36.0 (2026-08-27)
+
+#### Re-measuring the finding first
+Every claim in the entry still held, checked on a scratch copy of the code (`/tmp/g4`, port 5099) with
+the export directory pointed at `/tmp/g4export` through the real `POST /api/export_settings`. The
+entry's line numbers had moved (0.29.0–0.35.0 shifted them by ~50 in the read routes and ~130 in the
+write routes); the defects had not. Baseline script `/tmp/g4rep.sh`, output `/tmp/g4_before.txt`,
+re-run unchanged afterwards into `/tmp/g4_after.txt`.
+
+| What the entry claimed | Measured on 0.35.0 |
+|---|---|
+| Bin lists the custom dir, `/api/probe?dir=output` and `/preview/output/` read the default | `GET /api/outputs` → `['tl.mp4']`; probe → **404**; preview → **404**; `/output/tl.mp4` → 200 |
+| trim/splice/hold_frame/reverse write to the default dir and never appear | all four reported success and landed in `output/`; `/api/outputs` still `['tl.mp4']` |
+| `unique_output_name` cannot see collisions in the custom dir | asked for `clash.mp4` with the custom dir **empty** → got `clash_1.mp4` (renamed because of a file in a directory nobody was exporting to) |
+| — (not in the entry; found here) | With `taken.mp4` in **both** directories, the Bin listed one file and `/preview/output/taken.mp4` served the **other**: md5 `60e8b8ca…` listed vs `4cfc19b8…` served. Silently the wrong video, with the wrong Media Info beside it |
+| — (not in the entry; found here) | A trim output was unreachable by **every** Bin operation: `/api/outputs` `[]`, rename → `{"error":"file not found"}`, `DELETE /api/outputs/rn.mp4` → 404, `reveal_file` → `{"error":"file not found"}` |
+
+#### Changes made
+
+| File / line | Change |
+|---|---|
+| `ffmpeg_utils.py:1135` `unique_output_name` | Second parameter `export_dir`, **required** (no default). The loop now checks `os.path.join(export_dir, candidate)`. The function's own local `base` (from `os.path.splitext`) is renamed `stem`, because in a function that now takes a base *directory* the old name meant two things. |
+| `app.py:141` `serve_preview` | `base = fu.INPUT_DIR if which == "input" else fu.OUTPUT_DIR` → `base = resolve_media_dir(which)` |
+| `app.py:180` `probe_file` | same one-line substitution |
+| `app.py:761-764` `trim` | `export_dir = get_output_dir()`, then `unique_output_name(..., export_dir)` and `os.path.join(export_dir, out_name)` |
+| `app.py:830-832` `splice` | same |
+| `app.py:1776-1779` `hold_frame` | same |
+| `app.py:1841-1844` `reverse` | same |
+
+Seven sites, exactly the set the entry named. No frontend file was touched: the endpoints kept their
+names and shapes, so the UI needed nothing.
+
+#### Reasoning
+
+- **`resolve_media_dir(which)` already existed and already said the right thing** ("Only the export
+  side is user-relocatable, so it goes through `get_output_dir()`") — it was simply used at 2 of its
+  9 possible call sites. The read-side fix is that helper, not a new one.
+- **`export_dir` is required rather than defaulted.** A default of `OUTPUT_DIR` would have been a
+  smaller diff and would have left the trap armed: the next caller to write
+  `unique_output_name(name)` gets the one directory that is wrong whenever the user has moved their
+  exports. Required parameter → that call no longer compiles into a silent bug, it raises
+  `TypeError` (verified: `unique_output_name() missing 1 required positional argument:
+  'export_dir'`). This is the anti-recurrence measure for this finding.
+- **The entry's suggestion to fold `render_timeline`'s inlined loop into the helper was deliberately
+  NOT done**, and neither were `render_a1`'s or `reformat`'s. All three already read `export_dir`, so
+  none of them is part of the defect; replacing working code is a refactor, which these working rules
+  forbid. `render_a1`'s loop isn't even the same rule — it forces `.wav` before deduping. The
+  required parameter, not the de-duplication, is what stops the split coming back.
+- **Five `fu.OUTPUT_DIR` references in `app.py` were left alone on purpose**, each checked
+  individually rather than swept:
+  - `:387` — inside `get_output_dir()` itself; this *is* the default.
+  - `:530` — `browse_directory`'s starting folder, and only a fallback: the frontend always passes
+    `browseDirectory(dir || defaultDir)` (`ExportSettings.jsx:102`).
+  - `:622` — the `default_output_dir` field the settings dialog displays; correct by definition.
+  - `:1875` `build_file_context` and `:2010` `_output_arg_info` — the **chat/execute subsystem**.
+    Its paths are PROJECT_ROOT-relative and its write permission is `fu._media_path_ok`, which
+    admits `input/` and `OUTPUT_DIR` only. Pointing it at a user-chosen directory changes where the
+    assistant is allowed to write — a security-boundary change, not a bug fix, and #16's territory.
+    Consequence recorded in §14.
+- **Nothing was done about the export directory being settable to `input/`.** `POST
+  /api/export_settings` accepts any absolute path, so a user can aim exports at their own sources.
+  Measured rather than assumed (below): source bytes are safe, but the Media Bin gets polluted. This
+  predates the fix for `render_timeline` and is now shared by five routes; logged in §14 instead of
+  quietly adding validation nobody asked for.
+
+#### Observations
+
+- **The sharpest symptom wasn't in the entry.** The entry described 404s — empty Media Info, no
+  preview. The worse case is when the *same name* exists in both directories: then nothing 404s, and
+  the Bin lists one file while the preview player and Media Info Out show a different one. That is
+  the kind of failure that gets trusted. It is also easy to reach, because with a custom dir set the
+  two directories accumulate files with the same default names (`trimmed.mp4`, `held.mp4`, …).
+- **0.35.0's `O_EXCL` claim was already protecting the export directory** from the naming split: a
+  trim asking for a name taken in the custom dir would have clobbered it, but `commit_output` refuses
+  and allocates `taken_1.mp4`. So the naming half of this finding was already downgraded from data
+  loss to a wrong-suffix wart before today. Verified both ways: pre-fix the existing export kept its
+  bytes (`frame0` unchanged) while the response reported the name it had *not* written.
+- **Four writers racing on one name in a custom dir** produce four distinct files, each reported name
+  present on disk — the #2 fix composes with this one without any extra work.
+- **The `.preview_cache` key ignores the directory** (`<basename>.<int mtime>.preview.mp4`). Two
+  different non-browser-playable files sharing a name and a whole-second mtime get one shared
+  transcode. Reproduced identically on pre- and post-fix code, so it is not a regression — but this
+  fix widens the set of directories that can collide from {`input/`, `output/`} to {`input/`, any
+  export dir the user has used}. Logged in §14; not fixed here because changing the key means
+  invalidating every existing cache entry, which is #13's territory.
+- **Found by the real-installation smoke test, unrelated to this fix:** `/api/hold_frame` fails on
+  **every** video in the user's `input/` — 27 of 27 have no audio stream, and
+  `build_holdframe_filter` references `[0:a]` unconditionally. Filed as **#17**, verified identical
+  on pre-fix code.
+
+#### Verification
+
+**A. The finding's own script, re-run unchanged** (`/tmp/g4rep.sh`, pre-fix code and post-fix code
+swapped into the same paths so the two logs diff line-for-line):
+
+| Case | Before (0.35.0) | After (0.36.0) |
+|---|---|---|
+| render_timeline output: probe / preview / download | 404 / 404 / 200 | **200 / 200 / 200** |
+| trim | `output/`, not listed, download 404 | **export dir, listed, all three 200** |
+| hold_frame / reverse / splice | all `output/`, none listed | **all export dir, all listed** |
+| reformat, render_a1, dir=`output` clip sources | already correct | unchanged |
+| name free in export dir, taken in `output/` | `clash_1.mp4` | **`clash.mp4`** |
+| name taken in export dir | reported `taken.mp4`, wrote elsewhere | **`taken_1.mp4`, existing file untouched** |
+| Bin-listed files that probe+preview | 1 of 3 (and that one served the wrong bytes) | **9 of 9, no name in two directories** |
+| files stranded in `output/` | 6 | **0** |
+| default export dir (setting cleared) | correct | unchanged, still correct |
+| tracebacks | 0 | 0 |
+
+**B. Adversarial battery** (`/tmp/g4adv.sh`, 11 sections, post-fix):
+
+- **A** — the `input` half of both edited routes is untouched: `/preview/input/`, `/api/probe?dir=input`,
+  `/api/probe` with no `dir` arg (defaults to input), `/api/files`, `/input/<name>` all 200.
+- **B** — traversal still refused now that the read base is user-chosen, checked with
+  `curl --path-as-is` so the client doesn't normalize the path first: `../input/a.mp4`,
+  `..%2Finput%2Fa.mp4`, `..%2F..%2F..%2Fetc%2Fpasswd`, `subdir/../../input/a.mp4` all → 400
+  `path '…' escapes /tmp/g4export`; `%2Fetc%2Fpasswd` → 308 → 404. Probe rejects all of them at the
+  router (its `<name>` is not a `path:` converter).
+- **C** — a custom dir **deleted under the running app**: `get_output_dir()` falls back to `output/`,
+  and because the read side now uses the same helper it falls back *with* it — trim lands in
+  `output/`, probe 200, `/api/outputs` lists it. Before, the two halves disagreed in both states.
+- **D** — export dir pointed **at `input/`**: writing `a.mp4` yields `a_1.mp4`; `input/a.mp4`'s md5 is
+  unchanged (`5cf344fb…` before and after). Paired run on pre-fix code shows `render_timeline` already
+  did exactly this (`a_2.mp4` in `input/`, source unchanged) — pre-existing, now shared by five
+  routes. §14.
+- **E** — two-pass `under50mb_h264`: trim and hold_frame both land in the custom dir; 0 stats/passlog
+  files and no `.partials` left behind (the #9 staging follows the new directory automatically,
+  because it derives from `out_path`).
+- **F** — `with space.mp4`, `hash#tag.mp4`, `café.mp4`: written to the custom dir, and probe/preview/
+  download all 200 through the new base.
+- **G** — the Bin operations that were dead before: rename → `{"name":"rn_new.mp4","ok":true}`, probe
+  200, `DELETE` → `{"ok":true,"removed":"rn_new.mp4"}`, file gone. Paired pre-fix run: rename 404,
+  DELETE 404, reveal 404, file still on disk.
+- **H** — the one behaviour this fix makes *worse*, measured on both versions rather than reasoned
+  about: a file produced by the chat assistant lives in `output/`. Pre-fix `probe(name,'output')`
+  returned 200 and the preview played, but a render using it as a clip source already failed
+  (`input file not found: /tmp/g4export/chatmade.mp4`) because clip resolution has always used
+  `get_output_dir()`. Post-fix the probe 404s, so the chat panel's "load the result onto the clip"
+  step returns early instead of repointing the clip at a file no render can read. The render error is
+  identical before and after; only the probe/preview changed. §14.
+- **I** — `POST /api/clear_output` swept the 5 files in the custom dir and left `output/keepme.mp4`
+  alone.
+- **J** — trim + hold_frame + reverse + render_timeline all racing on `race.mp4` in the custom dir:
+  `race.mp4`, `race_1.mp4`, `race_2.mp4`, `race_3.mp4`, 4 distinct md5s, every reported name present.
+- **K** — no caller can omit the directory any more: 0 one-argument call sites,
+  `signature: (name, export_dir)`, and a one-arg call raises `TypeError`.
+
+**C. Preview-cache probe** (`/tmp/g4cache.sh`, run on both code versions): two ProRes files
+(`testsrc` vs `testsrc2`) named `same.mov`, mtimes forced equal, one in `input/` and one in the export
+dir. Both `/preview/input/same.mov` and `/preview/output/same.mov` returned the same 7,335-byte
+transcode, **identically before and after the fix** — the cache key, not this change.
+
+**D. Real installation** (port 5001, the user's own media; the running server had already hot-reloaded
+the edit, and reported `0.36.0`). Settings backed up to `/tmp/g4_settings_backup.json` first and
+byte-compared at the end. Source: the shortest video in `input/` (1.625s), never written to.
+- Default configuration (`output_dir` empty, `under50mb_hevc`, i.e. the two-pass path): trim →
+  `output/`, listed, probe/preview/download 200, deleted through `DELETE /api/outputs`.
+- Custom dir `/tmp/g4real_export`: trim and reverse both landed there, both listed, probe/preview/
+  download 200, neither leaked into `output/`, both deleted through the app. `hold_frame` failed —
+  #17, not this fix.
+- Restored: settings file md5 identical to the backup; `input/` 54, `output/` 20, `projects/` 8 all
+  unchanged; source md5 `ff7d7750…` unchanged; 0 files left in the scratch dir, 0 `g4_real*` anywhere,
+  no `.partials`, 0 tracebacks.
+
+**E. Build**: `npx vite build` ✓ 71 modules, 131ms (this is also the check that `VERSION` and
+`frontend/package.json` agree at 0.36.0); `npm run lint` — same 5 pre-existing warnings, none in a
+file this fix touched.
+
+Cleanup: scratch instance killed, port 5099 clear, `/tmp/g4`, `/tmp/g4export`, `/tmp/g4real_export`
+and the ProRes fixtures removed. The repro/adversarial scripts are kept at `/tmp/g4rep.sh`,
+`/tmp/g4adv.sh`, `/tmp/g4adv_pre.sh`, `/tmp/g4cache.sh`, `/tmp/g4real.sh`.
 
 ---
 
@@ -1091,7 +1523,7 @@ group), or run the backend with `use_reloader=False` when long renders are expec
 
 ## 9. MEDIUM — Failed renders leave corrupt partials in the Export Bin
 
-**Status:** NOT STARTED
+**Status:** FIXED in 0.34.0 — see [Resolution](#resolution-9)
 **Confidence:** VERIFIED by running
 **Where:** `app.py:651`, `app.py:1333`; passlogs at `ffmpeg_utils.py:643`
 
@@ -1107,6 +1539,142 @@ failure, and move the passlog cleanup into a `finally` that also covers the inte
 Worth doing in the same commit as #3 since it is the same idea in a second place.
 
 **Effort:** ~20 lines.
+
+<a id="resolution-9"></a>
+### Resolution — 0.34.0 (2026-08-26)
+
+#### Changes made
+Four new helpers in `ffmpeg_utils.py` (inserted immediately before `unique_output_name`; nothing
+existing in that file was edited), and eight call-site conversions in `app.py`. No filter builder, no
+encoder argument, no validation, and no frontend file changed.
+
+`ffmpeg_utils.py` — `_STAGE_DIR_NAME = ".partials"` plus:
+
+| Helper | What it does |
+|---|---|
+| `stage_output(out_path)` | returns `<dest>/.partials/<pid>.<tid>/<final basename>`, creating the dir |
+| `commit_output(staged, out_path)` | `os.replace` into the export dir, never clobbering; returns the name actually used |
+| `discard_output(staged)` | `rmtree`s that staging dir, then `rmdir`s `.partials` if empty |
+| `run_ffmpeg_staged(args, out_path, timeout=600)` | the whole dance for single-pass writers; returns `(result, final_name)`, `final_name is None` on failure |
+
+`app.py` — the seven single-pass writers each went from `args.append(out_path)` + `fu.run_ffmpeg(...)`
+to one `fu.run_ffmpeg_staged(args, out_path)` call: `trim` (:779), `splice` (:851),
+`render_timeline` (:1460, its `timeout=1800` preserved), `render_a1` (:1637), `reformat` (:1735),
+`hold_frame` (:1800), `reverse` (:1853). `multipass_export_render` (:473) — the shared helper behind
+all six size-capped/custom export routes — now stages around its two-pass calls and returns the
+committed name. Every route that reports a filename now reports the committed one rather than the
+name it asked for; verified that no route reads `out_path` after its write.
+
+#### Reasoning
+- **A subdirectory, not a `.part` suffix — this is the crux.** ffmpeg picks its muxer from the output
+  extension, so the temp path has to end in the *real* extension. `out_path + ".part.mp4"` (the shape
+  #3 uses, where the cache dir is never enumerated) is wrong here: I listed
+  `.cand.mp4.4321.part.mp4` through `/api/outputs` and it **appeared in the Export Bin**, where
+  `OutputPanel.jsx:105` auto-selects the newest file by mtime and mounts a `<video>` on it — the fix
+  would have shipped the very symptom it removes. Keeping the exact final basename one directory down
+  needs no `-f` and is invisible to `_list_dir`, which filters on media extensions and skips
+  directories.
+- **`-f` was investigated and rejected on measurement.** Forcing the format would have allowed a flat
+  temp name, but `-f mp4` on a `.m4v` output rewrites the ftyp major brand from `M4V ` to `isom`, and
+  `-f m4v` is the *raw* MPEG-4 video muxer, which refuses H.264 ("m4v muxer supports only codec
+  mpeg4") and wrote 0 bytes. Staging preserves `M4V ` because the staged name still ends `.m4v`
+  (confirmed in verification section E).
+- **Same volume by construction.** `.partials` lives inside the destination directory, so
+  `os.replace` is always an intra-filesystem rename — atomic — no matter where `get_output_dir()`
+  points (#4's territory: it can be any volume).
+- **`commit_output` never clobbers.** Two renders asking for one name produce two files today; a bare
+  `os.replace` would have silently destroyed the first result. Measured before changing anything: a
+  second `dup.mp4` render starting 5s into the first yields `dup.mp4` + `dup_1.mp4`. The `_1` walk at
+  commit time preserves exactly that.
+- **pid + thread id in the staging dir**, for the same reason as #3: `app.run` defaults
+  `threaded=True`, so concurrent renders are real and must not share a staging path.
+- **`discard_output` in a `finally`, not an `except`.** Most exit paths here are not exceptions — an
+  ffmpeg failure `return`s a 500, and a subprocess timeout raises `TimeoutExpired`, which is not an
+  `OSError`. On success the file has already been moved out, so the `rmtree` just removes an empty dir.
+- **`/api/execute` was deliberately left alone.** Its output path is model-chosen and can be a
+  pattern (`frame_%04d.png`), which staging would have to reason about; it is #16's scope, not this
+  finding's.
+
+#### Observations
+- **The audit entry's passlog claim was misdiagnosed.** It says the two-pass stats files are "not
+  cleaned on the failure path, only on success." They are not: both cleanup loops
+  (`ffmpeg_utils.py:757` and `:907`) have been inside a `finally` since the first commit that
+  introduced them. The real gap was narrower — `_PASSLOG_SUFFIXES` (:643) lists `-0.log`,
+  `-0.log.mbtree`, `.log`, `.log.mbtree` but **not** libx264's `.temp` variants (`-0.log.temp`,
+  `-0.log.mbtree.temp`), which is exactly what an interrupted pass 1 leaves behind. Staging fixes
+  that incidentally and completely: the stats prefix derives from the output path, so every stats
+  file — listed suffix or not — is now born inside the staging dir and dies with it. Verified: after a
+  two-pass render killed mid-pass, `0` passlog files of any name in the export dir.
+  `_PASSLOG_SUFFIXES` itself was left untouched, since editing it would now be dead code for the
+  export dir and is outside this finding.
+- **A second orphan the entry never mentioned:** when a size-capped render *succeeds* but overshoots
+  its cap, the route reports the overshoot — and the complete-but-rejected file used to stay in the
+  export dir under the requested name. It now lives in the staging dir and is discarded with it.
+  Recorded rather than claimed as the fix's purpose; it fell out of the same change.
+- **`.webm` output returns 500, and it is pre-existing — not caused by this change.** Section E's one
+  red result. `fu.encode_args` yields libx264/AAC, which the webm muxer will not accept ("Nothing was
+  written into output file, because at least one of its streams received no packets"). Confirmed by
+  standing up a **pre-fix instance** (`/tmp/g9pre`, port 5097, `app.py`/`ffmpeg_utils.py` from `HEAD`,
+  which contains neither helper): identical 500, identical stderr — and pre-fix it additionally left a
+  **264-byte `pre.webm`** in the export dir, i.e. #9 itself. Post-fix the directory is empty. `.webm`
+  is in `ALLOWED_EXTENSIONS` but cannot actually be rendered; logged as its own defect, not fixed
+  here, because fixing it means choosing VP9/Opus encoder arguments — new behavior, outside this task.
+- **A `kill -9` of the Flask process still leaves one staged file.** No `finally` survives SIGKILL.
+  Measured. It is inert in the way that matters: `/api/outputs` does not list it (verified after a
+  restart), it holds no name, and re-rendering the same name succeeds. Same class as #3's stray and
+  #13's missing eviction; the CHANGELOG states plainly that deleting `.partials` clears it.
+- **Simultaneous same-name renders got strictly better.** Before, two renders launched at the same
+  instant both wrote `sim.mp4` and produced one interleaved file; now each stages privately and
+  commits to `sim.mp4` and `sim_1.mp4`, both valid. Not the goal, but a real improvement worth
+  recording.
+
+#### Verification
+Scratch instance only (port 5096, `/tmp/g9`, with `input/src.mp4` 12s 1080p, `input/big.mp4` 25s 4K
+303 MB ≈16s to render, plus small `tiny.mp4`/`mute.mp4` fixtures). `/tmp/g9rep.sh` was written
+**before** the fix and re-run **unchanged** afterwards. The real `input/`, `output/`, and `projects/`
+were never used as test targets.
+
+| Case | Before | After |
+|---|---|---|
+| ffmpeg killed 5s into a 16s render | `500` + **53,739,568 B BROKEN `mid.mp4`**, listed by `/api/outputs` | `500`, export dir **empty**, `/api/outputs` `[]` |
+| retry of that same name | pushed to `mid_1.mp4` | clean `mid.mp4`, valid |
+| ffmpeg killed the instant it starts | `500` + **48 B BROKEN file**, listed | `500`, nothing left |
+| Export Bin *during* a render | shows a 90 MB BROKEN file as a real export | shows `[]`; the finished file appears when done |
+| uninterrupted renders (both sources) | valid | valid |
+| stray temp/passlog files, tracebacks | 0 / 0 | 0 / 0 |
+
+Then I attacked the fix instead of stopping at the repro (`/tmp/g9adv*.sh`, sections A–I):
+
+- **A** — after a normal render the export dir holds the file and nothing else; `.partials` is gone.
+- **B** — `kill -9` of the server mid-render: 1 staged file, **not** listed by `/api/outputs` after
+  restart, and the same output name renders fine afterwards.
+- **C** — staggered same-name renders: still `dup.mp4` + `dup_1.mp4`, both valid, each response
+  naming its own file. Pre-fix behavior preserved.
+- **D** — simultaneous same-name renders: `sim.mp4` + `sim_1.mp4`, both valid (was: one shared file).
+- **E** — every allowed container through `/api/render_timeline`: mp4 `isom`, mov `qt`, mkv, avi
+  `AVI`, m4v **`M4V `** all `200` and valid — the brand check that justifies the design. `.webm` 500,
+  pre-existing (above).
+- **F** — two-pass paths: `under50mb_h264` and `custom` both `200`/valid; **0** passlog files of any
+  name in the export dir; a render killed mid-two-pass leaves an **empty** export dir, `[]` from
+  `/api/outputs`, and **0** staged leftovers.
+- **G** — the A1 `.wav` stem: `200`, valid, 882,154 B; a second stem of the same name correctly
+  becomes `stem_1.wav`, with the response naming the committed file.
+- **H** — the other five writer routes (`trim`, `splice`, `hold_frame`, `reverse`, `reformat`): all
+  `200`, all valid, no hidden leftovers.
+- **I** — export directory relocated to `/tmp/g9alt`: render valid there, `.partials` created and
+  cleaned inside it, and a mid-render `kill -9` there leaves only the earlier good file.
+- Byte identity: `cmp` of a staged render against the same render written in place is **identical**
+  for mp4, mov, avi and m4v. (matroska/webm are excluded because their output is inherently
+  non-deterministic — SegmentUID/DateUTC differ between two runs of the same command.)
+- **Real installation** (5001, restarted onto the new code; `/api/version` → `0.34.0`, Vite 5173
+  `200`): one 1.5s render of the user's own media under **their own** `under50mb_hevc` setting, which
+  is untouched and happens to exercise the most-changed path (`multipass_export_render`) —
+  `200`, `audit9_smoke.mp4`, 27,015,148 B, playable, correctly listed by `/api/outputs`, `.partials`
+  gone, 0 passlog files. The test render was deleted afterwards; `input/` 54, `output/` 15,
+  `projects/` 8 — all back to baseline.
+- 0 tracebacks across every run.
+
+No frontend file was touched, so no rebuild was required beyond the version bundle.
 
 ---
 
@@ -1216,6 +1784,10 @@ the export dir would reclaim the dead 211 MB immediately.
 | Output name joined unsanitized | `app.py:1266`, also `:1489`, `:1573` | `8/25 hero cut` fails with ffmpeg's **version banner** as the error text; `../x.mp4` writes outside the bin and reports success. Nothing is overwritten (the uniqueness loop does check `os.path.exists`) | VERIFIED |
 | `validate_ffmpeg_command` checks only the last output | `ffmpeg_utils.py:2389` | Permits writing into `input/`, so the "source files are never modified" invariant depends on the Agent tab not emitting such a command | PLAUSIBLE |
 | `.export_settings.json` is committed | `app.py:249` | Every clone inherits the developer's `under50mb_hevc` mode. It is also a non-atomic read-modify-write, so concurrent saves lose an update and a crash can reset the export dir, quality and **all saved presets** | VERIFIED |
+| `.webm` is offered but cannot be rendered | `ffmpeg_utils.py` `ALLOWED_EXTENSIONS` / `encode_args` | Naming an output `.webm` always 500s: `encode_args` yields libx264/AAC and the webm muxer accepts neither ("Nothing was written into output file, because at least one of its streams received no packets"). Found during #9 and confirmed identical on pre-#9 code, so it is not a regression | VERIFIED by running, both before and after #9 |
+| Chat-produced files are invisible once the export dir is moved | `app.py:1875` `build_file_context`, `:2010` `_output_arg_info` | The chat/execute sandbox writes to `fu.OUTPUT_DIR` — deliberately, since it is a write-permission boundary (`fu._media_path_ok`), not a display preference. With a custom export dir its files are not in the Bin, and since 0.36.0 they no longer probe or preview either. Renders using them as a clip source already failed before 0.36.0 (clip resolution has always used `get_output_dir()`), so nothing that worked stopped working | VERIFIED on pre- and post-0.36.0 code |
+| Export dir can be set to `input/` | `app.py` `POST /api/export_settings` | Any absolute directory is accepted, including the source folder. Source bytes are safe (`O_EXCL` + the uniqueness loop give `a_1.mp4`), but exports then appear in the Media Bin's **input** list. `render_timeline` behaved this way before 0.36.0; five routes now share it | VERIFIED, md5 of the source unchanged both ways |
+| `.preview_cache` key ignores the directory | `ffmpeg_utils.py` `get_or_make_preview` | The key is `<basename>.<int mtime>.preview.mp4`, so two different non-browser-playable files sharing a name and a whole-second mtime share one transcode — the preview player shows the wrong video. Measured: two ProRes files named `same.mov` both served the identical 7,335-byte file. Identical before and after 0.36.0, but that fix widens the colliding set from {`input/`, `output/`} to {`input/`, any export dir used} | VERIFIED by running |
 
 ### Fix
 The name-sanitizing items are best done as one shared helper used by `render_timeline`,
@@ -1234,7 +1806,7 @@ the repo with no `timeout=`, and remains open here.
 
 ## 15. HIGH — The documented launch command stops the server at boot, before any render
 
-**Status:** NOT STARTED
+**Status:** FIXED — 2026-08-26, shipped in 0.31.1 (see Resolution below)
 **Confidence:** VERIFIED by running, under a real pty, and bisected to the exact call
 **Where:** `.venv/lib/python3.9/site-packages/werkzeug/_reloader.py:429-433` (called at `:453`),
 triggered by `app.run(debug=True, ...)` at the bottom of `app.py`
@@ -1296,11 +1868,108 @@ from a Terminal is meant to be a supported path for non-developers.
 
 **Effort:** two lines of docs for (1); ~5 lines for (2).
 
+### Resolution — fixed 2026-08-26, shipped in 0.31.1
+
+Option 1, as recommended above.
+
+#### Changes made
+
+1. **`agentic_installation.MD:209`** — the Flask launch line becomes
+   `source .venv/bin/activate && nohup python3 app.py < /dev/null > /tmp/flask_dev.log 2>&1 &`,
+   plus a "Notes that matter" bullet saying the redirect is required and why, so nobody tidies it away.
+2. **`.claude/skills/run-app/SKILL.md:24`** — the same one-token change, with the same warning in
+   short form.
+3. **`ffmpeg_utils.py:949-953`** (`run_ffmpeg` docstring) and **`.claude/docs/gotchas.md:42`** — both
+   asserted that the launch *this project documents* leaves fd 0 on the tty. That sentence became
+   false the moment change 1 landed, so both were narrowed to "a hand-typed `nohup … &`" with a
+   pointer to the docs' `< /dev/null`. The #7 rationale is untouched and still stands: users can type
+   whatever they like, so `run_ffmpeg` still needs its own defense.
+
+The `nohup npm run dev … &` lines in both docs were **deliberately left alone** — see Verification.
+
+#### Reasoning
+
+`< /dev/null` fixes this at the actual precondition rather than around it. `ensure_echo_on` returns
+at `_reloader.py:421-422` when `sys.stdin.isatty()` is false, so with stdin on `/dev/null` the
+termios code is never reached at all — there is no tty to touch, no SIGTTOU, nothing to be stopped
+by. It is one token, it changes no code, and it fixes the command a person actually copies.
+
+Options 2 and 3 were left on the table on purpose. Option 3 (`use_reloader=False`) removes live
+reload, a real workflow loss for a fix to a launch line. Option 2 (redirect stdin inside `app.py`)
+is the app second-guessing its own terminal, and it is only worth adding if launching from Terminal
+is meant to be supported for non-developers — a product decision, not a bug fix. Worth noting the
+two are not equivalent in coverage: option 1 protects the documented command, option 2 would also
+protect a user who types their own `nohup python3 app.py &`. If that case matters, option 2 is still
+open and this fix does not conflict with it.
+
+#### Observations
+
+- **The entry above is incomplete on the mechanism, and this is the correction that matters.** It
+  reads as though a background process group on a tty is sufficient. It is not — there are **three**
+  preconditions, and the third was missed: `ensure_echo_on` only calls `tcsetattr` **if ECHO is
+  already off** (`_reloader.py:431`). With ECHO on, `tcgetattr` succeeds, the `if` is false, and
+  nothing is written to the terminal, so the server boots normally *even in a background group*. I
+  measured exactly that: the documented line with ECHO **on** → HTTP 200, all processes `SN`. What
+  supplies the third condition in real life is the interactive shell itself: zsh's line editor holds
+  the tty in no-echo mode while it sits at the prompt, so a job backgrounded from a prompt is
+  reliably launched into an echo-off terminal. That is why the original bisection (which used an
+  interactive zsh) reproduced it every time, and why a script-mode shell — which leaves ECHO on —
+  does not. Anyone re-testing this must set the echo state deliberately or they will get a false
+  clean bill of health.
+- **Vite does not have this bug, tested rather than assumed.** Both docs also background
+  `npm run dev` with stdin left on the tty, and Vite binds stdin for its `h`/`r` keyboard shortcuts,
+  which made it a plausible second instance of the same defect. It is not: `npm run dev` in the same
+  background-group-on-a-tty position served HTTP 200 with `npm` and `node` both in `STAT S`, in
+  **both** echo states. So the fix is one line per doc, not two, and the frontend instructions were
+  left unchanged.
+- **`README.txt` was already safe and needed no edit.** Its start-up instructions (`:170`, `:174`)
+  run `python3 app.py` in the **foreground** with no `&`, which makes the process group the
+  terminal's foreground group — `tcsetattr` is then perfectly legal. The human-facing doc had the
+  right shape all along; only the two backgrounded, agent-facing launch lines were exposed.
+- This is a **werkzeug/debug-mode** defect, not a Flask-app one: it needs `debug=True` *and* the
+  reloader. `use_reloader=False` boots fine, `debug=False` boots fine. It therefore cannot affect any
+  future packaged build that runs without the reloader.
+- The stop is silent in the worst way — `nohup`'s log holds only the two normal banner lines, exit
+  status is nothing (the process is stopped, not dead), and `lsof -ti :5001` is empty. zsh does print
+  `you have suspended jobs` on exit, which is the only clue, and it appears long after the fact.
+
+#### Verification
+
+All four arms run inside a real pty (`pty.fork()`), with the launched job in a genuine background
+process group — asserted from `ps`, not assumed (`PGID 12088 != SHELL_TPGID 12075`) — and with the
+ECHO state set explicitly so the third precondition is controlled rather than inherited. Harness:
+`/tmp/g15arm.py --arm <arm> --echo on|off`. The backend arms ran against a **scratch copy** on port
+5099 (`/tmp/g15`, `.venv` symlinked, `port=5001` → `5099`); the real server on 5001 was never
+touched. The Vite arms ran the real `frontend/` on port **5199** via `--strictPort`, so the user's
+own 5173 session was left alone.
+
+| arm | command | echo | result |
+|---|---|---|---|
+| `flask-doc` | documented line, as it was | **off** | **DEAD** — HTTP 000; all 4 Python processes `TN`; zsh: `you have suspended jobs` |
+| `flask-fix` | `< /dev/null` added | **off** | **SERVES** — HTTP **200**; all 4 processes `SN` |
+| `flask-doc` | documented line, as it was | on | SERVES — HTTP 200, `SN` — *the control that isolates ECHO as the third precondition* |
+| `vite-doc` | `nohup npm run dev … &` | **off** | SERVES — HTTP 200; `npm` + `node` both `SN` |
+| `vite-doc` | `nohup npm run dev … &` | on | SERVES — HTTP 200; `SN` |
+
+The `flask-fix` command string is byte-identical to the line now in both docs, so what was tested is
+what shipped. Bisection from the original finding still holds and was re-confirmed: `use_reloader=False`
+→ serves, `debug=False` → serves, shipped `app.py` → stopped.
+
+Two dead ends worth recording so nobody repeats them: an interactive-zsh pty harness (`zsh -i`) is
+unusable for this — the line editor's bracketed-paste and prompt escapes swallow scripted input, and
+the run wedges with no output. And a script-mode harness (`zsh -f script.sh`) runs fine but leaves
+ECHO **on**, which silently turns the gate into a false pass. The working shape is script-mode plus an
+explicit `tcsetattr` clearing `ECHO` on the pty before exec.
+
+Cleanup: scratch instance killed, `/tmp/g15` and the port-5199 Vite removed, ports 5099/5199 clear,
+`input/` 54 / `output/` 13 / `projects/` 7 unchanged, and the user's own server on 5001 untouched
+throughout.
+
 ---
 
 ## 16. HIGH — The Agent tab can overwrite source media in `input/`
 
-**Status:** NOT STARTED
+**Status:** FIXED — 2026-08-26, shipped in 0.32.0 (see Resolution below)
 **Confidence:** VERIFIED by running (HTTP 200, source file's md5 changed)
 **Where:** `ffmpeg_utils.py:2410` (`validate_ffmpeg_command`) vs. `ffmpeg_utils.py:370,392`
 (`_EXTRA_ARG_CONFLICTS`), reached from `app.py` `/api/execute` at `:2007`
@@ -1351,6 +2020,463 @@ should be done together.
 
 **Effort:** ~10 lines in one function, plus a test for each of the three forms.
 
+### Resolution — fixed 2026-08-26, shipped in 0.32.0
+
+#### Changes made
+
+Both in `ffmpeg_utils.py`, both inside the validator. No route changed, no behavior added.
+
+1. **`_in_input_dir(p)`** — new 6-line helper beside `_media_path_ok`, resolving a path exactly the
+   way `_media_path_ok` does so the two cannot disagree about what a path means. Compares
+   **case-insensitively**; see Reasoning.
+2. **`validate_ffmpeg_command`** — a new loop after the existing `_media_path_ok` pass: a path that
+   resolves inside `input/` is legal **only** as an `-i` value. Anything else that looks like a path
+   and lands in `input/` is rejected with `cannot write to input/: <path> — source files are never
+   modified; write to output/ instead`, returned as the route's normal **400**.
+3. **`CHANGELOG.md`, the 0.31.0 entry** — it told users ffmpeg's overwrite refusal "is what keeps a
+   file in `input/` from being replaced, and that still holds". That is false, and this finding is the
+   proof. Corrected in place with a pointer to 0.32.0, and 0.32.0's own entry says plainly that source
+   files were never actually protected before. The identical false claim had already been caught and
+   removed from `/api/execute`'s code comment during #7.
+
+#### Reasoning
+
+**The rule is "input/ only after `-i`", not "the output must not be in input/".** Inverting it that
+way is what makes the fix small and hard to slip past. Identifying which positionals are *outputs*
+in an ffmpeg command needs an option table — with only the "predecessor is not a flag" heuristic,
+`-y -i a.mp4 -an out.mp4` reads `out.mp4` as the value of `-an`, so any such guard has holes by
+construction. Asking the opposite question needs no parse at all: the sole legitimate reason for an
+`input/` path to appear is as an input, and inputs are unambiguous because `-i` immediately precedes
+them. That single rule covers `-y`, `-n` and the bare form together, covers positions nobody
+enumerated, and cost 5 lines.
+
+**Checking every token, not just `argv[-1]`, is required for the fix to hold at all** — this is
+#14's "only checks the last output" row, and it is not a separable follow-up here. ffmpeg writes
+*every* output it is given, and `-y -i input/a.mp4 -c copy input/victim.mp4 -f null -` puts the
+victim in the middle where nothing ever looked. Measured before the fix: **HTTP 200**. Leaving that
+in place would have shipped a guard with a one-token bypass.
+
+**Filter expressions needed no exemption, which I expected to need and verified I didn't.** My first
+draft skipped tokens containing `=` to protect `-vf scale=320:-2` and `movie=input/b.mp4[m];...`.
+That exemption is not just unnecessary but harmful: it would have let `input/vic=tim.mp4` through as
+an output. It is unnecessary because a filter expression is *one token* — joined onto `PROJECT_ROOT`,
+`movie=input/b.mp4[m];[0:v][m]hstack` does not resolve inside `input/`, so it never trips the check.
+Confirmed by running the `movie=` case (A7) both before and after: 200 both times. Dropping the
+exemption made the rule simultaneously simpler and stricter.
+
+**`-y` was deliberately not blocked.** Denylisting it would be the obvious move and it is the wrong
+one: `-y` into `output/` is legitimate and useful, blocking it removes working behavior, and it
+misses the bare and `-n` forms of the same write. Guarding the destination covers every form.
+
+#### Observations
+
+- **My own first fix had a real hole, found by adversarially attacking it rather than by re-reading
+  it: macOS case-insensitivity.** `realpath` does **not** canonicalise case, and APFS is
+  case-insensitive by default, so `INPUT/victim.mp4` opens exactly the file `input/victim.mp4` does
+  while failing a case-sensitive `startswith`. As a *middle* positional it wrote straight through the
+  first version of the guard — HTTP 200, source md5 changed. Fixed by lowercasing both sides in
+  `_in_input_dir`. Worth noting it only worked from a middle positional: the same trick as the final
+  argument was caught by the pre-existing `_media_path_ok` as "path outside input/output", so the two
+  defects had to combine to be exploitable, which is exactly why neither showed up alone.
+- **`_media_path_ok` is case-blind in the same way, and was left alone on purpose.** There the blind
+  spot fails *safe* — `INPUT/x.mp4` is read as "outside input/output" and rejected — so making it
+  case-insensitive would only *accept* more paths than today. That is a behavior expansion, not a fix.
+- **`_output_arg_info` (`app.py:1993-1994`) still has a `dir: "input"` branch** that reports a
+  successful write into `input/` back to the frontend so it can offer to load it onto the timeline.
+  With this fix, no write can reach it. Left in place — it is inert and defensive, and removing it is
+  unrelated cleanup.
+- **This closes #14's `validate_ffmpeg_command` row only for `input/`.** A middle positional pointing
+  somewhere else entirely — `-i input/a.mp4 -c copy /tmp/evil.mp4 -f null -` — is still unchecked,
+  because only `argv[-1]` goes through `_media_path_ok`. I did not extend the containment check to
+  every token: unlike the `input/` rule, that one *would* reject commands that work today (a
+  `-passlogfile /tmp/...`, for instance), so it removes existing capability and needs its own decision.
+  Recorded here rather than fixed, and #14's row stands.
+- ffmpeg refuses `-y -i input/a.mp4 -c copy input/a.mp4` — the *same* path in and out — on its own,
+  with a non-zero exit and the source intact (measured pre-fix: 500, md5 unchanged). That protection
+  does **not** extend to a different file in the same directory, which is the whole finding. It is
+  now rejected at validation instead, before ffmpeg is started.
+
+#### Verification
+
+A scratch instance on port **5098** (`/tmp/g16`, its own `input/` holding `src.mp4`, `src2.mp4`,
+`victim.mp4`), reached through the real `/api/execute`. The user's server on 5001 and the real
+`input/` were never test targets. Every case run pre-fix and post-fix with the *same* script, so the
+baseline is measured rather than assumed: `/tmp/g16bat.sh` (regression) and `/tmp/g16adv.sh`
+(adversarial, resetting `victim.mp4` and comparing md5 around every single attempt).
+
+**Regression battery — 12 cases, `victim.mp4` md5 checked around the whole run:**
+
+| | pre-fix | post-fix |
+|---|---|---|
+| R1 `-y` write into `input/` | **200, victim md5 CHANGED** `e7618b18…` → `2d017ca3…` | **400** |
+| R2 same without `-y` | 500 — but only incidentally, via #7's overwrite guard | **400**, at validation |
+| R3 multi-output `… input/victim.mp4 -f null -` | **200** | **400** |
+| R4 absolute path into `input/` | **200** | **400** |
+| R5 same file in and out | 500 (ffmpeg's own refusal), src intact | **400**, before ffmpeg starts |
+| A1–A7 legitimate: normal render, two `input/` inputs, `scale=` filter, `image2` pattern output, `-y` into `output/`, `-f null -`, `movie=input/…` filter | 200 ×7 | **200 ×7** |
+
+Post-fix: both source md5s identical to baseline, all 7 expected files in `output/`, 0 tracebacks.
+
+**Adversarial pass — 11 naming tricks, `victim.mp4` restored and md5-compared per attempt:**
+`INPUT/` and `Input/` case variants, `./input/`, `input//`, `input/../input/`, `output/../input/`,
+middle positional, three outputs with the victim second, victim as both an `-i` and an output,
+`VICTIM.mp4`, and a symlink in `output/` pointing back at `input/victim.mp4`. First run: **1 hole**
+(`INPUT/` as a middle positional, 200, file modified). After the case fix: **11/11 refused, victim
+byte-identical to baseline, 0 tracebacks.** The symlink case is caught because `_in_input_dir`
+resolves through `realpath`.
+
+Finally, the shipped module was exercised against the **real** repo's paths and real filenames
+(`fu.validate_ffmpeg_command` called directly — validation only, no ffmpeg run, nothing written):
+3 write-into-`input/` forms including the case variant all REJECTED, 3 legitimate forms all ACCEPTED.
+
+Cleanup: scratch instance killed, `/tmp/g16` removed, port 5098 clear, `input/` 54 / `output/` 13 /
+`projects/` 7 unchanged.
+
+---
+
+## 17. HIGH — Hold Frame fails on every silent source — all 27 of this machine's videos
+
+**Status:** FIXED in 0.38.0 — re-measured first (5 of 5 quality modes failed), then fixed, then the
+same script re-run. A silent source now stays silent, which was decided deliberately rather than by
+default — see [Resolution](#resolution-17).
+**Confidence:** VERIFIED by running, on the real installation and on a scratch instance
+**Where:** `ffmpeg_utils.py:1250-1253` (`build_holdframe_filter`), `app.py:1780-1784` (`hold_frame`)
+
+Found by #4's real-installation smoke test. Unrelated to #4 — reproduced identically on pre-fix code.
+
+### What's wrong
+`build_holdframe_filter` unconditionally references the source's audio stream:
+
+```python
+f"[0:a]atrim=start=0:end={t},asetpts=PTS-STARTPTS[a0];"
+...
+f"[0:a]atrim=start={t},asetpts=PTS-STARTPTS[a1];"
+```
+
+If the source has no audio stream, ffmpeg refuses the whole filtergraph:
+
+```
+Stream specifier ':a' in filtergraph description [0:v]trim=... matches no streams.
+```
+
+The route then returns a 500 whose `detail` is the tail of ffmpeg's stderr — which begins with the
+**version banner**, so the UI shows the user "ffmpeg version 8.0 Copyright (c) 2000-2025…" as the
+reason their hold failed (the same class of symptom as #11).
+
+`hold_frame` even documents the assumption that makes it wrong (`app.py:1782-1784`):
+
+> `build_holdframe_filter` always maps an `[outa]` track (original audio plus `anullsrc` silence
+> during the hold), so audio is present regardless of the source's `has_audio` flag.
+
+It forces `has_audio: True` on the info dict on that basis, so the encoder is told to expect audio
+too. The `anullsrc` half is fine; the two `atrim`s of `[0:a]` are not.
+
+**This is not an edge case on this machine.** Measured with `ffprobe -select_streams a` over
+`input/`: **27 video files, 27 with no audio stream.** Hold Frame cannot succeed on any of them.
+(The timeline's own head/tail/round holds are a different code path — `build_timeline_filter` — and
+are not affected; this is the standalone `/api/hold_frame` route the Hold Frame panel calls.)
+
+### How to reproduce
+```bash
+ffmpeg -f lavfi -i "testsrc=size=320x180:rate=25" -t 2 -c:v libx264 -qp 0 silent.mp4   # no -i audio
+# put silent.mp4 in input/, then:
+curl -s -X POST -H "Content-Type: application/json" \
+  -d '{"input":"silent.mp4","time":0.5,"duration":0.5}' http://127.0.0.1:5001/api/hold_frame
+# -> 500  {"error":"ffmpeg failed","detail":"ffmpeg version 8.0 Copyright ... matches no streams."}
+```
+Any real video from this machine's `input/` reproduces it without the synthetic file.
+
+### Fix
+Branch on the source's audio the way the rest of the module already does — `get_video_info` returns
+`has_audio`, and `hold_frame` has the info dict in hand before it builds the filter. When there is no
+audio, emit the video half only (`[outv]`, no `[outa]`, no `anullsrc`) and drop the forced
+`has_audio: True` so `encode_args` doesn't ask for an audio stream that isn't there. That means
+`build_holdframe_filter` needs a `has_audio` parameter and `hold_frame` needs to map `[outa]`
+conditionally — the two `-map` args and `hold_info` at `app.py:1785-1787`, plus the two-pass and
+single-pass paths below it, all read from the same two values.
+
+Worth deciding deliberately, not by default: whether a silent source should stay silent, or gain a
+full silent track (`anullsrc` for the entire output) so the result concatenates cleanly with
+audio-bearing clips later. The former is less surprising; the latter is what the current code was
+reaching for.
+
+**Effort:** ~15 lines across the two files. Verify against a silent source **and** an audio-bearing
+one (both quality paths — `MULTIPASS_QUALITIES` and single-pass — build their args separately).
+
+<a id="resolution-17"></a>
+### Resolution — 0.38.0 (2026-08-27)
+
+#### Re-measuring the finding first
+Every claim held, on a scratch instance (port 5096, `/tmp/g17`) with two fixtures: `silent.mp4`
+(`testsrc`, no audio stream) and `sound.mp4` (`testsrc2` + `sine`, h264 + aac). Baseline script
+`/tmp/g17rep.sh`, output `/tmp/g17_before.txt`, re-run **unchanged** afterwards into
+`/tmp/g17_after.txt`. The entry only claimed the failure; the re-measurement establishes that it is
+every quality mode, not just the default:
+
+| quality | silent source | audio-bearing source |
+|---|---|---|
+| `lossless` | **500** | 200, h264+aac |
+| `match` | **500** | 200, h264+aac |
+| `high` | **500** | 200, h264+aac |
+| `under50mb` (two-pass) | **500** | 200, h264+aac |
+| `under50mb_hevc` (two-pass) | **500** | 200, hevc+aac |
+
+5 of 5 modes fail on silence; 5 of 5 succeed with audio. The `detail` opens with
+`ffmpeg version 8.1.2 Copyright (c) 2000-2026 the FFmpeg developers` exactly as the entry describes,
+and ends with `...concat=n=3:v=0:a=1[outa];[outv_pre]format=yuv420p10le[outv] matches no streams.
+Error binding filtergraph inputs/outputs: Invalid argument`.
+
+#### The decision the entry asked to be made deliberately
+**A silent source stays silent** — no audio stream in the output at all. Chosen with the user rather
+than by default, because it changes what the exported file contains. The reasons it beats a
+full-output `anullsrc`:
+- It matches `/api/trim` and `/api/reverse`, the other **single-source** routes, both of which pass
+  the probed `info` straight to `encode_args` and so preserve the source's stream layout.
+  `/api/splice`'s forced `has_audio: True` — which is what the broken code was imitating — is a
+  *multi-input* necessity: `concat` needs every input to present the same streams, which is why
+  `build_concat_filter` synthesizes `anullsrc` per silent input. A one-input freeze has no such
+  constraint.
+- Nothing downstream needs the track. `build_timeline_filter` already synthesizes `anullsrc` for any
+  clip whose `has_audio` is false, so a silent hold output re-imported as a clip source still
+  concatenates against audio-bearing clips.
+- It suits this machine's material: the 27 sources are silent by design, with their sound in sibling
+  `.wav` files that ride on A1.
+
+#### Changes made
+
+**`ffmpeg_utils.py`** — `build_holdframe_filter` gained a **required** fourth positional parameter
+`has_audio` (before the `sample_rate`/`channel_layout` keyword defaults, the same shape
+`build_concat_filter` already uses for its `has_audio_flags`). The video chains were extracted into a
+local `video` string; when `has_audio` is false that string is returned as-is, and when it is true the
+four audio chains are appended to it exactly as before. The docstring records why `[0:a]` on a
+stream-less source is fatal to the *whole* graph rather than just its audio half.
+
+**`app.py`** `hold_frame` — three edits:
+- `fu.build_holdframe_filter(t, dur, fps, info["has_audio"])`.
+- `hold_info = {**info, "has_audio": True}` **deleted**; the two places that consumed it
+  (`multipass_export_render` and `encode_args`) now take the probed `info` unchanged, so
+  `fu.audio_args` emits `-an` for a silent source and its existing AAC args for an audio-bearing one.
+- `-map "[outa]"` moved behind `if info["has_audio"]`, so no label is mapped that the graph did not
+  define.
+- The comment that asserted the opposite ("always maps an `[outa]` track … so audio is present
+  regardless of the source's `has_audio` flag") replaced with one that states the actual contract.
+
+No frontend file, no other route, and no encoder argument changed.
+
+#### Reasoning
+- **`has_audio` is required rather than defaulted**, following #4's `unique_output_name(export_dir)`
+  precedent. A default of `True` reproduces this exact bug for the next caller, and — unlike a wrong
+  directory, which merely misplaces a file — a wrong value here fails the render outright. Verified:
+  a three-argument call raises `TypeError: build_holdframe_filter() missing 1 required positional
+  argument: 'has_audio'`.
+- **The video chains were extracted to a local rather than duplicated across two return statements.**
+  It is what makes "the video half is byte-identical whether or not there is audio" a property of the
+  code instead of a claim needing a test — though it was tested anyway (60/60 below).
+- **`hold_info` was deleted, not corrected to `{**info, "has_audio": info["has_audio"]}`.** That
+  would have been a no-op wrapper around the value it already had, and the whole purpose of the dict
+  was the override being removed.
+- **`_inject_pixel_format` needed nothing**, which is worth stating because it is the one shared
+  helper this graph passes through on the two-pass 10-bit path. It keys on `[outv]` alone and is
+  indifferent to `[outa]`; its own docstring already promised only that "every filter builder in this
+  module terminates its video chain with the literal label `[outv]`", which the video-only graph still
+  does. Confirmed by running it against a video-only graph.
+
+#### Observations
+- **The entry misattributes the caller, and it matters for how the severity reads.** It says "the
+  standalone `/api/hold_frame` route the Hold Frame panel calls". The React Hold Frame panel does
+  **not** call it: `HoldFrameForm.jsx` only sets `headHoldSec`/`tailHoldSec` on a clip, which renders
+  through `build_timeline_filter`. A repo-wide grep finds exactly one caller —
+  `static/app.js:307`, the **feature-frozen legacy UI** at `127.0.0.1:5001` — plus direct API use.
+  So the practical blast radius is the fallback interface, not the main app. The route was still
+  wholly broken for 27 of this machine's 30 videos and the fix stands on its own; but "Hold Frame is
+  broken" would read to a user of the React UI as something they can see, and it is not.
+- **`input/` is no longer 27-for-27 silent.** It now holds 30 videos: the same 27 silent sources plus
+  3 audio-bearing files (`Batch_01_V002_r01.mp4`, `_r02.mp4`, `_r02_1787867337.mp4`) the user has
+  copied back in since the audit was written. That is what allowed the no-regression half of the
+  verification to run on **their own** media rather than only on a fixture.
+- **One source frame is dropped at the freeze boundary.** A 2 s / 25 fps source with a 0.5 s hold
+  yields 61 frames where 62 is the arithmetic — the frame at the `t_end` boundary satisfies neither
+  `trim=end=t` nor `trim=start=t_end`. **Pre-existing and untouched**: the video half of the graph is
+  byte-identical before and after this fix (proven below), so this is out of scope and is logged
+  rather than fixed. It is also the reason a hold's output is one frame shorter than
+  `source + duration` would predict — worth knowing before anyone treats that as a new defect.
+- **The freeze cannot be verified by frame hash on a lossy mode**, and an early attempt to do so on
+  the `under50mb_hevc` output was misleading (runs of 2–3 identical frames instead of the expected
+  12). The frozen frames are identical *going in* and are re-encoded independently coming out. The
+  frame-hash proof is therefore taken from the `lossless` mode, where the run is exact.
+- **The 500 only appears with a real ffmpeg**, so the argv-capture harness below reports 200 for the
+  pre-fix silent cases — its `run_ffmpeg_staged` stub always returns rc 0. The failure evidence is
+  the end-to-end run; the harness's job is only to compare command lines.
+
+#### Verification
+
+**A. Unit level, `build_holdframe_filter` over 60 shapes** (t ∈ {0, 0.5, 1.0, 2.375} × dur ∈ {0.04,
+0.5, 3.0} × fps ∈ {24, 25, 29.97, 30, 60}):
+- `has_audio=True`: **60/60 byte-identical** to the pre-fix builder (the old body pasted into the test
+  verbatim, not paraphrased).
+- `has_audio=False`: 60/60 contain no `[0:a]`, no `[outa]` and no `anullsrc`, end at
+  `concat=n=3:v=1:a=0[outv]`, and equal the audio version's video half exactly.
+- 3-argument call → `TypeError`; `fu.audio_args({"has_audio": False})` → `['-an']`;
+  `_inject_pixel_format` on a video-only graph → `...[outv_pre];[outv_pre]format=yuv420p10le[outv]`
+  with `-map [outv]` intact.
+
+**B. Argv-level A/B across all 5 quality modes × both sources.** `/tmp/g17old` holds a copy of the
+code with **only** this change reverted, and `/tmp/g17argv.py` drives both copies through the Flask
+test client with the ffmpeg spawn stubbed, capturing the exact command each would run (scratch root
+normalized out of the paths):
+
+| case | pre-fix vs post-fix argv |
+|---|---|
+| `lossless` / `match` / `high` / `under50mb` / `under50mb_hevc`, **audio-bearing** | **IDENTICAL, all 5** |
+| the same 5 modes, **silent** | differ by exactly three things: the four audio chains gone from the graph, `-map [outa]` gone, and the AAC args (`-c:a aac -b:a 192000 -ar 44100 -ac 2`) replaced by `-an` |
+
+Nothing else moved in any of the ten command lines — which is the statement that audio-bearing holds
+render byte-for-byte the file 0.37.0 rendered.
+
+**C. End-to-end, the finding's own script re-run unchanged** (`/tmp/g17rep.sh`):
+
+| quality | silent: before → after | audio-bearing: before → after |
+|---|---|---|
+| `lossless` | 500 → **200, video only** | 200 → 200, video+audio |
+| `match` | 500 → **200, video only** | 200 → 200, video+audio |
+| `high` | 500 → **200, video only** | 200 → 200, video+audio |
+| `under50mb` | 500 → **200, video only** | 200 → 200, video+audio |
+| `under50mb_hevc` | 500 → **200, video only** | 200 → 200, video+audio |
+
+10 of 10 succeed; 0 leftover `.partials`, `.ffpass*` or `.part*` files; 0 zero-byte files. Silent and
+audio-bearing outputs carry the **same 61 video frames at the same 2.440000 s** — the audio case's
+larger *container* duration (2.520000 s) is its AAC tail, pre-existing and unrelated.
+
+**D. Frame level (`lossless`, where hashes are meaningful).** Both outputs contain a run of **12
+consecutive identical frames** — the freeze — in sources whose every frame otherwise differs, and
+both are 61 frames at 25/1.
+
+**E. Edge cases, silent source unless noted** (all through the live scratch route): `t=0` (empty
+leading trim) → 61 frames, video only; the same at `t=0` with audio → 61 frames, video+audio;
+`t` = last frame → 61; hold of one frame (0.04 s) → 50; hold of 10 s on a 2 s source → 299. The
+guards still reject what they always did, as JSON: `t == duration` and `t < 0` → 400
+`time must be within [0, 2.0)`; `duration 0` → 400 `duration must be positive`; unknown file → 404.
+
+**F. Real installation** (port 5001, hot-reloaded to `0.38.0`, the user's **own** `under50mb_hevc`
+two-pass setting left exactly as found — never written to, md5 identical before and after):
+- **Silent source** `SPHE_002_0310_fg01_v001_AI-MP4.mp4` (1.583 s, the shortest in `input/`), the case
+  that returned 500: **200** in 11 s, `hevc` video only, 49 frames / 2.041667 s, 25,157,760 B.
+- **Audio-bearing source** `Batch_01_V002_r01.mp4` (14.04 s): **200** in 98 s, `hevc` + `aac`,
+  360 frames / 15.000000 s. The hold's audio behaviour is intact and was measured rather than
+  assumed — with a 1 s hold at t=3.0, `volumedetect` reads −41.0 / −44.2 / −33.9 dB before it,
+  **−91.0 dB (silence floor) at 3.1 and 3.5 s**, and −47.0 / −52.0 / −49.7 dB after.
+- **The exact legacy-UI payload** (`{input, time, duration}` as strings, no `output` field, which is
+  what `static/app.js:307` sends): 200 → `SPHE_002_0310_fg01_v001_AI-MP4_held.mp4`, video only.
+- Cleanup: all three test renders deleted; `input/` 57, `output/` 26, `projects/` 8 unchanged; 0
+  `zz_g17*` files anywhere; no `.partials` directory. The 2 `.ffpass*` files and 1 zero-byte file
+  that `find` reports under `output/old/` are dated 2026-08-10 and 08-13 and predate this session.
+
+**G. Build:** `npx vite build` ✓ 71 modules, 137 ms (also the check that `VERSION` and
+`frontend/package.json` agree at 0.38.0); `npm run lint` — the same 7 pre-existing warnings, none in
+a file this fix touched (no frontend file was touched).
+
+Scripts kept at `/tmp/g17rep.sh` and `/tmp/g17argv.py`; the pre-fix comparison copy at `/tmp/g17old`.
+
+---
+
+## 18. HIGH — The V2 lane drew SHORT of V1 even when its file was longer, so its end read frame 356
+
+**Status:** FIXED in 0.37.0 (the reported cause). Two adjacent defects measured and deliberately
+**left alone** — see *Not fixed* below.
+**Confidence:** VERIFIED by measurement against the real `clipMath.js`, not by reading
+**Where:** `frontend/src/clipMath.js:9` (`GAP_PX`), `frontend/src/components/Timeline/Timeline.jsx:18`
+(`GAP`) + the V1/V2/ANIM lane classes + the Ruler wrapper,
+`frontend/src/components/Timeline/Ruler.jsx:4-8`
+
+Reported by the user: *"on v2 the track end in 356 but the file information says 361."*
+
+### What's wrong
+A flex `gap` **consumes width but represents zero time.** Every lane was a flex row with
+`gap-0.5` (2px), so a lane's seconds→pixels scale was a function of **that lane's own clip count**:
+
+| surface | clips | gap pixels injected | drew | should draw |
+|---|---|---|---|---|
+| V1 lane | 6 | 5 × 2 = **10px** | 910px | 900px (15.000s) |
+| V2 lane | 1 | **0px** | 902.5px | 902.5px (15.041667s) |
+| Ruler | lays out none | **0px** | ticks at `t × PPS` | — |
+
+The three could never agree. Measured consequences, all reproduced with node against the real
+module:
+
+- **V2's right edge sat 7.5px LEFT of V1's** even though its file is one frame *longer*. The
+  correct answer is 2.5px to the **right** — one frame at 60px/s and 24fps.
+- `clientXToTimelinePos` subtracts the same phantom 10px back out (`clickPx -= clipPx + GAP`), so a
+  click on V2's drawn right edge resolved to 14.875s = **frame 357**; 2–3px inside it, **frame 356**
+  — the user's number, exactly. 10px ÷ 2.5px-per-frame = 4.0 frames, which is 100% of the error with
+  nothing left over for a second cause.
+- A **second, independent** origin error: the Ruler's wrapper carried the 48px gutter but *not* the
+  lanes' own `px-2`, so every tick sat 8px (**3.2 frames**) left of the time the lanes and the click
+  mapper put it at. `Ruler.jsx`'s `+ clips.length * 2` width term was also wrong on its own terms —
+  a flex row of *n* items has *n−1* gaps, not *n*.
+
+**The `361` itself is not a bug.** `ffprobe` on the file (read-only): video stream
+`duration=15.041667`, `duration_ts=184832` ÷ 512 ticks-per-frame = **361.000**, `nb_frames=361`,
+`r_frame_rate=24/1` (not `24000/1001`). The media genuinely contains 361 frames, so a 15.000s V1 and
+this V2 cannot line up frame-for-frame. The app was reporting the file correctly; it was *drawing*
+it wrongly.
+
+### How to reproduce
+`/tmp/v2laneproof.mjs` imports the real `clipMath.js` and asserts, over 9 clip configurations, that
+each lane's drawn width equals `duration × PPS`, that the playhead is linear at 0/25/50/75/100%,
+and that the A1 bed's boundaries land on V1's. **Before the fix: 33 failures**, including
+`V1 lane width == 900px: got 910 want 900` and
+`V2 right edge is 2.5px (1 frame) PAST V1's: got -7.5 want 2.5`. **After: ALL PASS.**
+
+### Changes made
+Seven edits, all pixel accounting. No function signature, call site, or arithmetic changed.
+
+1. `clipMath.js:9` — `GAP_PX` 2 → **0**, with a comment recording *why* it is load-bearing. This is
+   the default `gapPx` for `sequencePosToPx` and `sequenceClipBounds`, which lay out the A1 bed.
+2. `Timeline.jsx:18` — `GAP = 0.5 * 4` → **0**. One line reaching all three consumers at once: the
+   playhead (`timelinePosToPx`, :230), the click/drag mapper (:617), and the A1 bed (:1290).
+3–5. `gap-0.5` deleted from the **V1**, **V2** and **ANIM** lane class lists.
+6. `px-2` added to the Ruler's wrapper, so its ticks share the lanes' 8px content origin.
+7. `Ruler.jsx` — the dead-and-wrong `+ clips.length * 2` dropped from `totalWidth`.
+
+Plus three comments corrected to stop describing a gap that no longer exists (the fused-group
+wrapper in `Timeline.jsx`, `sequencePosToPx`'s header in `clipMath.js`, and the insertion line in
+`TimelineClip.jsx`, whose 2px teal line moved from `-2` to `-1` so it straddles the seam instead of
+sitting in a gap that is gone).
+
+### Reasoning
+Zero is the only value of `GAP` for which `px = pos × PPS` holds on *every* surface at once. Any
+non-zero value is a per-lane correction that each future consumer has to re-derive independently —
+which is precisely how this defect was born; there were three consumers and they disagreed. Clips
+remain visually distinct: each already carries a 2px palette border, and two adjacent borders meet
+as a 4px seam that reads as a stronger boundary than the old 2px void did.
+
+### Verification
+- `/tmp/v2laneproof.mjs`: **ALL PASS** (was 33 failures). V1 lane **900.0px exact**, V2 lane
+  **902.5px exact**, V2's right edge **+2.5px** past V1's — one frame, the correct answer. A click
+  at V2's drawn end now reads **frame 360** instead of 356.
+- `npx vite build` — ✓ built, 71 modules. `npm run lint` — no new warnings (the 7 pre-existing
+  `exhaustive-deps` / `only-export-components` warnings are unchanged).
+- Backend untouched: no render-path change, so no frame-hash re-verification was required.
+
+### Not fixed — measured, reported, left to the user
+Both are real and both would violate *"fix only what is broken or explicitly requested"* to change
+unilaterally, because each removes or reverses documented existing behavior.
+
+- **`MIN_CLIP_PX = 24` inflates V2 after Batch Analyzer.** `clipRenderedPx` floors every box at 24px
+  for clickability, and `sequencePosToPx`/`sequenceClipBounds` honor that floor while
+  `timelinePosToPx` and `clientXToTimelinePos` do not. Batch Analyzer emits the Raise round-up as a
+  **separate** V2 clip; at 2 frames that segment wants 5px and draws 24, inflating V2's lane by
+  **19px = 7.6 frames**. (V1 draws the same round-up as an amber sub-segment *inside* its last clip,
+  so V1 is unaffected.) The floor is a deliberate clickability feature — removing it is the user's
+  call. The proof harness reports these two configurations as **SKIP**, not PASS.
+- **`useTimelinePlayback.js:69-74` takes the picture from V2 and the length from V1.** `segments`
+  come from `source` (`displayClips ?? clips`, i.e. V2 when it exists) but `totalDuration` is summed
+  from `clips` (V1). That single number drives the seek clamp (:386), the stop boundaries (:198,
+  :233) and `goToEnd()` (:425), so when V2 is longer its tail frames are unreachable by any seek and
+  `goToEnd()` parks on V2's frame 359. The code documents the intent — *"V1 is the timeline of
+  record"* — so reversing it is a design decision about what the timeline's length **means**, not a
+  bug fix.
+
 ---
 
 ## Verified-clean notes
@@ -1367,4 +2493,6 @@ Recorded so nobody re-investigates these:
   environment observation, not a code defect.
 - `render_timeline`'s inlined uniqueness loop (`app.py:1268-1274`) **does** correctly check the
   custom export dir, unlike `fu.unique_output_name`. Renders are safe from clobbering an existing
-  file today; see #4 for why the two should be unified anyway.
+  file today; see #4 for why the two should be unified anyway. *(As of 0.36.0 the helper takes a
+  required `export_dir`, so both now check the same directory; the inlined loop was deliberately
+  left in place — see #4's Resolution.)*

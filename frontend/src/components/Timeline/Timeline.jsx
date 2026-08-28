@@ -15,7 +15,7 @@ import { addKeyframe, removeNearestKeyframe, sampleCropOrigin, clipTFromTimeline
 
 const PPS = 60
 const TRACK_PAD = 8
-const GAP = 0.5 * 4 // gap-0.5 = 2px (0.125rem = 2px)
+const GAP = 0 // no flex gap between clips — see clipMath.GAP_PX for why it must be 0
 const GUTTER_PX = 48 // matches the w-12 gutter (track-focus label + eye toggle)
 // How close to the scroll box's edge a reorder drag has to get before the lane
 // starts scrolling itself, and how many px per frame it moves at full tilt.
@@ -921,10 +921,14 @@ export default function Timeline({
             <Playhead ref={playheadRef} visible={clips.length > 0} onDrag={handlePlayheadDrag} />
 
             {/* Ruler — reflects V1's structure only; a plain spacer keeps its
-                ticks aligned under the V1/V2 gutter buttons below. */}
+                ticks aligned under the V1/V2 gutter buttons below.
+                The wrapper carries the lanes' own `px-2` as well as the w-12
+                gutter: a tick sits at t*PPS from ITS OWN left edge, so without
+                that padding every label sat 8px (3.2 frames at 24fps) left of
+                the time the lanes and clientXToTimelinePos put it at. */}
             <div className="flex items-stretch">
               <div className="shrink-0 w-12" />
-              <div onClick={handleTimelineClick} className="flex-1 cursor-pointer" title="Click to move the playhead">
+              <div onClick={handleTimelineClick} className="flex-1 px-2 cursor-pointer" title="Click to move the playhead">
                 <Ruler clips={clips} pps={PPS} />
               </div>
             </div>
@@ -965,14 +969,12 @@ export default function Timeline({
                   ) : (
                     <div
                       onClick={handleTimelineClick}
-                      className={`flex items-stretch gap-0.5 bg-neutral-950 px-2 py-1 h-12 cursor-pointer transition-all ${!v2Visible ? 'opacity-35 grayscale pointer-events-none' : ''}`}
+                      className={`flex items-stretch bg-neutral-950 px-2 py-1 h-12 cursor-pointer transition-all ${!v2Visible ? 'opacity-35 grayscale pointer-events-none' : ''}`}
                     >
                       {/* Grouped, not a flat map: V2 Reconstruct emits one clip
                           per range it keeps, and a run of them is ONE clip to the
-                          user (clipMath.fuseGroups). The run gets its own wrapper
-                          so the lane's gap-0.5 falls only BETWEEN groups — a flex
-                          gap can't be suppressed per boundary — and the wrapper
-                          carries the things a single clip has exactly one of: the
+                          user (clipMath.fuseGroups). The run gets its own wrapper,
+                          which carries the things a single clip has exactly one of: the
                           name, the duration, the badges, the delete × and the
                           selection ring. An unfused clip comes back as a
                           single-member group and renders exactly as before. */}
@@ -1107,7 +1109,7 @@ export default function Timeline({
                 <div
                   onClick={handleTimelineClick}
                   {...v1FileDragProps}
-                  className={`flex-1 flex items-stretch gap-0.5 px-2 py-1.5 h-16 cursor-pointer transition-all ${v1DragOver ? 'bg-indigo-950/40' : 'bg-neutral-950'} ${!v1Visible ? 'opacity-35 grayscale' : ''}`}
+                  className={`flex-1 flex items-stretch px-2 py-1.5 h-16 cursor-pointer transition-all ${v1DragOver ? 'bg-indigo-950/40' : 'bg-neutral-950'} ${!v1Visible ? 'opacity-35 grayscale' : ''}`}
                 >
                   {clips.map((clip, i) => (
                     <TimelineClip
@@ -1178,7 +1180,7 @@ export default function Timeline({
                       >−</button>
                     </div>
                   </div>
-                  <div className="flex-1 flex items-stretch gap-0.5 bg-neutral-950/60 px-2 py-1.5 h-12">
+                  <div className="flex-1 flex items-stretch bg-neutral-950/60 px-2 py-1.5 h-12">
                     {clips.map(clip => {
                       const totalPx = clipTotalPx(clip, PPS)
                       const headPx = clipHeadPx(clip, PPS)

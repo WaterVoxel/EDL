@@ -15,6 +15,223 @@ the day the version file appeared. There are no tags for them and never will be 
 `v0.25.0` is the first real tag. Treat the older entries as a history, not a
 download list.
 
+## 0.38.0 — 2026-08-27
+
+**Hold Frame now works on video with no sound.** Before this, freezing a frame failed on any
+clip whose file has no audio track — and since every one of the 27 videos in `input/` on this
+machine is silent (the sound lives in separate `.wav` files on the A1 track), it failed on all
+of them. The error shown was worse than useless: it began with ffmpeg's version banner, so the
+reason read as "ffmpeg version 8.1.2 Copyright (c) 2000-2026…" instead of anything about audio.
+
+The cause was that the freeze always tried to cut and re-join the source's audio, which makes
+ffmpeg reject the entire job — picture included — when there is no audio to cut. A silent clip
+now produces a silent result, matching what Trim and Reverse already do. Clips that *do* have
+sound are completely unaffected: the audio still plays up to the freeze, goes quiet for exactly
+the length of the hold, and resumes after it, and the command sent to ffmpeg for those clips is
+byte-for-byte the one 0.37.0 sent.
+
+This is the Hold Frame in the fallback interface at `127.0.0.1:5001`. The Head/Tail hold buttons
+in the main timeline are a different mechanism and were never affected.
+
+## 0.37.0 — 2026-08-27
+
+**The timeline now draws every track to its true length, so V2's end reads the frame it actually is**
+
+Drop a video on V2 and its block used to stop *short* of where V1 ends — even when the file was
+longer. Click at that end and the frame counter said **356** while Media Info said the file was
+**361 frames** long. Nothing was wrong with the file or with the reading of it; the timeline was
+drawing it wrong.
+
+The cause was a 2-pixel cosmetic space between clips. That space took up room but stood for no time
+at all, so how much a track over-drew depended on how many clips happened to be sitting on it. A V1
+with six clips picked up five of those spaces — 10 extra pixels, four whole frames of nothing — while
+a V2 holding a single clip picked up none, and the ruler above them picked up none either. Three
+strips of the same timeline, three different ideas of where a given second was. The clip you dropped
+on V2 was measured against V1's stretched-out ruler, and that is where the missing frames went.
+
+That space is now zero. Clips still read as separate blocks — each one already carries its own
+coloured border, and two of them meeting makes a crisper edge than the old gap did. What changed is
+that one second is now the same number of pixels on V1, on V2, on the ruler, and under the playhead,
+by construction rather than by four separate corrections that had drifted apart.
+
+Two more things were off by the same kind of accounting and are fixed with it: the ruler's ticks and
+labels sat 8 pixels to the left of the times the tracks put them at (about three frames' worth), and
+its overall width was calculated one gap too wide.
+
+Worth knowing about the file that prompted this: it really does contain 361 frames, not 360. At 24
+frames per second that is 15.042 seconds, so it genuinely runs one frame longer than a 15-second V1
+and its block now correctly sticks out past V1's end by that one frame. The app was right about the
+number all along.
+
+Two related problems were measured and deliberately **left alone**, because fixing either would
+change how the timeline behaves rather than how it draws:
+
+- Very short clips are still drawn at a 24-pixel minimum so they stay clickable. After Batch
+  Analyzer that minimum stretches V2 by about 19 pixels (7.6 frames), because the Analyzer puts the
+  round-up on V2 as its own tiny clip while V1 keeps it tucked inside the last one.
+- Playback and seeking still measure the timeline's total length from V1 even while showing V2's
+  picture, so when V2 is longer its final frames can't be reached and **Go to End** stops just short
+  of them.
+
+Both are written up with numbers in [AUDIT.md](AUDIT.md) (#18) for a decision.
+
+## 0.36.0 — 2026-08-27
+
+**If you chose your own export folder, the app now agrees with itself about where your exports are**
+
+Export Settings lets you point exports at any folder you like. Until now only Render (and Reformat and
+Render A1) actually used that folder. Trim, Splice, Hold Frame and Reverse ignored it and wrote into the
+app's own `output/` folder instead — so the file you had just made didn't appear in the Export Bin at all.
+It was on your disk, in a folder you hadn't chosen, and the Bin couldn't list it, preview it, rename it,
+reveal it in Finder, or delete it.
+
+The Bin had the mirror-image problem. It listed your chosen folder correctly, but Media Info Out and the
+preview player looked in the app's `output/` folder — so clicking a render you had just made showed
+nothing, or, if a file of the same name happened to exist in the other folder, showed **that** file's
+details and played **that** video instead. Nothing said anything was wrong.
+
+Both sides now use your chosen folder, and so does the numbering that keeps names from clashing: asking
+for a name that's already taken in your export folder gets you `name_1` as it should, and a name that
+merely exists in the app's `output/` folder no longer causes a pointless rename.
+
+Nothing changes if you haven't chosen an export folder — everything keeps going to `output/`.
+
+Not covered: files produced by the chat assistant. Those are written to the app's own `output/` folder by
+design (it's the folder the assistant is allowed to write to), so they still don't show up in a relocated
+Export Bin.
+
+## 0.35.0 — 2026-08-27
+
+**Two renders finishing at the same moment can no longer overwrite each other**
+
+0.34.0 stopped two same-name renders from colliding in the ordinary case, but it left a narrow window
+open: the app checked whether a name was free and then, a fraction of a second later, moved the
+finished file into it. If a second render finished inside that gap, both had already seen the name as
+free, so the second one wrote over the first. You got one file, both requests told you they had
+written it, and the render you lost left no trace — no error, nothing in the Bin, nothing in the log.
+
+The window was small but the thing that opens it is completely ordinary. Reloading the page while a
+render is running and pressing Render again is enough: the first render keeps going after the reload
+(closing the tab doesn't stop it), so now two renders are heading for the same name. Two browser tabs
+do it too, and the Render button being greyed out doesn't help, because that only applies to the tab
+you're looking at.
+
+Now the name is claimed in a single, indivisible step rather than checked and then used, so exactly
+one render can own each name and any others move on to `_1`, `_2`, and so on. Under a test that
+widened the window deliberately, eight simultaneous renders of the same name used to leave **one**
+file — seven results destroyed, all eight reporting the same filename. All eight now survive, each in
+its own file, each request naming the file it actually wrote.
+
+This affects every kind of export — the timeline, trims, splices, held frames, reverses, reformats,
+the audio-only stem, and the size-capped and custom quality modes — because they all finish through
+the same step. Single renders are unchanged: you still get exactly the name you asked for.
+
+## 0.34.0 — 2026-08-26
+
+**A render that fails no longer leaves a broken file in your Export Bin**
+
+Until now, when a render stopped partway — you quit the app while it was working, the machine slept,
+the disk filled, ffmpeg hit something it couldn't encode — whatever had been written so far stayed
+in the export folder, and the Export Bin listed it like any finished export. It had a normal name
+and a plausible size, so nothing about it looked wrong until you clicked it and the player refused
+to open it, or you handed it to someone else. A render killed the instant it started left a 48-byte
+file that no player on earth can open. The Bin also showed the file *while* a render was still
+running, so a growing, incomplete file looked like a finished one.
+
+The failed file also took the name. Rendering `promo.mp4` again after a failure gave you
+`promo_1.mp4`, and the useless `promo.mp4` sat above it in the list until you noticed and deleted it
+by hand.
+
+Now every render is written off to the side in a hidden folder and moved into the export folder only
+once it has finished successfully. A render that fails leaves nothing behind: no file, no name taken,
+no entry in the Bin — just the error, and you can retry with the same name. A render in progress no
+longer appears in the Bin until it's done. Renders that finish are byte-for-byte identical to before,
+including `.m4v` files, which keep their original format marking.
+
+Two smaller things came with it. The scratch files the size-capped and custom quality modes write
+during their two measuring passes (up to a few MB each) used to be left in the export folder when a
+render was interrupted; they're now inside the hidden folder and go away with it. And two renders
+started at the same moment with the same output name used to collide into a single file — now each
+gets its own, the same way staggered renders always have.
+
+Not covered: a render already in flight when the app is force-quit can leave one file in the hidden
+folder, since nothing is running to clean it up. It's invisible to the app, it never blocks a name,
+and deleting the hidden `.partials` folder inside your export folder clears it.
+
+## 0.33.0 — 2026-08-26
+
+**A preview that fails once no longer stays broken forever**
+
+Some formats can't play in a browser, so the app quietly makes a playable copy the first time you
+click such a file and reuses that copy afterwards. If anything interrupted the very first copy —
+you quit the app mid-way, the machine slept, ffmpeg ran out of disk — the half-written file stayed
+behind, and the app treated it as finished. Every later click on that file handed you the same
+broken piece. The video window stayed black or refused to load, clicking away and back changed
+nothing, and restarting the app changed nothing either, because the bad file was on disk. The only
+way out was knowing about the hidden `.preview_cache` folder and deleting the file by hand.
+
+There was a second, quieter version of the same problem. One click can ask for a preview twice, and
+a second request arriving while the first copy was still being written was served that partly
+written file — so the player failed while the copy it was reading finished perfectly a moment
+later. That one looked random, which made it the harder of the two to report.
+
+Now the playable copy is built off to the side and only moved into place once it's complete. A
+preview that fails says so, with the error, and the next click simply tries again. Nothing
+half-finished is ever handed to the player.
+
+If a file of yours is already stuck from before this fix, it stays stuck — the bad copy is already
+on disk and this change can't tell it apart from a good one. Deleting `.preview_cache` at the
+project root fixes it; the app rebuilds whatever it needs.
+
+## 0.32.0 — 2026-08-26
+
+**The Agent tab can no longer write over your source footage**
+
+Files in `input/` are meant to be read and never touched — it is the promise the whole
+non-destructive design rests on. The Agent tab could break it. If the command it generated named
+one of your source files as the file to *write*, it ran, reported success, and replaced that
+file's contents. Your original footage was gone, with no warning and no undo. It did not take
+anything unusual to trigger: writing `-y` in front of a command is the ordinary way to tell ffmpeg
+"don't ask, just do it", and that is exactly what turns the refusal-to-overwrite into an overwrite.
+
+Any command that would write into `input/` is now refused before ffmpeg starts, with a message
+saying to write to `output/` instead. Reading from `input/` is untouched — that is what it is for —
+and so is writing into `output/`, including with `-y`.
+
+**What you may notice:** an Agent request that used to appear to work will now come back with
+"cannot write to input/". That request was destroying a source file, so the refusal is the fix
+rather than a limitation. Everything that writes to `output/` behaves exactly as before: twelve
+ordinary Agent commands — plain trims, two inputs combined, filters, thumbnail sequences, a
+`-y` overwrite in `output/` — were checked before and after and all behave identically.
+
+**Correction to the 0.31.0 note below.** That entry said ffmpeg's refusal to overwrite is "what
+keeps a file in `input/` from being replaced". That was wrong: the refusal is skipped entirely when
+a command carries `-y`, so source files were never actually protected. 0.32.0 is what makes that
+statement true, and it is enforced by the app rather than left to ffmpeg.
+
+**Numbering note:** minor rather than patch, for the same reason as 0.27.0 and 0.30.0 — commands
+that used to run are now refused, which is a change to existing behavior, and `0.x` means no
+stability promises yet.
+
+## 0.31.1 — 2026-08-26
+
+**The documented start-up command no longer stops the engine before it starts.**
+
+If you started the app by copying the command out of the install guide into a Terminal window, it
+could stop dead during start-up: nothing ever answered on port 5001, and the log file held only the
+normal start-up banner with no error in it to explain why. The command now ends up with the engine
+properly detached from the Terminal window, and it starts normally.
+
+This was the same family of problem as the render freeze fixed in 0.31.0, one step earlier in the
+day: a background program is not allowed to reach back and adjust the Terminal it was launched from,
+and gets frozen by the operating system if it tries. 0.31.0 stopped the video encoder from doing it
+during a render; this stops the engine itself from doing it at start-up. The two are independent —
+fixing the render freeze did not fix this one, which is why it needed its own change.
+
+Nothing about the app's behavior changed, and no fix is needed if you already had it running.
+The instructions for starting the frontend are unchanged — it was tested in the same conditions and
+was never affected.
+
 ## 0.31.0 — 2026-08-26
 
 **Renders no longer freeze the whole app when the engine was started from a Terminal window**
@@ -49,8 +266,11 @@ Two things worth knowing:
 Ask the Agent for an edit whose output filename is already taken and ffmpeg refuses to
 overwrite it — which is what protects your existing files. Previously that refusal was
 invisible: the request just hung until it timed out. Now you get a clear message saying
-nothing was written, so you can rename and try again. The same refusal is what keeps a
-file in `input/` from being replaced, and that still holds.
+nothing was written, so you can rename and try again.
+
+(This entry originally claimed the same refusal is what keeps a file in `input/` from being
+replaced. That was not true — a command carrying `-y` skips the refusal altogether. See 0.32.0,
+which actually protects `input/`.)
 
 **Numbering note:** minor rather than patch. The fix itself changes no behavior anyone
 relied on, but the Agent tab now returns a real error where it used to time out, and

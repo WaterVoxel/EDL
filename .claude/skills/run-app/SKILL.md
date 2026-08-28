@@ -21,11 +21,17 @@ assuming it carried over.
 
    ```bash
    lsof -ti :5001 | xargs kill 2>/dev/null; sleep 1
-   source .venv/bin/activate && nohup python3 app.py > /tmp/flask_dev.log 2>&1 &
+   source .venv/bin/activate && nohup python3 app.py < /dev/null > /tmp/flask_dev.log 2>&1 &
    sleep 2 && curl -s http://127.0.0.1:5001/api/files
    ```
 
    The curl should return a JSON list (possibly empty). If Flask errors about a missing module: `pip install -r requirements.txt` inside the venv.
+
+   **Keep the `< /dev/null`.** `nohup` redirects stdout and stderr but not stdin, so without it a
+   backgrounded Flask still holds the terminal on fd 0 and the reloader's echo-restoring `tcsetattr`
+   raises SIGTTOU, stopping the server at boot — no port 5001, and a log with only the banner in it.
+   Harmless from an agent shell (no controlling terminal) and fatal from a real Terminal window, so
+   it is easy to "clean up" and never notice. Vite doesn't need it; only this line does.
 
 3. Check whether the Vite dev server is already running before starting a second one:
 

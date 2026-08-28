@@ -206,7 +206,7 @@ Two processes must run at once. If Flask is down, the UI at 5173 loads but every
 eval "$(/opt/homebrew/bin/brew shellenv)"   # so the app resolves ffmpeg off Apple Silicon
 cd "$REPO_ROOT"
 lsof -ti :5001 | xargs kill 2>/dev/null; sleep 1
-source .venv/bin/activate && nohup python3 app.py > /tmp/flask_dev.log 2>&1 &
+source .venv/bin/activate && nohup python3 app.py < /dev/null > /tmp/flask_dev.log 2>&1 &
 
 # --- frontend on 127.0.0.1:5173 ---
 eval "$(/opt/homebrew/bin/brew shellenv)"
@@ -222,6 +222,15 @@ Notes that matter:
   from the CLI; do not pass flags.
 - `debug=True` means Flask's reloader runs **two** Python processes on 5001. That is normal.
   `lsof -ti :5001 | xargs kill` handles both.
+- **The `< /dev/null` on the Flask line is required — do not drop it.** `nohup` redirects stdout and
+  stderr but never stdin, so without it a backgrounded Flask keeps the Terminal's tty on fd 0; the
+  reloader then calls `tcsetattr` to restore echo, which from a background process group raises
+  SIGTTOU and **stops the server before it serves anything**. The symptom is no port 5001 and a log
+  holding only the startup banner, with no error to go on. It bites when a person launches this in
+  Terminal.app and not when an agent does, because an agent shell has no controlling terminal.
+  Verified under a pty: without the redirect all four Python processes sit in `STAT T` and curl gets
+  nothing; with it, HTTP 200. The `npm run dev` line below does **not** need it — Vite was tested in
+  the same position and stays up either way.
 - Kill the old Vite before starting a new one. Vite's port is not strict — if 5173 is occupied it
   silently moves to **5174**, which breaks the promised URL. Always check the log for the port it
   actually took.

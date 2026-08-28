@@ -123,12 +123,13 @@ export default function TimelineClip({
       {/* Insertion line: where this clip WILL land if dropped now. Teal and 2px,
           deliberately unlike the playhead's 1px red line and the indigo wash a
           file drag paints — three things that can appear over the same lane.
-          Sits in the 2px inter-clip gap (-2px), so it reads as a boundary
-          between clips rather than as part of either one. */}
+          Straddles the seam (-1px on a 2px line), so it reads as a boundary
+          between clips rather than as part of either one. Clips are flush now —
+          clipMath.GAP_PX is 0 — so there is no gap left to sit inside. */}
       {dropSide && (
         <div
           className="absolute top-0 bottom-0 w-0.5 bg-teal-300 z-30 pointer-events-none"
-          style={dropSide === 'before' ? { left: -2 } : { right: -2 }}
+          style={dropSide === 'before' ? { left: -1 } : { right: -1 }}
         />
       )}
       {/* Head hold segment — only ever present on the sequence's first clip */}

@@ -2,7 +2,10 @@ import { clipTotalSec } from '../../clipMath'
 
 export default function Ruler({ clips, pps }) {
   const totalDuration = clips.reduce((sum, c) => sum + clipTotalSec(c), 0)
-  const totalWidth = totalDuration * pps + clips.length * 2
+  // Exactly the lane's width: pos * pps, with no allowance for inter-clip gaps.
+  // There are none any more (clipMath.GAP_PX), and the old `+ clips.length * 2`
+  // term counted one gap too many even when there were.
+  const totalWidth = totalDuration * pps
 
   // one tick per second, labeled every 5s to stay readable at typical zoom
   const tickCount = Math.ceil(totalDuration)

@@ -138,7 +138,7 @@ def serve_output(name):
 
 @app.route("/preview/<which>/<path:name>")
 def serve_preview(which, name):
-    base = fu.INPUT_DIR if which == "input" else fu.OUTPUT_DIR
+    base = resolve_media_dir(which)
     try:
         path = fu.safe_path(name, base)
     except fu.PathError as e:
@@ -177,7 +177,7 @@ def list_outputs():
 @app.route("/api/probe/<name>")
 def probe_file(name):
     which = request.args.get("dir", "input")
-    base = fu.INPUT_DIR if which == "input" else fu.OUTPUT_DIR
+    base = resolve_media_dir(which)
     try:
         path = fu.safe_path(name, base)
     except fu.PathError as e:
@@ -485,21 +485,34 @@ def multipass_export_render(input_args, filter_args, source_info, out_path, dura
     Raises RuntimeError carrying ffmpeg's stderr, exactly like
     fu.render_size_capped — every caller already maps that onto a 500. An
     invalid stored settings block is re-raised as a RuntimeError too, so callers
-    need only the one except clause."""
+    need only the one except clause.
+
+    Returns the name the render landed under, which is what the caller should
+    report: the render is staged and only moved to `out_path` once it is complete
+    (fu.stage_output / fu.commit_output, AUDIT #9), and the name can differ from
+    os.path.basename(out_path) if another render took it meanwhile. Staging here
+    covers all six multipass routes at once, and puts the two-pass stats files in
+    the staging directory instead of the export directory."""
     quality = get_export_quality()
-    if quality == "custom":
-        try:
-            settings = get_custom_export_settings()
-        except ValueError as e:
-            raise RuntimeError(str(e))
-        try:
-            return fu.render_custom_two_pass(input_args, filter_args, source_info, out_path,
-                                             duration_s, settings, timeout=timeout)
-        except ValueError as e:
-            raise RuntimeError(str(e))
-    return fu.render_size_capped(input_args, filter_args, source_info, out_path, duration_s,
-                                 timeout=timeout,
-                                 codec="hevc" if quality == "under50mb_hevc" else "h264")
+    staged = fu.stage_output(out_path)
+    try:
+        if quality == "custom":
+            try:
+                settings = get_custom_export_settings()
+            except ValueError as e:
+                raise RuntimeError(str(e))
+            try:
+                fu.render_custom_two_pass(input_args, filter_args, source_info, staged,
+                                          duration_s, settings, timeout=timeout)
+            except ValueError as e:
+                raise RuntimeError(str(e))
+        else:
+            fu.render_size_capped(input_args, filter_args, source_info, staged, duration_s,
+                                  timeout=timeout,
+                                  codec="hevc" if quality == "under50mb_hevc" else "h264")
+        return fu.commit_output(staged, out_path)
+    finally:
+        fu.discard_output(staged)
 
 
 def resolve_media_dir(which):
@@ -745,8 +758,10 @@ def trim():
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 500
 
-    out_name = fu.unique_output_name(data.get("output") or _derive_name(data["input"], "trimmed"))
-    out_path = os.path.join(fu.OUTPUT_DIR, out_name)
+    export_dir = get_output_dir()
+    out_name = fu.unique_output_name(data.get("output") or _derive_name(data["input"], "trimmed"),
+                                     export_dir)
+    out_path = os.path.join(export_dir, out_name)
 
     input_args = ["-i", in_path, "-ss", str(start), "-to", str(end)]
 
@@ -757,14 +772,13 @@ def trim():
         except ValueError:
             return jsonify({"error": "start/end must be numeric seconds or a HH:MM:SS.ms timecode"}), 400
         try:
-            multipass_export_render(input_args, [], info, out_path, trim_duration)
+            out_name = multipass_export_render(input_args, [], info, out_path, trim_duration)
         except RuntimeError as e:
             return jsonify({"error": "ffmpeg failed", "detail": str(e)[-4000:]}), 500
         return jsonify({"output": out_name})
 
     args = input_args + fu.encode_args(info, quality)
-    args.append(out_path)
-    result = fu.run_ffmpeg(args)
+    result, out_name = fu.run_ffmpeg_staged(args, out_path)
     if result.returncode != 0:
         return jsonify({"error": "ffmpeg failed", "detail": result.stderr[-4000:]}), 500
     return jsonify({"output": out_name})
@@ -813,8 +827,9 @@ def splice():
         "bit_rate": max((i["bit_rate"] or 0 for i in infos), default=0),
     }
 
-    out_name = fu.unique_output_name(data.get("output") or "spliced.mp4")
-    out_path = os.path.join(fu.OUTPUT_DIR, out_name)
+    export_dir = get_output_dir()
+    out_name = fu.unique_output_name(data.get("output") or "spliced.mp4", export_dir)
+    out_path = os.path.join(export_dir, out_name)
 
     filt = fu.build_concat_filter(len(in_paths), target_w, target_h, target_fps, has_audio_flags)
 
@@ -827,16 +842,16 @@ def splice():
     if quality in fu.MULTIPASS_QUALITIES:
         total_sec = sum(i["duration"] for i in infos)
         try:
-            multipass_export_render(input_args, filter_args, combined_info, out_path, total_sec)
+            out_name = multipass_export_render(input_args, filter_args, combined_info,
+                                               out_path, total_sec)
         except RuntimeError as e:
             return jsonify({"error": "ffmpeg failed", "detail": str(e)[-4000:]}), 500
         return jsonify({"output": out_name})
 
     args = input_args + filter_args
     args += fu.encode_args(combined_info, quality)
-    args.append(out_path)
 
-    result = fu.run_ffmpeg(args)
+    result, out_name = fu.run_ffmpeg_staged(args, out_path)
     if result.returncode != 0:
         return jsonify({"error": "ffmpeg failed", "detail": result.stderr[-4000:]}), 500
     return jsonify({"output": out_name})
@@ -1434,18 +1449,18 @@ def render_timeline():
     if quality in fu.MULTIPASS_QUALITIES:
         total_sec = sum(_clip_total_sec(spec) for spec in clip_specs)
         try:
-            multipass_export_render(input_args, filter_args, combined_info, out_path, total_sec)
+            out_name = multipass_export_render(input_args, filter_args, combined_info,
+                                               out_path, total_sec)
         except RuntimeError as e:
             return jsonify({"error": "ffmpeg failed", "detail": str(e)[-4000:]}), 500
         return jsonify({"output": out_name, **noise_report})
 
     args = input_args + filter_args
     args += fu.encode_args(combined_info, quality)
-    args.append(out_path)
 
     # A single-pass whole-timeline render at -qp 0 can run long; the
     # default 600s timeout was sized for single short operations.
-    result = fu.run_ffmpeg(args, timeout=1800)
+    result, out_name = fu.run_ffmpeg_staged(args, out_path, timeout=1800)
     if result.returncode != 0:
         return jsonify({"error": "ffmpeg failed", "detail": result.stderr[-4000:]}), 500
     return jsonify({"output": out_name, **noise_report})
@@ -1621,8 +1636,8 @@ def render_a1():
     args = []
     for p in input_paths:
         args += ["-i", p]
-    args += ["-filter_complex", filt, "-map", "[outa]", "-c:a", "pcm_s16le", out_path]
-    result = fu.run_ffmpeg(args)
+    args += ["-filter_complex", filt, "-map", "[outa]", "-c:a", "pcm_s16le"]
+    result, candidate = fu.run_ffmpeg_staged(args, out_path)
     if result.returncode != 0:
         return jsonify({"error": "ffmpeg failed", "detail": result.stderr[-4000:]}), 500
     noise_report = {}
@@ -1713,14 +1728,14 @@ def reformat():
     quality = get_export_quality()
     if quality in fu.MULTIPASS_QUALITIES:
         try:
-            multipass_export_render(input_args, filter_args, info, out_path, info["duration"])
+            out_name = multipass_export_render(input_args, filter_args, info, out_path,
+                                               info["duration"])
         except RuntimeError as e:
             return jsonify({"error": "ffmpeg failed", "detail": str(e)[-4000:]}), 500
         return jsonify({"output": out_name})
 
     args = input_args + filter_args + fu.encode_args(info, quality)
-    args.append(out_path)
-    result = fu.run_ffmpeg(args)
+    result, out_name = fu.run_ffmpeg_staged(args, out_path)
     if result.returncode != 0:
         return jsonify({"error": "ffmpeg failed", "detail": result.stderr[-4000:]}), 500
     return jsonify({"output": out_name})
@@ -1758,16 +1773,22 @@ def hold_frame():
     if t < 0 or t >= video_dur:
         return jsonify({"error": f"time must be within [0, {video_dur})"}), 400
 
-    out_name = fu.unique_output_name(data.get("output") or _derive_name(data["input"], "held"))
-    out_path = os.path.join(fu.OUTPUT_DIR, out_name)
+    export_dir = get_output_dir()
+    out_name = fu.unique_output_name(data.get("output") or _derive_name(data["input"], "held"),
+                                     export_dir)
+    out_path = os.path.join(export_dir, out_name)
 
-    filt = fu.build_holdframe_filter(t, dur, fps)
-    # build_holdframe_filter always maps an [outa] track (original audio
-    # plus anullsrc silence during the hold), so audio is present regardless
-    # of the source's has_audio flag.
-    hold_info = {**info, "has_audio": True}
+    filt = fu.build_holdframe_filter(t, dur, fps, info["has_audio"])
+    # A silent source stays silent. build_holdframe_filter emits an [outa]
+    # track (the original audio, with anullsrc silence spliced in during the
+    # hold) only when the source has audio to trim, so the -map list and the
+    # info passed to the encoder have to agree with it: mapping a label the
+    # graph never defined, or asking encode_args for an audio stream that
+    # nothing feeds, both fail the render.
     input_args = ["-i", in_path]
-    filter_args = ["-filter_complex", filt, "-map", "[outv]", "-map", "[outa]"]
+    filter_args = ["-filter_complex", filt, "-map", "[outv]"]
+    if info["has_audio"]:
+        filter_args += ["-map", "[outa]"]
 
     quality = get_export_quality()
     if quality in fu.MULTIPASS_QUALITIES:
@@ -1776,16 +1797,16 @@ def hold_frame():
         # duration plus the hold, not just the original alone.
         total_sec = info["duration"] + dur
         try:
-            multipass_export_render(input_args, filter_args, hold_info, out_path, total_sec)
+            out_name = multipass_export_render(input_args, filter_args, info,
+                                               out_path, total_sec)
         except RuntimeError as e:
             return jsonify({"error": "ffmpeg failed", "detail": str(e)[-4000:]}), 500
         return jsonify({"output": out_name})
 
     args = input_args + filter_args
-    args += fu.encode_args(hold_info, quality)
-    args.append(out_path)
+    args += fu.encode_args(info, quality)
 
-    result = fu.run_ffmpeg(args)
+    result, out_name = fu.run_ffmpeg_staged(args, out_path)
     if result.returncode != 0:
         return jsonify({"error": "ffmpeg failed", "detail": result.stderr[-4000:]}), 500
     return jsonify({"output": out_name})
@@ -1821,8 +1842,10 @@ def reverse():
             "estimated_bytes": est_bytes,
         }), 200
 
-    out_name = fu.unique_output_name(data.get("output") or _derive_name(data["input"], "reversed"))
-    out_path = os.path.join(fu.OUTPUT_DIR, out_name)
+    export_dir = get_output_dir()
+    out_name = fu.unique_output_name(data.get("output") or _derive_name(data["input"], "reversed"),
+                                     export_dir)
+    out_path = os.path.join(export_dir, out_name)
 
     input_args = ["-i", in_path]
     filter_args = ["-vf", "reverse", "-af", "areverse"]
@@ -1830,15 +1853,15 @@ def reverse():
     quality = get_export_quality()
     if quality in fu.MULTIPASS_QUALITIES:
         try:
-            multipass_export_render(input_args, filter_args, info, out_path, info["duration"])
+            out_name = multipass_export_render(input_args, filter_args, info, out_path,
+                                               info["duration"])
         except RuntimeError as e:
             return jsonify({"error": "ffmpeg failed", "detail": str(e)[-4000:]}), 500
         return jsonify({"output": out_name})
 
     args = input_args + filter_args
     args += fu.encode_args(info, quality)
-    args.append(out_path)
-    result = fu.run_ffmpeg(args)
+    result, out_name = fu.run_ffmpeg_staged(args, out_path)
     if result.returncode != 0:
         return jsonify({"error": "ffmpeg failed", "detail": result.stderr[-4000:]}), 500
     return jsonify({"output": out_name})

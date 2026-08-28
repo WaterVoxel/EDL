@@ -4,6 +4,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import threading
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 INPUT_DIR = os.path.join(PROJECT_ROOT, "input")
@@ -926,11 +927,52 @@ def get_or_make_preview(path):
     key = f"{os.path.basename(path)}.{mtime}.preview.mp4"
     cached = os.path.join(PREVIEW_CACHE_DIR, key)
     if not os.path.exists(cached):
+        # Transcode to a private temp name and os.replace() into place, so
+        # `cached` only ever exists complete. Writing straight to the final path
+        # produced two distinct failures, both of which this rules out:
+        #
+        #   - a second request arriving mid-transcode saw os.path.exists(cached)
+        #     and was served the half-written file with HTTP 200. Measured:
+        #     262,192 bytes, "moov atom not found", while the first request's own
+        #     response was perfectly valid — so the file that failed to play was
+        #     never the one being complained about;
+        #   - an ffmpeg failure left the partial behind, so os.path.exists stayed
+        #     true and every later request served the broken file forever.
+        #     Measured: killing the encoder left a 524,336-byte unplayable file
+        #     and the next request returned it with HTTP 200. The only way out
+        #     was deleting it from .preview_cache by hand.
+        #
+        # The temp name carries pid + thread id rather than a bare ".part"
+        # because Flask serves these threaded (app.run defaults threaded=True)
+        # and ONE click can issue two requests for the same file — MediaLibrary
+        # and ReformatPanel both mount a <video> on the same bin selection. A
+        # single shared ".part" would just relocate the collision. Two requests
+        # therefore still transcode twice, wasting CPU but never colliding; a
+        # per-key lock would save that work at the cost of making the second
+        # request block for the whole encode, which is its own kind of hang.
+        # os.replace is atomic within a directory, so a reader sees either no
+        # file or a complete one, and an open fd on a replaced file stays valid.
+        #
+        # The name has to END in .mp4: ffmpeg picks the muxer from the output
+        # extension, and a trailing ".part" made it refuse every preview outright
+        # ("Unable to find a suitable output format ... use a standard extension
+        # for the filename or specify the format manually"). Nothing enumerates
+        # .preview_cache, and a lookup is an exact match on
+        # "<basename>.<mtime>.preview.mp4", so a leftover temp file is inert.
+        part = f"{cached}.{os.getpid()}.{threading.get_ident()}.part.mp4"
         args = ["-i", path, "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-movflags", "+faststart", cached]
-        result = run_ffmpeg(args)
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr[-2000:])
+                "-c:a", "aac", "-movflags", "+faststart", part]
+        try:
+            result = run_ffmpeg(args)
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr[-2000:])
+            os.replace(part, cached)
+        finally:
+            # Normally already gone via os.replace; this is the failure path.
+            try:
+                os.remove(part)
+            except OSError:
+                pass
     return cached, info
 
 
@@ -946,10 +988,11 @@ def run_ffmpeg(args, timeout=600):
     and no error anywhere. subprocess.run leaves the child in our own process
     group, which is why the server goes down with the encoder rather than just
     the one request, and why the timeout never fires: the process that would
-    raise TimeoutExpired is itself stopped. The launch this project documents
-    (`nohup python3 app.py > log 2>&1 &`) lands in exactly that position when
-    it is typed into an interactive Terminal, because nohup redirects stdout
-    and stderr but never stdin. -nostdin skips the tcsetattr; DEVNULL leaves no
+    raise TimeoutExpired is itself stopped. A `nohup python3 app.py > log 2>&1 &`
+    typed into an interactive Terminal lands in exactly that position, because
+    nohup redirects stdout and stderr but never stdin; the project's own docs
+    add `< /dev/null` for that reason as of 0.31.1, but nothing stops a user
+    typing the shorter form. -nostdin skips the tcsetattr; DEVNULL leaves no
     tty on fd 0 to touch. Both, because a user-supplied `-stdin` in the
     custom-export extra args is appended after these globals and would undo the
     flag, while DEVNULL cannot be overridden that way.
@@ -959,13 +1002,150 @@ def run_ffmpeg(args, timeout=600):
                           stdin=subprocess.DEVNULL)
 
 
-def unique_output_name(name):
-    """If `name` already exists in OUTPUT_DIR, append a numeric suffix."""
-    base, ext = os.path.splitext(name)
+_STAGE_DIR_NAME = ".partials"
+
+
+def stage_output(out_path):
+    """Return a path to render to whose finished result belongs at `out_path`.
+
+    Renders land in `<dest>/.partials/<pid>.<tid>/<final name>` and only reach
+    `out_path` through commit_output(), once ffmpeg has exited 0 — so the export
+    directory never holds a half-written file. Measured on the pre-fix code
+    (AUDIT #9): killing ffmpeg 5s into a 16s render left a 53,739,568-byte
+    unplayable `mid.mp4` in the export dir; GET /api/outputs listed it as a
+    finished export, OutputPanel auto-selected it as the newest and pointed a
+    <video> at it, and its name was now taken, so the retry became `mid_1.mp4`.
+
+    Why a subdirectory instead of `out_path + ".part"`:
+
+      - The Export Bin lists anything in the export dir whose name ends in a
+        MEDIA_EXTENSIONS suffix (app.py `_list_dir`), and it does NOT skip
+        dotfiles — verified: `.cand.mp4.4321.part.mp4` was listed. So the preview
+        cache's `.part.mp4` shape (get_or_make_preview) would put the in-progress
+        render straight back into the Bin, where OutputPanel would auto-play it.
+      - A name that does not end in a media extension hides from the Bin, but
+        ffmpeg picks its muxer from the output extension, so it would need an
+        explicit -f — and no -f value reproduces what the extension does:
+        forcing `-f mp4` on a .m4v output changes the ftyp major brand from
+        "M4V " to "isom", and `-f m4v` is the raw MPEG-4 video muxer, which
+        refuses H.264 outright ("m4v muxer supports only codec mpeg4") and wrote
+        0 bytes. Measured on ffmpeg 8.1.2.
+      - Keeping the exact final basename one directory down needs no -f at all
+        and is byte-identical to rendering in place (verified with cmp for mp4,
+        mov, avi and m4v), while being invisible to every enumeration in the app.
+
+    Per-process AND per-thread, because Flask serves threaded, so two concurrent
+    renders never share a staging path. The directory also collects the two-pass
+    encoders' stats files, which derive their prefix from the output path — that
+    incidentally contains libx264's `-0.log.temp`/`.mbtree.temp`, which
+    _PASSLOG_SUFFIXES does not list and so never removed from the export dir.
+    """
+    dest_dir = os.path.dirname(out_path) or "."
+    stage_dir = os.path.join(dest_dir, _STAGE_DIR_NAME,
+                             f"{os.getpid()}.{threading.get_ident()}")
+    os.makedirs(stage_dir, exist_ok=True)
+    return os.path.join(stage_dir, os.path.basename(out_path))
+
+
+def commit_output(staged, out_path):
+    """Move a finished staged render into place; return the name actually used.
+
+    Never clobbers. If the name was taken while the render ran, the next free
+    `_1`/`_2` name is used — the same convention unique_output_name() and the
+    routes' own uniqueness loops apply up front. That keeps what two renders
+    asking for one name do today: measured before this change, a second render
+    starting 5s into the first got `dup_1.mp4`, leaving two valid files. Without
+    this check the second os.replace would silently destroy the first result.
+
+    os.replace is atomic, and the staging directory is a child of the destination
+    directory, so this is a same-filesystem rename however the user has pointed
+    their export directory (get_output_dir() can be any volume).
+
+    The name is claimed with O_CREAT|O_EXCL rather than tested with
+    os.path.exists, because a test is not a claim: two renders finishing together
+    both saw the name free and both replaced into it, so one render's content was
+    destroyed and both requests reported the same filename. Measured — with the
+    gap between the check and the replace artificially widened to 0.3s, two
+    concurrent commits left one file where there should have been two. O_CREAT
+    |O_EXCL is one atomic operation, so exactly one caller can win each name and
+    the loser moves on to `_1`. The empty placeholder it creates is the file
+    os.replace immediately overwrites; it is removed again if the replace fails,
+    so a failure can never leave a 0-byte export behind (finding #9).
+    """
+    base, ext = os.path.splitext(out_path)
+    final = out_path
+    n = 1
+    while True:
+        try:
+            fd = os.open(final, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            final = f"{base}_{n}{ext}"
+            n += 1
+            continue
+        os.close(fd)
+        break
+    try:
+        os.replace(staged, final)
+    except OSError:
+        try:
+            os.remove(final)
+        except OSError:
+            pass
+        raise
+    return os.path.basename(final)
+
+
+def discard_output(staged):
+    """Remove the staging directory `staged` lives in, and anything left in it.
+
+    Has to run on every exit path, and most of those are not exceptions: an
+    ffmpeg failure makes the route `return` a 500, and a subprocess timeout
+    raises TimeoutExpired, which is not an OSError. Only ever removes a directory
+    stage_output() built — the `.partials` parent is checked — and only removes
+    `.partials` itself when it is empty, i.e. when no other render is staging.
+    """
+    stage_dir = os.path.dirname(staged)
+    if os.path.basename(os.path.dirname(stage_dir)) != _STAGE_DIR_NAME:
+        return
+    shutil.rmtree(stage_dir, ignore_errors=True)
+    try:
+        os.rmdir(os.path.dirname(stage_dir))
+    except OSError:
+        pass
+
+
+def run_ffmpeg_staged(args, out_path, timeout=600):
+    """run_ffmpeg(args + [out_path]) with the render staged (see stage_output).
+
+    Returns (result, final_name). `final_name` is the name the render landed
+    under, which may differ from os.path.basename(out_path) if that name was
+    taken while the render ran, or None when ffmpeg failed — in which case
+    nothing was written into the export directory at all.
+    """
+    staged = stage_output(out_path)
+    try:
+        result = run_ffmpeg(args + [staged], timeout=timeout)
+        if result.returncode != 0:
+            return result, None
+        return result, commit_output(staged, out_path)
+    finally:
+        discard_output(staged)
+
+
+def unique_output_name(name, export_dir):
+    """If `name` already exists in `export_dir`, append a numeric suffix.
+
+    `export_dir` is required rather than defaulting to OUTPUT_DIR: the export
+    directory is user-relocatable (app.py's get_output_dir()), and a default
+    here would hand every future caller the one directory that is wrong
+    whenever the user has moved their exports — which is exactly how the
+    directory this checks drifted away from the directory being written to
+    (finding #4)."""
+    stem, ext = os.path.splitext(name)
     candidate = name
     n = 1
-    while os.path.exists(os.path.join(OUTPUT_DIR, candidate)):
-        candidate = f"{base}_{n}{ext}"
+    while os.path.exists(os.path.join(export_dir, candidate)):
+        candidate = f"{stem}_{n}{ext}"
         n += 1
     return candidate
 
@@ -1056,17 +1236,33 @@ def build_concat_filter(count, target_w, target_h, target_fps,
     return ";".join(chains)
 
 
-def build_holdframe_filter(t, dur, fps, sample_rate=44100, channel_layout="stereo"):
-    """Freeze the frame at time t for dur seconds; silence audio during the hold."""
+def build_holdframe_filter(t, dur, fps, has_audio, sample_rate=44100, channel_layout="stereo"):
+    """Freeze the frame at time t for dur seconds; silence audio during the hold.
+
+    `has_audio` is the source's own flag from get_video_info, and it is
+    required rather than defaulted: referencing [0:a] on a source with no
+    audio stream makes ffmpeg refuse the WHOLE filtergraph ("Stream specifier
+    ':a' in filtergraph description ... matches no streams"), not merely the
+    audio half — so a wrong default here fails the render outright rather than
+    degrading it. When it is False the returned graph is video-only and has no
+    [outa] label at all, so a silent source stays silent (matching /api/trim
+    and /api/reverse); the caller must map [outa] and ask encode_args for an
+    audio stream only when it is True.
+    """
     frame_dur = 1.0 / fps
     t_end = t + frame_dur
     n_loops = max(round(dur * fps) - 1, 0)
-    return (
+    video = (
         f"[0:v]trim=start=0:end={t},setpts=PTS-STARTPTS[v0];"
         f"[0:v]trim=start={t}:end={t_end},setpts=PTS-STARTPTS,"
         f"loop=loop={n_loops}:size=1:start=0,setpts=PTS-STARTPTS[vfreeze];"
         f"[0:v]trim=start={t_end},setpts=PTS-STARTPTS[v1];"
-        f"[v0][vfreeze][v1]concat=n=3:v=1:a=0[outv];"
+        f"[v0][vfreeze][v1]concat=n=3:v=1:a=0[outv]"
+    )
+    if not has_audio:
+        return video
+    return (
+        f"{video};"
         f"[0:a]atrim=start=0:end={t},asetpts=PTS-STARTPTS[a0];"
         f"anullsrc=channel_layout={channel_layout}:sample_rate={sample_rate}:duration={dur}[afreeze];"
         f"[0:a]atrim=start={t},asetpts=PTS-STARTPTS[a1];"
@@ -2349,6 +2545,25 @@ def _media_path_ok(p):
     return True, None
 
 
+def _in_input_dir(p):
+    """Whether `p` resolves inside INPUT_DIR. Resolved exactly as _media_path_ok
+    resolves it, so the two agree on what a path means; _media_path_ok decides
+    whether a path may be touched at all, this decides whether it may be
+    WRITTEN.
+
+    Compared case-INSENSITIVELY. This is a macOS-only app and APFS is
+    case-insensitive by default, so `INPUT/victim.mp4` opens the very same file
+    as `input/victim.mp4` — while realpath does not canonicalise case, so a plain
+    startswith does not see it. Measured: with a case-sensitive compare,
+    `-y -i input/a.mp4 -c copy INPUT/victim.mp4 -f null -` returned 200 and
+    changed the source file's bytes. Over-matching is the safe direction here:
+    on a case-sensitive volume this refuses a write to a genuinely different
+    `INPUT/` directory, which _media_path_ok already refuses anyway."""
+    abs_p = p if os.path.isabs(p) else os.path.join(PROJECT_ROOT, p)
+    resolved = os.path.realpath(abs_p)
+    return resolved.lower().startswith((os.path.realpath(INPUT_DIR) + os.sep).lower())
+
+
 def _looks_like_path(tok):
     """Whether a lone argument value should be treated as a filesystem path and
     put through _media_path_ok. Deliberately narrow: most values in an encoder
@@ -2444,5 +2659,26 @@ def validate_ffmpeg_command(cmd):
         ok, reason = _media_path_ok(p)
         if not ok:
             return False, reason, None
+
+    # A path inside input/ is legal ONLY as an -i value. _media_path_ok accepts
+    # an existing input/ file wherever it appears, so without this a command can
+    # name one as its OUTPUT and rewrite source media — against this project's
+    # "source files in input/ are never modified" invariant. Nothing has to be
+    # smuggled in for that: `-y` is rejected only by validate_extra_encode_args
+    # (the export settings' field), never here, and a model emits it habitually
+    # because it is the normal way to make ffmpeg non-interactive.
+    #
+    # Checked over every token rather than just the output positional, because
+    # ffmpeg writes every output it is given while only argv[-1] was ever
+    # inspected — `-y -i input/a.mp4 -c copy input/victim.mp4 -f null -` went
+    # straight through. Filter expressions are unaffected without needing an
+    # exemption: `movie=input/b.mp4[m];...` is one token, and joined onto
+    # PROJECT_ROOT it does not resolve inside input/, so it never trips this.
+    for i, tok in enumerate(argv[1:], start=1):
+        if argv[i - 1] == "-i" or tok.startswith("-"):
+            continue
+        if _looks_like_path(tok) and _in_input_dir(tok):
+            return False, (f"cannot write to input/: {tok!r} — source files are never "
+                           f"modified; write to output/ instead"), None
 
     return True, None, argv
