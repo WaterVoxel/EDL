@@ -49,7 +49,9 @@ const CONTIGUOUS_SRC = 0.12
 // through a ref so mid-playback changes apply at the next boundary.
 // `onFrame(pos)` (optional) is called imperatively every frame so the
 // Timeline can move the playhead without a React re-render.
-export function useTimelinePlayback(clips, videoRef, onSelectClip, displayClips, onFrame) {
+// `onSourceError(clip)` (optional) is called when a clip's media can't be
+// loaded at all — playback stops there and the caller says which file it was.
+export function useTimelinePlayback(clips, videoRef, onSelectClip, displayClips, onFrame, onSourceError) {
   const [playing, setPlaying] = useState(false)
   const [looping, setLooping] = useState(false)
   const [timelinePos, setTimelinePos] = useState(0)
@@ -57,6 +59,7 @@ export function useTimelinePlayback(clips, videoRef, onSelectClip, displayClips,
   const rafRef = useRef(null)
   const rvfcRef = useRef(null)
   const listenerCleanupRef = useRef(null)
+  const endedCleanupRef = useRef(null)
   const genRef = useRef(0)
   const lastTimeRef = useRef(null)
   const lastStateAtRef = useRef(0)
@@ -80,6 +83,8 @@ export function useTimelinePlayback(clips, videoRef, onSelectClip, displayClips,
   const playingRef = useRef(false)
   const onFrameRef = useRef(onFrame)
   useEffect(() => { onFrameRef.current = onFrame }, [onFrame])
+  const onSourceErrorRef = useRef(onSourceError)
+  useEffect(() => { onSourceErrorRef.current = onSourceError }, [onSourceError])
 
   // Hidden, off-DOM element that warms the browser cache for the NEXT
   // different-file source before playback crosses the boundary, so the
@@ -166,6 +171,14 @@ export function useTimelinePlayback(clips, videoRef, onSelectClip, displayClips,
     if (listenerCleanupRef.current) { listenerCleanupRef.current(); listenerCleanupRef.current = null }
   }
 
+  // Separate slot from listenerCleanupRef, which holds one SHORT-LIVED listener
+  // at a time (the loadeddata/error wait, the in-place seek) and is cleared the
+  // moment that one fires. The `ended` backstop has to outlive all of those: it
+  // stays armed for as long as one native driver runs.
+  function clearEndedListener() {
+    if (endedCleanupRef.current) { endedCleanupRef.current(); endedCleanupRef.current = null }
+  }
+
   function cancelLoops() {
     // Bumping the generation invalidates any in-flight rAF / rVFC / one-shot
     // media-event callback so a late fire can't drive the playhead after
@@ -177,6 +190,7 @@ export function useTimelinePlayback(clips, videoRef, onSelectClip, displayClips,
     }
     rvfcRef.current = null
     clearListener()
+    clearEndedListener()
     lastTimeRef.current = null
   }
 
@@ -220,8 +234,11 @@ export function useTimelinePlayback(clips, videoRef, onSelectClip, displayClips,
       const st = v.currentTime
       const pos = seg.timelineStart + (st - seg.sourceStart)
 
-      // Still inside this body → advance and continue.
-      if (st < seg.clip.outSec - EPS_SRC && pos < seg.timelineEnd - 1e-6) {
+      // Still inside this body → advance and continue. `!v.ended` is the
+      // backstop's other half: an element that has run out will never present
+      // another frame, so treating it as "inside" would schedule an rVFC that
+      // can never fire — the stall this exists to prevent (see runNative).
+      if (!v.ended && st < seg.clip.outSec - EPS_SRC && pos < seg.timelineEnd - 1e-6) {
         updatePos(Math.max(pos, seg.timelineStart))
         maybePreloadNext(activeSegIdxRef.current)
         scheduleRvfc(step)
@@ -282,7 +299,55 @@ export function useTimelinePlayback(clips, videoRef, onSelectClip, displayClips,
       driveFrom(boundaryPos)
     }
 
+    // The frame-callback loop only advances while frames keep arriving, and a
+    // clip trimmed to the very end of its file can run out of frames BEFORE
+    // `step` accepts that the body is over. A 2.000s @24fps file presents its
+    // last frame at 1.9583s, while the hand-off wants 2.000 - EPS_SRC = 1.96, so
+    // step took the "still inside" branch, asked for one more frame, and the
+    // element fired `ended` instead: paused=true, the engine still playing, the
+    // playhead frozen mid-timeline with no error (measured: ended=1, frames=47,
+    // lastFramePresentedAt=1.9583s — finding #14, present identically before
+    // #10). EPS_SRC is deliberately left alone: it is one frame at 30fps and
+    // widening it to cover 24 would cut a frame off every 30fps clip, and no
+    // fixed tolerance covers every frame rate. `ended` is the event that says
+    // "no more frames are coming" for ALL of them, so it is what drives the
+    // hand-off. `step` then re-decides the boundary from the element's own
+    // clock, exactly as it would have on the frame that never came.
+    const onEnded = () => {
+      if (gen !== genRef.current || !playingRef.current) return
+      step()
+    }
+    clearEndedListener()
+    endedCleanupRef.current = () => v.removeEventListener('ended', onEnded)
+    v.addEventListener('ended', onEnded)
+
     scheduleRvfc(step)
+  }
+
+  // A freshly-set src has to load before a seek/play (or a park on a frozen
+  // frame) will land, so both start paths wait for it. `loadeddata` is the only
+  // event the happy path needs — but a source the browser CAN'T fetch (the file
+  // was deleted, renamed, or moved out of input/ mid-session) never fires it,
+  // and waiting on it alone left playback sitting "playing" forever at that
+  // boundary, position frozen, with nothing said. So the wait also listens for
+  // `error`: playback stops cleanly there and the caller reports which file.
+  function whenLoaded(v, gen, clip, onReady) {
+    const ready = () => { clearListener(); onReady() }
+    const failed = () => {
+      clearListener()
+      if (gen !== genRef.current) return
+      // Forget the src, or a later Play would see the element as already
+      // pointed at this file and never re-attempt the load.
+      loadedUrlRef.current = null
+      stop()
+      onSourceErrorRef.current?.(clip)
+    }
+    listenerCleanupRef.current = () => {
+      v.removeEventListener('loadeddata', ready)
+      v.removeEventListener('error', failed)
+    }
+    v.addEventListener('loadeddata', ready)
+    v.addEventListener('error', failed)
   }
 
   function startNativeAt(index, pos, gen) {
@@ -303,10 +368,7 @@ export function useTimelinePlayback(clips, videoRef, onSelectClip, displayClips,
     }
 
     if (reloaded) {
-      // A fresh src must load before a seek/play will land.
-      const onReady = () => { clearListener(); begin() }
-      listenerCleanupRef.current = () => v.removeEventListener('loadeddata', onReady)
-      v.addEventListener('loadeddata', onReady)
+      whenLoaded(v, gen, seg.clip, begin)
     } else {
       begin()
     }
@@ -319,9 +381,7 @@ export function useTimelinePlayback(clips, videoRef, onSelectClip, displayClips,
     const reloaded = loadClipIfNeeded(seg.clip)
     const park = () => { if (v) { v.pause(); v.currentTime = seg.frozenSourceTime } }
     if (reloaded && v) {
-      const onReady = () => { clearListener(); park() }
-      listenerCleanupRef.current = () => v.removeEventListener('loadeddata', onReady)
-      v.addEventListener('loadeddata', onReady)
+      whenLoaded(v, gen, seg.clip, park)
     } else {
       park()
     }

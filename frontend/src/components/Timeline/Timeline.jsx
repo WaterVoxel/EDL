@@ -53,6 +53,9 @@ export default function Timeline({
   // removes; null disables the report entirely. V1 only — V2 is a reconstruct's
   // destination, not its input, so footage dropped there costs nothing.
   onFootageLoss = null,
+  // Called with the clip whose media the browser could not load during
+  // playback. Playback has already stopped by then; this is only the report.
+  onSourceError = null,
   // The two halves of the bar swap, so each one is rendered where the other
   // used to be: `toolbar` is App.jsx's clip edit row, handed down as a node
   // and drawn as this card's first row; `barSlot` is the DOM element up in
@@ -97,15 +100,40 @@ export default function Timeline({
   const probeCacheRef = useRef(new Map())
   const lastActiveKeyRef = useRef(null)
 
+  // Shared by V1 and A1: add each file in turn, and let one file's failure cost
+  // only that file. A throw used to abandon every file after it as well —
+  // remaining files were never even attempted, and the only report was
+  // main.jsx's global handler naming the error but not the files it cost.
+  // Failures are collected and reported once, at the end, so a three-file drop
+  // where the middle one dies still lands the third and says which one didn't.
+  async function addFilesInOrder(files, add, lane) {
+    const list = Array.from(files)
+    const failed = []
+    for (const file of list) {
+      try {
+        await add(file)
+      } catch (err) {
+        failed.push(`${file.name} — ${err?.message || err}`)
+      }
+    }
+    // Swallowing the errors above is also what keeps the global handler quiet:
+    // it would otherwise alert once per failure, ahead of this.
+    if (failed.length) {
+      alert(
+        `${failed.length} of ${list.length} ${list.length === 1 ? 'file' : 'files'} could not be added to ${lane}:\n\n`
+        + failed.map(f => `• ${f}`).join('\n')
+      )
+    }
+  }
+
   // V1 is a lane, so a multi-file drop lands as several clips end to end — the
   // same shape as A1 below, and awaited one at a time for the same reason:
   // every file is uploaded and probed before it's appended, and letting those
   // race would append them in whatever order the network finished in rather
   // than the order they were dropped.
   async function handleV1Files(files) {
-    for (const file of Array.from(files)) {
-      if (onAddToV1) await onAddToV1(file)
-    }
+    if (!onAddToV1) return
+    await addFilesInOrder(files, onAddToV1, 'V1')
   }
 
   // V1's lane is BOTH a file drop target and the clip-reorder drop target, so
@@ -178,9 +206,8 @@ export default function Timeline({
   // it's appended, and letting those race would append them in whatever order
   // the network finished in rather than the order they were dropped.
   async function handleA1Files(files) {
-    for (const file of Array.from(files)) {
-      if (onAddToA1) await onAddToA1(file)
-    }
+    if (!onAddToA1) return
+    await addFilesInOrder(files, onAddToA1, 'A1')
   }
 
   const selectedClip = clips.find(c => c.id === selectedId)
@@ -233,7 +260,7 @@ export default function Timeline({
     }
   }, [clips])
 
-  const transport = useTimelinePlayback(clips, videoRef, handlePlaybackSelectClip, displayClips, positionPlayhead)
+  const transport = useTimelinePlayback(clips, videoRef, handlePlaybackSelectClip, displayClips, positionPlayhead, onSourceError)
 
   // V1's own timeline length — what the A1 bed is padded/cut to. The same sum
   // the ruler and the playhead use, so the bed bar lines up with them; the

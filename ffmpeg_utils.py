@@ -1,10 +1,14 @@
+import atexit
+import hashlib
 import json
 import math
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import threading
+import time
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 INPUT_DIR = os.path.join(PROJECT_ROOT, "input")
@@ -114,6 +118,33 @@ def _tool(name):
 FFMPEG = _tool("ffmpeg")
 FFPROBE = _tool("ffprobe")
 
+
+def missing_tools():
+    """Which of the ffmpeg-family binaries this process resolved aren't there.
+
+    Resolution happens once, at import (see `_tool`), so this describes the
+    MACHINE the server booted on rather than anything about a request. Returned
+    as `(name, path)` pairs because the path is the useful half: "looked for it
+    at /opt/homebrew/bin/ffmpeg" is what distinguishes "not installed" from
+    "installed somewhere this app doesn't look" (an Intel Mac, a conda prefix).
+    """
+    return [(name, path) for name, path in (("ffmpeg", FFMPEG), ("ffprobe", FFPROBE))
+            if not os.path.exists(path)]
+
+
+def missing_tool_message(path):
+    """The sentence a user can act on, for a binary that isn't where we looked.
+
+    Every spawn site funnels its `FileNotFoundError` through here (see `probe`
+    and `run_tracked`), because that exception's own text — "No such file or
+    directory: '/opt/homebrew/bin/ffprobe'" — reads as a missing *media* file
+    and never mentions the one thing to do about it. README.txt has a
+    troubleshooting entry titled "The app says it can't find ffmpeg"; this is
+    the app saying it (finding #12).
+    """
+    return (f"cannot find {os.path.basename(path)} — this app looked for it at {path}. "
+            "Install it with: brew install ffmpeg")
+
 ALLOWED_EXTENSIONS = (".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm")
 
 # Audio-only files are accepted for one purpose: the A1 audio lane (see
@@ -124,6 +155,18 @@ ALLOWED_EXTENSIONS = (".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm")
 # used by the listing/upload/delete/rename routes.
 AUDIO_EXTENSIONS = (".wav", ".mp3", ".m4a", ".aac", ".flac", ".aiff")
 MEDIA_EXTENSIONS = ALLOWED_EXTENSIONS + AUDIO_EXTENSIONS
+
+# Containers a RENDER may be asked to write. ALLOWED_EXTENSIONS is the wider set
+# the app can READ, and .webm is the one entry that is only ever an input: every
+# render path encodes through encode_args, which emits H.264/HEVC video and AAC
+# audio, and the WebM muxer accepts none of those codecs. Naming an output
+# `clip.webm` therefore always failed — "Nothing was written into output file,
+# because at least one of its streams received no packets" — as a 500 whose
+# `detail` was ffmpeg's version banner. Measured identical before and after #9,
+# so it was never a regression, just a name the app would accept and could not
+# honour. WebM sources still import, play and render normally, and /api/execute
+# still builds whatever command it likes, so nothing that worked is withdrawn.
+RENDERABLE_EXTENSIONS = tuple(e for e in ALLOWED_EXTENSIONS if e != ".webm")
 
 # Fixed playback gain applied to the A1 bed before it is mixed under V1's own
 # audio. amix normalize=0 is an exact unity-gain SUM (v1[i] + bed[i]), so a
@@ -137,6 +180,17 @@ REVERSE_WARN_THRESHOLD_BYTES = 2 * 1024**3
 
 PREVIEW_CACHE_DIR = os.path.join(PROJECT_ROOT, ".preview_cache")
 
+# Ceiling on the transcoded previews that are still REACHABLE, i.e. what remains
+# after prune_preview_cache has swept the unreachable ones. Deliberately
+# generous: measured on this machine, sweeping alone took the cache from 602 MB
+# to 100 MB, so the sweep is the mechanism and this is only a backstop against a
+# project big enough that every one of its live sources needs a preview. Set it
+# lower and the cap starts evicting entries a user is still clicking on, which
+# costs a full re-transcode each time — measured 2.2 s for a 4 s HEVC clip and
+# 11.5 s for a 13 s one, against 0.06-0.08 s to serve the cached copy — for no
+# space the sweep wasn't going to reclaim anyway.
+PREVIEW_CACHE_MAX_BYTES = 2 * 1024**3
+
 BROWSER_SAFE_VIDEO_CODECS = {"h264", "vp8", "vp9", "av1"}
 BROWSER_SAFE_AUDIO_CODECS = {"aac", "mp3", "opus", "vorbis", None}
 
@@ -147,7 +201,13 @@ class PathError(ValueError):
 
 def safe_path(name, base):
     """Resolve `name` under `base` (INPUT_DIR or OUTPUT_DIR); reject traversal."""
-    if not name or os.path.isabs(name):
+    # A non-string name is a malformed request, not a crash: os.path.isabs and
+    # os.path.join both raise TypeError on one, and since PathError is what every
+    # caller already turns into a 400, judging the type here is what keeps a
+    # `{"input": 42}` body from reaching @app.errorhandler(Exception) as a bare
+    # 500 (finding #11). The routes still name the offending FIELD themselves —
+    # this is the floor under them, for the call sites that don't.
+    if not isinstance(name, str) or not name or os.path.isabs(name):
         raise PathError(f"invalid filename: {name!r}")
     candidate = os.path.realpath(os.path.join(base, name))
     base_real = os.path.realpath(base)
@@ -156,12 +216,40 @@ def safe_path(name, base):
     return candidate
 
 
-def probe(path):
-    result = subprocess.run(
-        [FFPROBE, "-v", "error", "-print_format", "json",
-         "-show_format", "-show_streams", path],
-        capture_output=True, text=True,
-    )
+PROBE_TIMEOUT = 120
+
+
+def probe(path, timeout=PROBE_TIMEOUT):
+    try:
+        result = subprocess.run(
+            [FFPROBE, "-v", "error", "-print_format", "json",
+             "-show_format", "-show_streams", path],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        # The last spawn site in the repo with no bound on it (finding #14).
+        # Every route probes before it does anything else, and a probe that
+        # never returns holds a worker thread for as long as the server runs:
+        # measured with an ffprobe that sleeps, the call was still blocked
+        # after 20 s with nothing to stop it. 120 s is deliberately far above
+        # any real metadata read (the slowest file in this project's own input/
+        # probes in well under a second) — this bounds a HUNG probe, it does not
+        # try to judge a slow one.
+        #
+        # RuntimeError, because that is what every caller already turns into a
+        # 500 carrying the message, and the raw TimeoutExpired text is the whole
+        # ffprobe argv (see the same trap in browse_directory).
+        raise RuntimeError(
+            f"ffprobe did not respond within {timeout} seconds for "
+            f"{os.path.basename(path)} — the file may be unreadable or on a "
+            "disconnected volume"
+        )
+    except FileNotFoundError:
+        # ffprobe itself is missing, not `path`. Raised as the RuntimeError every
+        # caller already turns into a 500 with the message in `error`, so the
+        # reason travels all the way to the user instead of arriving as a bare
+        # FileNotFoundError under "internal server error" (finding #12).
+        raise RuntimeError(missing_tool_message(FFPROBE))
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "ffprobe failed")
     return json.loads(result.stdout)
@@ -173,7 +261,22 @@ def get_video_info(path):
     and whether it's directly playable in a browser <video> tag."""
     data = probe(path)
     fmt = data.get("format", {})
-    duration = float(fmt.get("duration", 0.0))
+    # Not every container carries a duration. A stream muxed to a pipe cannot
+    # seek back to write one (`ffmpeg -i x -c copy -f matroska pipe:1 > y.mkv`
+    # produces exactly this), and a truncated file can report 0. Both used to
+    # read as a confident 0.0 seconds, which is then what every timeline check
+    # compares against: ANY trim window came back as "invalid inSec/outSec for
+    # source duration 0.0" and any hold as "time must be within [0, 0.0)" —
+    # true statements that never mention the duration as the thing that could
+    # not be read (finding #11). `duration` still reports 0.0 for the callers
+    # that only display it, and for trim/reverse, which need no duration and
+    # work on such a file; `duration_known` is what the routes doing ARITHMETIC
+    # with it test, so they can say so by name instead.
+    try:
+        duration = float(fmt["duration"])
+    except (KeyError, ValueError, TypeError):
+        duration = 0.0
+    duration_known = duration > 0
     width = height = None
     fps = None
     has_audio = False
@@ -239,6 +342,7 @@ def get_video_info(path):
         nb_frames = None
     return {
         "duration": duration,
+        "duration_known": duration_known,
         "video_duration": video_duration if video_duration is not None else duration,
         "width": width,
         "height": height,
@@ -911,20 +1015,156 @@ def render_custom_two_pass(input_args, filter_args, source_info, out_path, durat
                 pass
 
 
-def get_or_make_preview(path):
+def preview_cache_key(path, mtime):
+    """The one place the cache filename is spelled out, so the writer and the
+    sweeper cannot drift apart. `int(mtime)` because the key has always been
+    whole-second (see get_or_make_preview) and a sweep that computed it to the
+    microsecond would judge every live entry unreachable.
+
+    The key names the DIRECTORY as well as the basename, because the basename
+    alone is not unique across the places media can live: two different
+    non-browser-playable files called `same.mov`, one in input/ and one in the
+    export directory, with the same whole-second mtime, produced ONE cache entry
+    and the second request was served the first file's video (measured: 33,408-
+    and 20,722-byte ProRes sources, both served the identical 6,281-byte
+    preview). The directory is hashed rather than spelled out because it is an
+    absolute path — slashes cannot appear in a filename, and the full path would
+    blow past the 255-byte limit for a deep enough export directory. The
+    basename stays in the clear so the cache is still readable by eye.
+
+    `os.path.realpath` on the directory, so a symlinked export directory and its
+    target agree on the key: serve_preview resolves through fu.safe_path (which
+    realpaths) while prune_preview_cache is handed the configured path.
+    """
+    directory, name = os.path.split(path)
+    tag = hashlib.sha1(os.path.realpath(directory).encode("utf-8")).hexdigest()[:10]
+    return f"{name}.{tag}.{int(mtime)}.preview.mp4"
+
+
+def prune_preview_cache(live_dirs, max_bytes=PREVIEW_CACHE_MAX_BYTES):
+    """Delete cached previews nothing can reach any more, then hold the rest
+    under `max_bytes`. Returns `(files_removed, bytes_reclaimed)`.
+
+    Nothing evicted this cache before, in any dimension — not age, count or
+    size. Measured on this machine: 602 MB across 334 files, of which **298
+    files / 502 MB (83%) were already unreachable** (finding #13, which recorded
+    414 MB / 211 MB dead when it was written — the ratio gets worse with use, not
+    better).
+
+    "Unreachable" is exact rather than a heuristic, and that is what makes
+    deleting safe. `serve_preview` 404s before it ever asks for a preview unless
+    the source file exists, and `get_or_make_preview` then derives the key from
+    that file's own directory, name and mtime — so an entry whose key matches no
+    file in `live_dirs` cannot be named by any request, whatever the user does
+    next. (Entries written before the key carried the directory — 0.44.0 —
+    therefore match nothing and are swept on the first pass, one re-transcode
+    each, once.) The two ways one gets there, both measured: the source was
+    deleted or renamed (274 files, 435 MB — mostly Export Bin renders that were cleared,
+    which is the dominant cause and NOT the "every edit strands its entry" the
+    finding describes), or the source is still there but was rewritten so its
+    mtime moved (24 files, 67 MB).
+
+    A dir that cannot be listed is skipped, which only keeps `os.listdir` from
+    raising out of here — the entries it would have vouched for are swept, since
+    "unreachable" is judged against the dirs the caller actually offered. That is
+    the right answer: a preview made while a *different* export directory was
+    configured is unreachable until the user switches back, and switching back
+    costs one re-transcode. What the guard prevents is the exception, which in
+    the miss path would land as a 500 on a preview whose transcode had just
+    succeeded.
+
+    Only `*.preview.mp4` is considered. In-progress transcodes write
+    `<key>.<pid>.<tid>.part.mp4` in this same directory, and deleting one out
+    from under a running encode would make its `os.replace` raise
+    FileNotFoundError — which `serve_preview` does not catch, so it would turn
+    a concurrent preview into a 500. Leaving temp names alone also keeps the
+    existing invariant that a leftover temp file is inert.
+    """
+    if not os.path.isdir(PREVIEW_CACHE_DIR):
+        return 0, 0
+
+    live = set()
+    for d in live_dirs:
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        # Resolved once per directory rather than once per file: the key hashes
+        # the realpath of the containing directory, and realpath is the same
+        # answer for every file in it.
+        real_d = os.path.realpath(d)
+        for n in names:
+            p = os.path.join(real_d, n)
+            try:
+                if os.path.isfile(p):
+                    live.add(preview_cache_key(p, os.path.getmtime(p)))
+            except OSError:
+                pass
+
+    def _drop(p, size):
+        try:
+            os.remove(p)
+            return size
+        except OSError:
+            # Another process pruning the same directory, or a permission
+            # problem. Either way the cache is a cache: failing to reclaim
+            # space is not worth failing a request over.
+            return 0
+
+    removed = reclaimed = 0
+    keep = []
+    for name in os.listdir(PREVIEW_CACHE_DIR):
+        if not name.endswith(".preview.mp4"):
+            continue
+        p = os.path.join(PREVIEW_CACHE_DIR, name)
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        if name in live:
+            keep.append((st.st_mtime, st.st_size, p))
+            continue
+        got = _drop(p, st.st_size)
+        if got:
+            removed += 1
+            reclaimed += got
+
+    # Least recently USED first, not oldest-created: get_or_make_preview touches
+    # an entry on every hit, so the file a request is streaming right now is the
+    # newest and therefore the last thing this loop would consider. That is what
+    # keeps the cap from deleting a preview mid-playback, without a lock.
+    total = sum(size for _mtime, size, _p in keep)
+    for _mtime, size, p in sorted(keep):
+        if total <= max_bytes:
+            break
+        got = _drop(p, size)
+        if got:
+            total -= got
+            removed += 1
+            reclaimed += got
+    return removed, reclaimed
+
+
+def get_or_make_preview(path, prune_dirs=None):
     """Return a path to a browser-playable version of `path`.
 
     If the source is already H.264/AAC (or similar), returns it unchanged.
     Otherwise transcodes once into PREVIEW_CACHE_DIR and reuses that on
     subsequent calls (keyed by source path + mtime, so edits invalidate it).
+
+    `prune_dirs` is the list of directories that currently hold reachable media
+    (the caller knows where the Export Bin is; this module does not). Given it,
+    a cache MISS also sweeps the cache — the moment a transcode is about to be
+    paid for is the cheapest possible moment to spend a few hundred stat calls,
+    and it is the only hook a server that runs for days ever reaches, since the
+    startup sweep happens once (finding #13).
     """
     info = get_video_info(path)
     if info["browser_playable"]:
         return path, info
 
     os.makedirs(PREVIEW_CACHE_DIR, exist_ok=True)
-    mtime = int(os.path.getmtime(path))
-    key = f"{os.path.basename(path)}.{mtime}.preview.mp4"
+    key = preview_cache_key(path, os.path.getmtime(path))
     cached = os.path.join(PREVIEW_CACHE_DIR, key)
     if not os.path.exists(cached):
         # Transcode to a private temp name and os.replace() into place, so
@@ -956,9 +1196,11 @@ def get_or_make_preview(path):
         # The name has to END in .mp4: ffmpeg picks the muxer from the output
         # extension, and a trailing ".part" made it refuse every preview outright
         # ("Unable to find a suitable output format ... use a standard extension
-        # for the filename or specify the format manually"). Nothing enumerates
-        # .preview_cache, and a lookup is an exact match on
-        # "<basename>.<mtime>.preview.mp4", so a leftover temp file is inert.
+        # for the filename or specify the format manually"). A lookup is an exact
+        # match on "<basename>.<mtime>.preview.mp4", so a leftover temp file is
+        # inert — and prune_preview_cache, the one thing that does enumerate this
+        # directory, skips anything not ending in ".preview.mp4" precisely so it
+        # can never delete the file a concurrent encode is still writing.
         part = f"{cached}.{os.getpid()}.{threading.get_ident()}.part.mp4"
         args = ["-i", path, "-c:v", "libx264", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-movflags", "+faststart", part]
@@ -973,6 +1215,18 @@ def get_or_make_preview(path):
                 os.remove(part)
             except OSError:
                 pass
+        if prune_dirs:
+            prune_preview_cache(prune_dirs)
+    else:
+        # Mark the hit, so the size cap in prune_preview_cache evicts by least
+        # recently used rather than by age. Nothing reads this file's own mtime —
+        # the cache key carries the SOURCE's mtime in its name — so moving it is
+        # free of consequences for lookups. Failure is ignored: a preview that
+        # cannot be touched is still perfectly serveable.
+        try:
+            os.utime(cached, None)
+        except OSError:
+            pass
     return cached, info
 
 
@@ -985,10 +1239,12 @@ def run_ffmpeg(args, timeout=600):
     keypresses ("Press [q] to stop"); from a process group that is not the
     terminal's FOREGROUND group that raises SIGTTOU, which stops the entire
     group — ffmpeg, Flask and the reloader alike — at 0%, with nothing written
-    and no error anywhere. subprocess.run leaves the child in our own process
-    group, which is why the server goes down with the encoder rather than just
-    the one request, and why the timeout never fires: the process that would
-    raise TimeoutExpired is itself stopped. A `nohup python3 app.py > log 2>&1 &`
+    and no error anywhere. The child is started without start_new_session, so it
+    stays in our own process group, which is why the server goes down with the
+    encoder rather than just the one request, and why the timeout never fires:
+    the process that would raise TimeoutExpired is itself stopped. It is also
+    what makes Ctrl-C reach the encoder on its own (see
+    install_shutdown_handlers). A `nohup python3 app.py > log 2>&1 &`
     typed into an interactive Terminal lands in exactly that position, because
     nohup redirects stdout and stderr but never stdin; the project's own docs
     add `< /dev/null` for that reason as of 0.31.1, but nothing stops a user
@@ -997,9 +1253,290 @@ def run_ffmpeg(args, timeout=600):
     custom-export extra args is appended after these globals and would undo the
     flag, while DEVNULL cannot be overridden that way.
     """
-    cmd = [FFMPEG, "-nostdin", "-y"] + args
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                          stdin=subprocess.DEVNULL)
+    return run_tracked([FFMPEG, "-nostdin", "-y"] + args, timeout=timeout)
+
+
+def run_tracked(cmd, timeout=600):
+    """subprocess.run(cmd, capture_output, text, stdin=DEVNULL) — plus the child
+    is in the live registry for as long as it runs, so a shutdown can kill it.
+
+    `cmd` includes the binary. Same return value (a CompletedProcess) and the
+    same kill-then-TimeoutExpired on timeout as subprocess.run, so it drops in
+    wherever that was — same .cmd and .timeout, which is all app.py's 504 handler
+    reads; the partial output rides along as text rather than as the raw bytes
+    subprocess.run leaves on the exception. The only reason to reach for it
+    directly rather than through run_ffmpeg is a caller that builds its whole
+    argv itself, i.e. /api/execute, whose command comes from the chat panel and
+    must not get the -y that run_ffmpeg adds.
+    """
+    job = current_cancel_scope()
+    if job is not None and job.cancelled:
+        # The client went away before this encode even started — a two-pass mode
+        # whose pass 1 was killed, or a route still probing when the tab closed.
+        # Spawning now would put a full encode behind a request nobody is waiting
+        # for, which is the whole defect (finding #8).
+        raise RenderCancelled(_CANCELLED_MESSAGE)
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, stdin=subprocess.DEVNULL)
+    except FileNotFoundError:
+        # The binary is missing (a machine with no ffmpeg installed), not any
+        # file it was asked to read — same reasoning as in `probe`. Nothing is
+        # registered yet, so there is no child to clean up.
+        raise RuntimeError(missing_tool_message(cmd[0]))
+    _register_child(proc, job)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, err = proc.communicate()
+        raise subprocess.TimeoutExpired(cmd, timeout, output=out, stderr=err)
+    except BaseException:
+        # What subprocess.run does with anything else that escapes (including
+        # KeyboardInterrupt): don't leave the child running behind an exception
+        # that is on its way out of this function.
+        proc.kill()
+        proc.wait()
+        raise
+    finally:
+        _unregister_child(proc, job)
+    if job is not None and job.cancelled:
+        # This child exited because cancel_scope() SIGTERMed it, so its non-zero
+        # returncode and its stderr describe a kill, not a bad render. Reporting
+        # it as "ffmpeg failed" would put that in the log for something the app
+        # did on purpose; RenderCancelled says which it was, and every caller
+        # already unwinds a RuntimeError cleanly (staging is discarded in a
+        # `finally`, not an `except`).
+        raise RenderCancelled(_CANCELLED_MESSAGE)
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+# ---- live-child registry / shutdown (finding #8) ----
+# Nothing in this app used to be able to find a running encoder. subprocess.run
+# keeps the only handle on the child in a local variable on the calling thread's
+# stack; Flask serves renders on daemon threads, and daemon threads are dropped
+# at interpreter exit WITHOUT unwinding, so those locals and their `finally`
+# blocks simply go away. A reloader restart or a SIGTERM therefore left ffmpeg
+# alive, reparented to PID 1, encoding at ~1100% CPU with nowhere to deliver the
+# result, plus a staging directory nobody would ever clean up. Measured on
+# 0.38.0 — see AUDIT #8.
+#
+# So the two things a shutdown needs to reach are recorded here for exactly as
+# long as they are live: the Popen objects, and the staging directories
+# stage_output() has created but discard_output() has not removed yet.
+_LIVE_LOCK = threading.Lock()
+_LIVE_CHILDREN = set()
+_LIVE_STAGES = set()
+_HANDLERS_INSTALLED = False
+
+
+def _register_child(proc, job=None):
+    with _LIVE_LOCK:
+        _LIVE_CHILDREN.add(proc)
+        if job is not None:
+            job.children.add(proc)
+
+
+def _unregister_child(proc, job=None):
+    with _LIVE_LOCK:
+        _LIVE_CHILDREN.discard(proc)
+        if job is not None:
+            job.children.discard(proc)
+
+
+def _stop_procs(procs, grace):
+    """SIGTERM every process in `procs`, SIGKILL whatever is still alive after
+    `grace` seconds, and wait() each — which also reaps it, so nothing is left
+    for the kernel to reparent. Returns len(procs).
+
+    SIGTERM first because ffmpeg handles it: it stops reading, closes the output
+    file and exits, rather than leaving a truncated file behind a SIGKILL. Both
+    callers (shutdown, and one request's cancellation) want exactly that.
+    """
+    for p in procs:
+        try:
+            p.terminate()
+        except OSError:
+            pass
+    deadline = time.monotonic() + grace
+    for p in procs:
+        try:
+            p.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            try:
+                p.kill()
+                p.wait(timeout=grace)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    return len(procs)
+
+
+def kill_live_ffmpeg(grace=2.0):
+    """Stop every ffmpeg this process still has running; return how many.
+
+    Safe to call when nothing is running (returns 0), and safe to call twice:
+    a Popen that has already exited just reports its returncode again.
+    """
+    with _LIVE_LOCK:
+        procs = [p for p in _LIVE_CHILDREN if p.poll() is None]
+    return _stop_procs(procs, grace)
+
+
+def _shutdown_children():
+    """Kill live encoders, then remove the staging dirs their renders were
+    writing into. Order matters: an ffmpeg still holding the staged file open
+    would go on writing into a directory we had already removed.
+
+    Discarding staged output here can only ever throw away a render whose result
+    was about to be reported over an HTTP connection this process is no longer
+    able to answer on — the alternative is the file surviving unreferenced in
+    `.partials`, which is the leak, not the render.
+    """
+    killed = kill_live_ffmpeg()
+    with _LIVE_LOCK:
+        stages = list(_LIVE_STAGES)
+    for staged in stages:
+        discard_output(staged)
+    if killed:
+        try:
+            print(f"stopped {killed} running ffmpeg process"
+                  f"{'' if killed == 1 else 'es'} on exit", flush=True)
+        except (OSError, ValueError):
+            pass
+
+
+def _on_fatal_signal(signum, _frame):
+    # Default disposition for SIGTERM/SIGHUP is to die immediately, which skips
+    # atexit entirely — so the kill has to happen from the handler. Taking
+    # _LIVE_LOCK here cannot deadlock: handlers run on the main thread, and the
+    # only code that holds that lock runs on the request threads. Re-raising
+    # with the default handler back in place keeps the exit status the signal
+    # would have produced instead of turning it into a normal exit.
+    _shutdown_children()
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+
+
+def install_shutdown_handlers():
+    """Arrange for live encoders to be killed when this process goes away.
+
+    Called from app.py's __main__ rather than at import, because installing
+    signal handlers is a whole-process decision that belongs to the program, not
+    to a library module — and signal.signal() only works on the main thread, so
+    an import from a worker thread would raise. Under the debug reloader
+    __main__ runs in both the monitor process and the child that actually
+    serves, so both get handlers (the monitor never has children of its own).
+
+    Covers:
+      - atexit: the reloader's own restart path, which is a plain sys.exit(3)
+        from the main thread, and Ctrl-C, which arrives as KeyboardInterrupt.
+      - SIGTERM/SIGHUP: `kill <pid>` and closing the Terminal window, neither of
+        which runs atexit by default.
+
+    Under the debug server the SIGTERM half is werkzeug's, not ours: run_simple
+    installs `signal(SIGTERM, lambda *a: sys.exit(0))` inside app.run(), after
+    this. That is harmless — measured on werkzeug 3.1.8, a SIGTERM mid-render
+    still killed the encoder, because sys.exit() from the main thread is an
+    ordinary interpreter exit and atexit runs. Ours is what covers SIGHUP, which
+    werkzeug does not touch, and both signals when app.run is called without
+    debug.
+
+    SIGINT is deliberately left on Python's default handler. It already works:
+    the encoder is in this process's process group (see run_ffmpeg), so Ctrl-C
+    signals it directly, and the KeyboardInterrupt that unwinds the server
+    reaches atexit anyway. Replacing that handler would only put this code in
+    the way of werkzeug's own shutdown.
+    """
+    global _HANDLERS_INSTALLED
+    if _HANDLERS_INSTALLED:
+        return
+    _HANDLERS_INSTALLED = True
+    atexit.register(_shutdown_children)
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(sig, _on_fatal_signal)
+        except (ValueError, OSError):
+            # Not the main thread, or a platform without the signal: the atexit
+            # half still stands on its own.
+            pass
+
+
+# ---- per-request cancellation (finding #8, the disconnect half) ----
+# The registry above can only answer "kill everything", which is right for a
+# shutdown and wrong for one abandoned request: closing the tab mid-render used
+# to leave that render running to completion and committing its file, while
+# every OTHER render in flight was somebody's live request. So a request that
+# may spawn an encoder opens a cancel scope for the duration, and the encoders
+# it starts are recorded against that scope as well as against the process-wide
+# set.
+#
+# The scope is a thread-local OBJECT rather than the thread's id: werkzeug reuses
+# a thread for the next request on a keep-alive connection, and thread ids are
+# recycled once a thread exits, so a watcher that fired late would otherwise be
+# able to cancel a DIFFERENT request that happened to inherit the id. A scope
+# nobody can reach any more is just garbage.
+_CANCEL_SCOPE = threading.local()
+_CANCELLED_MESSAGE = ("render cancelled: the client that asked for it "
+                      "disconnected before it finished")
+
+
+class RenderCancelled(RuntimeError):
+    """Raised in a request thread whose client went away mid-render.
+
+    A RuntimeError on purpose: every route already turns one into a JSON error
+    and every staging directory is removed in a `finally`, so cancellation
+    unwinds through the paths a failed render already uses, with a message that
+    says it was a cancellation rather than a bad encode. Nothing reads the
+    response — the socket it would go to is closed — but it is what the server
+    log shows.
+    """
+
+
+class CancelScope:
+    """One request's cancellable work: the encoders it has running, and whether
+    its client has gone away. Owned by the request thread; `cancel` is called
+    from the watcher thread, hence _LIVE_LOCK around the set."""
+
+    __slots__ = ("cancelled", "children")
+
+    def __init__(self):
+        self.cancelled = False
+        self.children = set()
+
+
+def begin_cancel_scope():
+    """Open a cancel scope for the calling thread and return it. Call
+    end_cancel_scope() when the request is done, or the next request served by
+    this thread inherits it."""
+    scope = CancelScope()
+    _CANCEL_SCOPE.scope = scope
+    return scope
+
+
+def end_cancel_scope():
+    _CANCEL_SCOPE.scope = None
+
+
+def current_cancel_scope():
+    """The scope for the request being served on this thread, or None — which is
+    what every caller outside a decorated route sees, and means "not
+    cancellable", i.e. exactly the behaviour before this existed."""
+    return getattr(_CANCEL_SCOPE, "scope", None)
+
+
+def cancel_scope(scope, grace=2.0):
+    """Mark `scope` cancelled and stop the encoders it has running; return how
+    many were stopped (0 when the render had not spawned ffmpeg yet — the mark
+    still stands, and run_tracked refuses to start one).
+
+    Called from the watcher thread, so it must not touch the request thread's
+    own state beyond the scope itself: the request thread finds out when its
+    ffmpeg exits, or at its next spawn.
+    """
+    with _LIVE_LOCK:
+        scope.cancelled = True
+        procs = [p for p in scope.children if p.poll() is None]
+    return _stop_procs(procs, grace)
 
 
 _STAGE_DIR_NAME = ".partials"
@@ -1044,7 +1581,12 @@ def stage_output(out_path):
     stage_dir = os.path.join(dest_dir, _STAGE_DIR_NAME,
                              f"{os.getpid()}.{threading.get_ident()}")
     os.makedirs(stage_dir, exist_ok=True)
-    return os.path.join(stage_dir, os.path.basename(out_path))
+    staged = os.path.join(stage_dir, os.path.basename(out_path))
+    # Recorded so a shutdown can clean up after a render that will never get to
+    # run its own `finally` (finding #8).
+    with _LIVE_LOCK:
+        _LIVE_STAGES.add(staged)
+    return staged
 
 
 def commit_output(staged, out_path):
@@ -1103,7 +1645,12 @@ def discard_output(staged):
     raises TimeoutExpired, which is not an OSError. Only ever removes a directory
     stage_output() built — the `.partials` parent is checked — and only removes
     `.partials` itself when it is empty, i.e. when no other render is staging.
+
+    Also drops the path from the live-staging registry, so the shutdown handler
+    has nothing left to clean up for a render that finished normally (finding #8).
     """
+    with _LIVE_LOCK:
+        _LIVE_STAGES.discard(staged)
     stage_dir = os.path.dirname(staged)
     if os.path.basename(os.path.dirname(stage_dir)) != _STAGE_DIR_NAME:
         return
@@ -1132,7 +1679,53 @@ def run_ffmpeg_staged(args, out_path, timeout=600):
         discard_output(staged)
 
 
-def unique_output_name(name, export_dir):
+def check_output_name(name, allowed=RENDERABLE_EXTENSIONS):
+    """Judge a requested export filename, or raise PathError (a 400 everywhere).
+
+    The one rule: what the user typed is a FILENAME inside the export directory,
+    not a path and not a format-free label. Both halves used to be taken on
+    trust straight into `os.path.join(export_dir, name)`, and each failed its own
+    way (finding #14, all measured):
+
+      - `../escaped.mp4` wrote the render one directory ABOVE the export bin and
+        reported success as "escaped.mp4" — a file the Bin cannot list, the
+        preview cannot reach and Delete cannot remove;
+      - an absolute name was worse, because os.path.join DISCARDS the base when
+        the second half is absolute: `/tmp/g14/absolute.mp4` landed in /tmp,
+        anywhere on the disk the server can write;
+      - `8/25 hero cut.mp4` — a date, not a path — silently created an `8/`
+        subdirectory inside the export bin (stage_output's makedirs builds the
+        parent chain) and hid the render in it, again reporting plain success,
+        because commit_output returns only the basename;
+      - a name with no usable extension (`noext`, `my.video`, `.`, `..`,
+        `trailing.`) reached ffmpeg, which picks its muxer from the extension and
+        exits with "Unable to find a suitable output format" — surfaced to the
+        user as a 500 whose detail began with ffmpeg's version banner. The render
+        dialog can produce one of these from a name typed with a dot in it
+        (`withDefaultExt` only appends .mp4 when there is no dot at all).
+
+    Deliberately NOT secure_filename: this has to leave a legal filename exactly
+    as typed. Spaces, `&`, and accented or non-Latin characters are all fine in
+    an export name — the export directory stores them and every route reads them
+    back by name — and sanitizing them would silently rename the user's file,
+    the mistake #12 item 4 was about.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise PathError("output name is required")
+    if name != os.path.basename(name) or name in (".", ".."):
+        raise PathError(
+            f"output name must be a filename, not a path: {name!r} — it is "
+            "written into the export directory, so it cannot contain '/'"
+        )
+    if not name.lower().endswith(tuple(allowed)):
+        raise PathError(
+            f"output name must end in {', '.join(allowed)} — {name!r} does not, "
+            "and the file extension is what chooses the container to write"
+        )
+    return name
+
+
+def unique_output_name(name, export_dir, allowed=RENDERABLE_EXTENSIONS):
     """If `name` already exists in `export_dir`, append a numeric suffix.
 
     `export_dir` is required rather than defaulting to OUTPUT_DIR: the export
@@ -1140,7 +1733,16 @@ def unique_output_name(name, export_dir):
     here would hand every future caller the one directory that is wrong
     whenever the user has moved their exports — which is exactly how the
     directory this checks drifted away from the directory being written to
-    (finding #4)."""
+    (finding #4).
+
+    check_output_name runs FIRST, and this is why it lives here rather than in
+    each route: every route that writes an export already had to come through
+    this function for the collision check, so validating here is what makes the
+    two rules impossible to apply in one place and forget in another — which is
+    exactly what had happened (three routes hand-rolled this loop and none of
+    them judged the name). Raises PathError; every caller turns it into a 400.
+    """
+    name = check_output_name(name, allowed)
     stem, ext = os.path.splitext(name)
     candidate = name
     n = 1
@@ -2632,6 +3234,12 @@ def validate_ffmpeg_command(cmd):
     needs ';', '()', etc. (e.g. multi-step filter graphs), so blocking them
     would reject valid commands without adding any real protection.
     """
+    # shlex.split needs a string; anything else raised AttributeError from inside
+    # the route and came back as a 500 for what is a malformed request, exactly
+    # like the other typed fields (finding #11).
+    if not isinstance(cmd, str):
+        return False, "command must be a string", None
+
     try:
         tokens = shlex.split(cmd)
     except ValueError as e:

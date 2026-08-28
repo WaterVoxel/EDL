@@ -35,6 +35,7 @@ import { sequenceTargetFps, clipRenderFrames, roundUpAmount, clampNoiseGainDb, n
 import { loadTrackTags, tagTrack, renameTrackTag, isAudioFile, loadHideFootageLossWarning, saveHideFootageLossWarning } from './fileList'
 import { analyzeAgainstV1, batchCutAgainstV1, reconstructFromV1, sequencePieces } from './analyzeMath'
 import { mergeExportPresets } from './exportPresets'
+import { workFingerprint } from './projectWork'
 import { matchOverlays } from './overlayMatch'
 import { shotOutputNames } from './renderNames'
 
@@ -401,6 +402,19 @@ function AppInner() {
   // round-up/dirty warnings below so they survive across renders.
   const [analyzeLog, setAnalyzeLog] = useState([])
 
+  // Playback hit a clip whose media the browser couldn't load, and stopped
+  // there. Reported as a log line rather than an alert: it happens while the
+  // user watches the preview, not in answer to a click, and a modal thrown up
+  // mid-playback would interrupt the very thing they were looking at. The clip
+  // is still on the lane and still renders — only the preview can't show it.
+  const handlePlaybackSourceError = useCallback((clip) => {
+    const name = clip?.displayName || clip?.sourceName || 'that clip'
+    setAnalyzeLog(prev => [
+      { kind: 'warn', text: `⚠ playback stopped at "${name}" — its source file could not be loaded (moved, renamed or deleted?)` },
+      ...prev,
+    ])
+  }, [])
+
   // V2-as-overlay detection: a V2 clip whose resolution differs from its
   // positionally-paired V1 clip is treated as a cropped region to composite
   // back on top, at the V1 clip's crop box, following its crop keyframes.
@@ -561,6 +575,12 @@ function AppInner() {
     setSelectedId(null)
     setSelectedId2(null)
     setSelectedBedIndex(null)
+    // Nothing is left to lose, so re-baseline the unsaved-work check. Without
+    // this, opening a project afterwards would ask about clips whose media was
+    // just deleted from disk.
+    savedWorkRef.current = workFingerprint({
+      noiseEnabled, noiseGainDb: noiseGainNumber(noiseGainDb),
+    })
     refresh()
   }
 
@@ -1351,13 +1371,29 @@ function AppInner() {
   // The level is saved as the CLAMPED NUMBER, never the raw field text: a .nara
   // is read by the next session and by a human, and "-" or "999" is neither a
   // level nor something the server would accept.
+  function noiseGainNumber(text) {
+    return clampNoiseGainDb(text, NOISE_GAIN_DB_DEFAULT, NOISE_GAIN_DB_MIN, NOISE_GAIN_DB_MAX)
+  }
+
   function buildProject() {
     return {
       version: 8, clips: timelineClips, track2Clips, audioBeds, selectedId, exportPresets,
       noiseEnabled,
-      noiseGainDb: clampNoiseGainDb(
-        noiseGainDb, NOISE_GAIN_DB_DEFAULT, NOISE_GAIN_DB_MIN, NOISE_GAIN_DB_MAX),
+      noiseGainDb: noiseGainNumber(noiseGainDb),
     }
+  }
+
+  // Baseline for "is there unsaved work?": the fingerprint as of the last save
+  // or open. Seeded with the state the app itself starts in — three empty lanes,
+  // room tone off at its default level — so opening a project on a fresh app
+  // asks nothing. A ref, not state: nothing renders from it.
+  const savedWorkRef = useRef(workFingerprint({ noiseGainDb: NOISE_GAIN_DB_DEFAULT }))
+
+  function currentWorkFingerprint() {
+    return workFingerprint({
+      clips: timelineClips, track2Clips, audioBeds,
+      noiseEnabled, noiseGainDb: noiseGainNumber(noiseGainDb),
+    })
   }
 
   async function handleSave() {
@@ -1382,6 +1418,10 @@ function AppInner() {
     }
     if (result.error) { alert('Save failed: ' + result.error); return }
     setProjectName(result.name)
+    // What's on disk now IS the work, so this is the point nothing is unsaved.
+    // Taken from `payload` rather than from state: the state may have moved on
+    // while the POST was in flight, and it's the payload that got written.
+    savedWorkRef.current = workFingerprint(payload)
     setSaveStatus('Saved ' + new Date().toLocaleTimeString())
     setTimeout(() => setSaveStatus(''), 3000)
   }
@@ -1406,6 +1446,7 @@ function AppInner() {
     }
     if (result.error) { alert('Save failed: ' + result.error); return }
     setProjectName(result.name)
+    savedWorkRef.current = workFingerprint(payload)
     setSaveStatus('Saved ' + new Date().toLocaleTimeString())
     setTimeout(() => setSaveStatus(''), 3000)
   }
@@ -1448,18 +1489,43 @@ function AppInner() {
   }, [timelineClips.length, showRenderDialog, showLibrary, showAbout, showFfmpegSettings, footageLoss])
 
   function handleLibraryOpen(name, project) {
+    // A pre-version-5 project has a single `audioBed` object; it becomes a
+    // one-clip lane, which renders the graph it always did. normalizeBeds
+    // back-fills startSec for anything written before version 6, from the
+    // cumulative sum that USED to be the lane's only notion of position — so an
+    // older project reopens as the same lane it rendered as.
+    const beds = normalizeBeds(project.audioBeds || (project.audioBed ? [project.audioBed] : []))
+    // Opening replaces all three lanes AND clears the undo history, so anything
+    // unsaved is gone for good — ask first. Compared by fingerprint rather than
+    // by a flag, so a project opened and not touched — or edited and then edited
+    // back — doesn't ask. Deliberately a plain confirm, not a three-way
+    // save/discard/cancel: Save is one click away behind Cancel, and this is the
+    // only path that silently threw work away.
+    if (currentWorkFingerprint() !== savedWorkRef.current) {
+      const ok = window.confirm(
+        `There are unsaved changes on the timeline. Opening "${name}" replaces all three lanes `
+        + 'and clears the undo history, so those changes cannot be recovered.\n\n'
+        + 'Cancel to go back and save first, or OK to open anyway.')
+      if (!ok) return
+    }
     // One reset for all three lanes, so the freshly-loaded project starts with
     // an empty history — Cmd+Z must not walk back into the project that was
     // open before this one.
     resetTracks({
       v1: project.clips,
       v2: project.track2Clips || [],
-      // A pre-version-5 project has a single `audioBed` object; it becomes a
-      // one-clip lane, which renders the graph it always did. normalizeBeds
-      // back-fills startSec for anything written before version 6, from the
-      // cumulative sum that USED to be the lane's only notion of position — so an
-      // older project reopens as the same lane it rendered as.
-      a1: normalizeBeds(project.audioBeds || (project.audioBed ? [project.audioBed] : [])),
+      a1: beds,
+    })
+    // The project as loaded is now the saved state. Built from the SAME values
+    // handed to the setters rather than read back from state, which is async and
+    // still holds the previous project at this point.
+    savedWorkRef.current = workFingerprint({
+      clips: project.clips,
+      track2Clips: project.track2Clips || [],
+      audioBeds: beds,
+      noiseEnabled: project.noiseEnabled === true,
+      noiseGainDb: noiseGainNumber(
+        project.noiseGainDb == null ? NOISE_GAIN_DB_DEFAULT : project.noiseGainDb),
     })
     setSelectedId(project.selectedId || null)
     // A1's selection is a position in the lane that was just replaced, so it
@@ -1937,6 +2003,7 @@ function AppInner() {
                   barSlot={timelineBarSlot}
                   toolbar={editToolbar}
                   onFootageLoss={handleFootageLoss}
+                  onSourceError={handlePlaybackSourceError}
                 />
               </div>
             )}

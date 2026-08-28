@@ -13,6 +13,9 @@ import { loadFavorites, toggleFavorite, renameFavorite, sortFiles, filterFiles }
 // the Media Bin's own set, it only gates Rename (see handleRename).
 export default function OutputPanel({ files, inUseNames = null, onCleared }) {
   const videoRef = useRef(null)
+  // Ticket for the newest probe request — see loadOutput. Same guard the Media
+  // Bin uses, for the same reason.
+  const probeSeqRef = useRef(0)
   const [selectedName, setSelectedName] = useState(null)
   const [info, setInfo] = useState(null)
   const [favorites, setFavorites] = useState(() => loadFavorites('output'))
@@ -71,6 +74,12 @@ export default function OutputPanel({ files, inUseNames = null, onCleared }) {
     const result = await deleteOutputFile(name)
     if (result.error) { alert('Delete failed: ' + result.error); return }
     if (name === selectedName) {
+      // Bumping the probe ticket is what makes this stick. loadOutput's reply
+      // sets selectedName/info/src from inside the .then, so a probe already on
+      // the wire for the file just deleted would land after this and repopulate
+      // the panel with a file that is no longer on disk (finding #14). #10 added
+      // the ref for the click race and deliberately left delete alone.
+      probeSeqRef.current++
       setSelectedName(null)
       setInfo(null)
       if (videoRef.current) videoRef.current.removeAttribute('src')
@@ -81,7 +90,15 @@ export default function OutputPanel({ files, inUseNames = null, onCleared }) {
   useEffect(() => { setFavorites(loadFavorites('output')) }, [])
 
   function loadOutput(name) {
+    // Probes resolve out of order, so a slow reply for an earlier file can land
+    // after a fast one and win. Here it would also drag the highlighted row
+    // back with it (setSelectedName is inside the reply), so a click and a
+    // finishing render racing each other could leave every part of the panel
+    // pointing at the wrong export. Newest ticket wins; older replies are
+    // dropped.
+    const seq = ++probeSeqRef.current
     probe(name, 'output').then(data => {
+      if (seq !== probeSeqRef.current) return
       const url = data.browser_playable === false
         ? `/preview/output/${encodeURIComponent(name)}`
         : `/output/${encodeURIComponent(name)}`
@@ -98,6 +115,9 @@ export default function OutputPanel({ files, inUseNames = null, onCleared }) {
   // and reported back by /api/outputs) — nothing is shown mid-render.
   useEffect(() => {
     if (files.length === 0) {
+      // Third place the panel is emptied, and it needs the same ticket bump: an
+      // empty list means nothing in flight can still be worth showing.
+      probeSeqRef.current++
       setSelectedName(null)
       setInfo(null)
       return
@@ -109,6 +129,9 @@ export default function OutputPanel({ files, inUseNames = null, onCleared }) {
 
   function handleClear() {
     clearOutput().then(() => {
+      // Same reason as handleDelete: every file this panel could be probing has
+      // just been removed, so no reply still in flight may set the panel.
+      probeSeqRef.current++
       if (videoRef.current) videoRef.current.removeAttribute('src')
       setSelectedName(null)
       setInfo(null)

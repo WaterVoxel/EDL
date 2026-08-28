@@ -1,7 +1,12 @@
+import functools
 import json
+import math
 import os
+import select
 import shutil
+import socket
 import subprocess
+import threading
 import time
 
 from flask import Flask, jsonify, render_template, request, send_from_directory
@@ -108,6 +113,85 @@ def _handle_unexpected(e):
                     "detail": f"{type(e).__name__}: {e}"}), 500
 
 
+# ---------- request fields ----------
+
+# Every POST body here is JSON the frontend built, so for a long time the fields
+# were simply indexed and trusted: `data["input"]`, `float(c.get("headHoldSec")
+# or 0)`. A missing key or a wrong type then left the route as a TypeError and
+# came out of _handle_unexpected above as a 500 — a status that says "the server
+# broke" for what is a bad request, with a Python type name where the offending
+# FIELD should be. A `NaN` was worse than either: it survives float(), and every
+# `if x < 0` / `if x > limit` comparison against it is False, so it passed
+# validation and reached ffmpeg as the literal `nan` (finding #11).
+#
+# These four judge one value and name it. They raise ValueError, which is the
+# shape the routes' existing `except ValueError -> 400` blocks already use
+# (_a1_noise_gain_db, _a1_bed_lane), and they take the value rather than
+# (data, key) so the same call works on a nested field with a full label:
+# _str_field(c.get("input"), f"clip {i}: input").
+
+
+def _str_field(value, field, required=True, default=""):
+    """A string field. `required=False` accepts an absent/null value as `default`."""
+    if value is None:
+        if required:
+            raise ValueError(f"{field} is required")
+        return default
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    return value
+
+
+def _num_field(value, field, required=True, default=None, lo=None, hi=None):
+    """A finite number, optionally bounded by `lo`/`hi` (inclusive).
+
+    Numeric strings are accepted because they always were — an <input
+    type="number"> posts its value as one — but a bool is not: `true` as a
+    duration is a client bug, not one second, and bool is an int subclass so
+    nothing else here would catch it.
+    """
+    if value is None:
+        if required:
+            raise ValueError(f"{field} is required")
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise ValueError(f"{field} must be a number")
+    try:
+        num = float(value)
+    except ValueError:
+        raise ValueError(f"{field} must be a number")
+    if not math.isfinite(num):
+        raise ValueError(f"{field} must be a finite number (got {value!r})")
+    if lo is not None and num < lo:
+        raise ValueError(f"{field} must be at least {lo:g}")
+    if hi is not None and num > hi:
+        raise ValueError(f"{field} must be at most {hi:g}")
+    return num
+
+
+def _obj_field(value, field, required=True):
+    """A JSON object. A string here is the trap this exists for: it indexes
+    character-wise, so `{"clips": "a.mp4"}` used to read as a clip list."""
+    if value is None:
+        if required:
+            raise ValueError(f"{field} is required")
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"{field} must be an object")
+    return value
+
+
+def _list_field(value, field, required=True):
+    """A JSON array — same character-wise trap as _obj_field."""
+    if value is None:
+        if required:
+            raise ValueError(f"{field} is required")
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{field} must be a list")
+    return value
+
+
 # ---------- version ----------
 
 @app.route("/api/version")
@@ -146,7 +230,13 @@ def serve_preview(which, name):
     if not os.path.exists(path):
         return jsonify({"error": "file not found"}), 404
     try:
-        preview_path, _info = fu.get_or_make_preview(path)
+        # The dirs are passed in because only app.py knows where the Export Bin
+        # is (get_output_dir reads the settings file). They are used only when
+        # this call MISSES and pays for a transcode, which is when sweeping the
+        # cache is free by comparison — and is the only sweep a server that never
+        # restarts would otherwise get (finding #13).
+        preview_path, _info = fu.get_or_make_preview(
+            path, prune_dirs=[fu.INPUT_DIR, get_output_dir()])
     except RuntimeError as e:
         return jsonify({"error": "could not build preview", "detail": str(e)}), 500
     directory, filename = os.path.split(preview_path)
@@ -156,6 +246,18 @@ def serve_preview(which, name):
 # ---------- file listing / probing ----------
 
 def _list_dir(base):
+    # A clone that skipped the documented `mkdir -p` has no input/ or output/,
+    # and os.listdir raises FileNotFoundError — so the first two calls the UI
+    # makes both came back 500 (finding #12). These are the app's own folders and
+    # creating one is a setup step it can simply perform; list_projects and
+    # PREVIEW_CACHE_DIR already self-heal exactly this way.
+    #
+    # It cannot create a user-chosen export directory by accident: get_output_dir
+    # returns a custom path only `if os.path.isdir(custom)`, so the only values
+    # that ever reach here are INPUT_DIR, OUTPUT_DIR, or a directory that already
+    # exists. That matters — inventing a folder where an unmounted volume belongs
+    # would hide the real problem instead of reporting it.
+    os.makedirs(base, exist_ok=True)
     files = []
     for name in sorted(os.listdir(base)):
         p = os.path.join(base, name)
@@ -198,9 +300,27 @@ def upload():
     f = request.files.get("file")
     if not f or f.filename == "":
         return jsonify({"error": "no file"}), 400
-    name = secure_filename(f.filename)
-    if not name.lower().endswith(fu.MEDIA_EXTENSIONS):
-        return jsonify({"error": f"unsupported file type: {name}"}), 400
+    # Judge the extension on the name the BROWSER sent, not on the sanitized one.
+    # secure_filename drops every non-ASCII character, so `видео.mp4` arrived
+    # here as `mp4` and was refused as "unsupported file type: mp4" — naming as
+    # the type an extension that is in fact supported, for a file the app is
+    # perfectly able to read. Any name written in a non-Latin script was
+    # unuploadable (finding #12).
+    raw_ext = os.path.splitext(f.filename)[1]
+    if raw_ext.lower() not in fu.MEDIA_EXTENSIONS:
+        return jsonify({"error": f"unsupported file type: {raw_ext or f.filename}"}), 400
+    # Sanitize the STEM and re-attach the extension just approved, rather than
+    # sanitizing the whole name: `видео.mp4` sanitizes to `mp4`, a file with no
+    # extension at all, which every listing route would then filter out of sight.
+    # A stem that sanitizes away to nothing gets a placeholder — the file lands
+    # and can be renamed in the bin, where losing it outright would be the worse
+    # answer. The extension keeps its original case (`.MOV` stays `.MOV`); only
+    # the check is case-folded.
+    stem = secure_filename(os.path.splitext(f.filename)[0])
+    name = (stem or "upload") + raw_ext
+    # Same self-healing as _list_dir, for the same reason: uploading into a
+    # missing input/ used to 500 (and left nothing behind to retry with).
+    os.makedirs(fu.INPUT_DIR, exist_ok=True)
     dest = os.path.join(fu.INPUT_DIR, name)
     if os.path.exists(dest):
         base, ext = os.path.splitext(name)
@@ -212,6 +332,12 @@ def upload():
 
 @app.route("/api/clear_input", methods=["POST"])
 def clear_input():
+    # On a clone whose input/ was never created, os.listdir raised
+    # FileNotFoundError and this came back as a 500 "internal server error"
+    # (measured) where delete_input_file degrades to a clean 404 — so the
+    # directory is created here as it is in _list_dir, and clearing an empty or
+    # absent folder is a success that removed nothing (finding #14).
+    os.makedirs(fu.INPUT_DIR, exist_ok=True)
     removed = []
     for name in os.listdir(fu.INPUT_DIR):
         p = os.path.join(fu.INPUT_DIR, name)
@@ -272,6 +398,8 @@ def _project_filename(raw):
     could not find again), and a name that is empty once the extension is
     accounted for.
     """
+    if raw is not None and not isinstance(raw, str):
+        raise fu.PathError("project name must be a string")
     name = (raw or "").strip()
     if not name.endswith(".nara"):
         name += ".nara"
@@ -374,8 +502,38 @@ def _load_export_settings():
 
 
 def _save_export_settings(settings):
-    with open(SETTINGS_FILE, "w") as f:
-        json.dump(settings, f, indent=2)
+    """Write the settings file atomically: temp file in the same directory, then
+    os.replace.
+
+    `open(SETTINGS_FILE, "w")` TRUNCATES before it writes, so for the length of
+    the write the file on disk is empty or half a JSON document — and
+    _load_export_settings turns a JSONDecodeError into `{}`, which is not a
+    partial loss but a total one: the export directory, the quality mode and
+    every saved FFmpeg preset all revert to defaults at once. os.replace is
+    atomic, so a reader sees either the old file or the new one (finding #14).
+
+    This does not make concurrent SAVES safe — two requests that each read, edit
+    and write still lose one of the two edits — but it does mean the loser is a
+    valid previous state rather than nothing at all. Flask serves threaded and
+    two dialogs post here, so that race is reachable; a lock is not added because
+    the partial-write half is what destroys data, and the settings file has one
+    writer per user gesture.
+    """
+    tmp = f"{SETTINGS_FILE}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(settings, f, indent=2)
+        os.replace(tmp, SETTINGS_FILE)
+    except Exception:
+        # Any failure, not just OSError: json.dump raises TypeError on a value it
+        # cannot serialize, and that must not leave the half-written temp file
+        # behind either. A killed process still can, which is why the temp name
+        # is one nothing reads (.gitignore covers it too).
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def get_output_dir():
@@ -515,6 +673,110 @@ def multipass_export_render(input_args, filter_args, source_info, out_path, dura
         fu.discard_output(staged)
 
 
+# ---------- cancel a render whose client has gone away ----------
+
+# AUDIT #8's second half. Closing the tab, reloading the page or navigating away
+# mid-render used to leave ffmpeg encoding at ~800% CPU with nowhere to deliver
+# the result: measured on 0.44.0, a 26s trim disconnected after 1s ran the full
+# 26s and committed a 293 MB file into the Export Bin that nobody had asked to
+# keep. Nothing in HTTP tells a server "the client left", so the connection has
+# to be watched.
+#
+# One watcher thread per render request polls the client socket while the route
+# runs. It is a thread rather than a check inside the render loop because there
+# is no loop to check in: the request thread is blocked in
+# Popen.communicate() for the whole encode.
+CLIENT_POLL_SECONDS = 1.0
+
+
+def _peer_gone(sock):
+    """True when the client has closed its end of `sock`.
+
+    select() first, so a connection with nothing to say costs one syscall and
+    reads nothing; a socket that is readable is then peeked at WITHOUT consuming
+    (MSG_PEEK), because the bytes belong to werkzeug. Zero bytes on a readable
+    socket is TCP's end-of-stream — the peer sent FIN. Real data means the
+    opposite (a pipelined next request on a keep-alive connection), and is
+    deliberately not treated as a disconnect.
+
+    A client that half-closed its write side while still waiting for the
+    response would read as gone here. Nothing that talks to this app does that:
+    the only clients are its own frontend through the Vite proxy (measured — an
+    aborted browser fetch closes the upstream socket too) and curl.
+    """
+    try:
+        readable, _, _ = select.select([sock], [], [], 0)
+    except (OSError, ValueError):
+        # Closed or otherwise unusable: there is certainly nobody to answer.
+        return True
+    if not readable:
+        return False
+    try:
+        return sock.recv(1, socket.MSG_PEEK) == b""
+    except BlockingIOError:
+        return False
+    except OSError:
+        # ECONNRESET and friends — the client is gone, less politely.
+        return True
+
+
+def _watch_client(sock, scope, stop):
+    """Cancel `scope` as soon as the client behind `sock` disconnects.
+
+    One-shot: once it has cancelled there is nothing left to watch. `stop` is
+    what the request thread sets when the route is done, and it doubles as the
+    poll delay, so the watcher exits promptly on a render that finishes normally.
+    """
+    while not stop.wait(CLIENT_POLL_SECONDS):
+        if _peer_gone(sock):
+            killed = fu.cancel_scope(scope)
+            print(f"client disconnected mid-request — stopped {killed} running "
+                  f"ffmpeg process{'' if killed == 1 else 'es'}", flush=True)
+            return
+
+
+def cancel_on_disconnect(fn):
+    """Route decorator: stop this request's ffmpeg children if its client leaves.
+
+    Applied to the routes that spawn an encoder for a render the user asked for.
+    Deliberately NOT applied to /preview or /input|/output: a <video> element
+    abandons those requests constantly (seeking, switching source, a paused tab),
+    and the preview conversion it would kill is work the next request needs.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        sock = request.environ.get("werkzeug.socket")
+        scope = fu.begin_cancel_scope()
+        stop = threading.Event()
+        if sock is not None:
+            # No socket under a WSGI server that doesn't expose one (or a test
+            # client): the render then behaves exactly as it did before.
+            threading.Thread(target=_watch_client, args=(sock, scope, stop),
+                             name="disconnect-watcher", daemon=True).start()
+        try:
+            response = fn(*args, **kwargs)
+            if scope.cancelled:
+                # The cancellation landed somewhere that swallowed it — between
+                # two passes, or in a route that reports an ffmpeg failure as a
+                # 500 rather than re-raising. Either way this request's answer is
+                # a cancellation, not whatever it managed to assemble.
+                return _cancelled_response()
+            return response
+        except fu.RenderCancelled:
+            return _cancelled_response()
+        finally:
+            stop.set()
+            fu.end_cancel_scope()
+    return wrapper
+
+
+def _cancelled_response():
+    """499, the status nginx made up for exactly this ("client closed request").
+    Nothing reads it — the socket is closed — but it keeps a cancellation out of
+    the server log's 500s, where it would look like a bug."""
+    return jsonify({"error": "render cancelled: the client disconnected"}), 499
+
+
 def resolve_media_dir(which):
     """Map a request's `dir` field onto one of the two media folders: "input"
     is the Media Bin's sources, anything else (the default) the Export Bin.
@@ -523,33 +785,81 @@ def resolve_media_dir(which):
     return fu.INPUT_DIR if which == "input" else get_output_dir()
 
 
+# The Export Settings dialog displays `error` and nothing else, so this sentence
+# has to carry the whole answer: what failed, where to fix it, and what to do
+# instead in the meantime (the path field is editable by hand).
+_PICKER_ERROR = ("macOS would not open the folder picker — allow this app to control "
+                 "System Events under System Settings ▸ Privacy & Security ▸ Automation, "
+                 "or type the folder path into the field instead")
+
+
 @app.route("/api/browse_directory", methods=["POST"])
 def browse_directory():
     """Open a native macOS folder-picker dialog and return the selected path."""
     data = request.get_json(force=True) if request.data else {}
-    initial_dir = data.get("initial") or fu.OUTPUT_DIR
+    # Interpolated into the AppleScript below as a POSIX path, so it has to be a
+    # real path string: a non-string used to be formatted into the script as one
+    # anyway, open the dialog regardless, and then surface as a 500 when the
+    # picker was still open at the 120s timeout (finding #11).
+    try:
+        initial_dir = _str_field(data.get("initial"), "initial", required=False) or fu.OUTPUT_DIR
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
     try:
         import subprocess as _sp
         # Use osascript (AppleScript) for a native folder picker — it's
         # simpler and more reliable than tkinter on macOS, which requires
         # additional setup (Tcl/Tk framework) and often fails headless.
+        # The path is passed as an ARGUMENT, not pasted into the script text.
+        # Interpolating it made the value part of the program: measured with real
+        # osascript, an `initial` of a single `"` came back as a compile error
+        # ("Expected end of line but found “"”", -2741) before any dialog could
+        # open, and `/tmp" & (17 * 3 as text) & "` compiled and ran — so a quote
+        # in the value ended the string and everything after it was executed as
+        # AppleScript. The reachable face of that is mundane and the reason it is
+        # fixed rather than filed: a legal macOS folder name may contain a double
+        # quote, and the picker refused to open for it (finding #14).
+        #
+        # `item 1 of argv` is how osascript hands a `--` argument to a plain
+        # script; `run` names the handler that receives them.
         script = (
-            'tell application "System Events"\n'
-            f'  set theFolder to choose folder with prompt "Select export directory" '
-            f'default location POSIX file "{initial_dir}"\n'
-            '  return POSIX path of theFolder\n'
-            'end tell'
+            'on run argv\n'
+            '  tell application "System Events"\n'
+            '    set theFolder to choose folder with prompt "Select export directory" '
+            'default location POSIX file (item 1 of argv)\n'
+            '    return POSIX path of theFolder\n'
+            '  end tell\n'
+            'end run'
         )
         result = _sp.run(
-            ["osascript", "-e", script],
+            ["osascript", "-e", script, initial_dir],
             capture_output=True, text=True, timeout=120,
         )
         if result.returncode != 0:
-            # User cancelled or error
-            return jsonify({"cancelled": True, "path": ""})
+            err = (result.stderr or "").strip()
+            # osascript exits 1 both for a dialog the user dismissed and for a
+            # dialog it was never allowed to show, so the exit status alone
+            # cannot tell them apart — and reporting both as "cancelled" is what
+            # made a denied Automation permission a SILENT no-op: the user
+            # pressed Browse, nothing opened, and nothing was said (finding #12).
+            # A cancel is identified by AppleScript's own error number, which is
+            # locale-independent; the text is checked too, in case a future macOS
+            # words it without the code.
+            if "-128" in err or "user canceled" in err.lower():
+                return jsonify({"cancelled": True, "path": ""})
+            return jsonify({"error": _PICKER_ERROR, "detail": err
+                            or f"osascript exited {result.returncode}"}), 500
         path = result.stdout.strip().rstrip("/")
         return jsonify({"cancelled": False, "path": path})
+    except _sp.TimeoutExpired:
+        # The other face of the same failure: where the permission is denied
+        # outright osascript exits, but where System Events simply never answers
+        # (measured in this project's own environment) it hangs until an
+        # AppleEvent timeout — and the raw TimeoutExpired text is the whole
+        # AppleScript source, pasted into the dialog's error line.
+        return jsonify({"error": _PICKER_ERROR,
+                        "detail": "the folder picker did not respond within 120 seconds"}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -559,9 +869,13 @@ def reveal_file():
     """Reveal a source (dir="input") or rendered file in the OS file browser
     (Finder on macOS)."""
     data = request.get_json(force=True)
-    name = data.get("name") or ""
     try:
-        path = fu.safe_path(name, resolve_media_dir(data.get("dir")))
+        name = _str_field(data.get("name"), "name", required=False)
+        which = _str_field(data.get("dir"), "dir", required=False)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    try:
+        path = fu.safe_path(name, resolve_media_dir(which))
     except fu.PathError as e:
         return jsonify({"error": str(e)}), 400
     if not os.path.exists(path):
@@ -587,11 +901,47 @@ def rename_file():
     the one write the app makes to input/: it renames, never rewrites, so a
     source file's bytes are still untouched."""
     data = request.get_json(force=True)
-    old = data.get("name") or ""
-    new = secure_filename(data.get("newName") or "")
+    try:
+        old = _str_field(data.get("name"), "name", required=False)
+        raw_new = _str_field(data.get("newName"), "newName", required=False)
+        which = _str_field(data.get("dir"), "dir", required=False)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if not raw_new.strip():
+        return jsonify({"error": "new name required"}), 400
+    # secure_filename NFKD-normalizes and then drops every non-ASCII character,
+    # so a name written in a non-Latin script keeps nothing of ITSELF while its
+    # extension survives: `видео.mp4` sanitized to `mp4`, the original extension
+    # was re-appended, and the file was renamed to **mp4.mp4** — a silent
+    # substitution the user never asked for and cannot recognise. (`видео` with
+    # no extension sanitized to nothing at all and was reported as "new name
+    # required", for a name that had been supplied.) Both measured. This app can
+    # only store ASCII filenames, so the honest answer is to say so rather than
+    # to invent one (finding #14).
+    #
+    # Judged on the STEM, because that is the part the user is naming. An
+    # accented Latin name is deliberately still accepted — `café.mp4` becomes
+    # `cafe.mp4`, which is recognisably what was typed, and the route reports the
+    # stored name back — while `видео.mp4`, `ビデオ.mp4` and `.mp4` are refused,
+    # because for those there is nothing recognisable left to store.
+    #
+    # The stem is taken by removing a known media extension, NOT with
+    # os.path.splitext, which reads ".mp4" as an extension-less dotfile named
+    # ".mp4" and so let that case through as `mp4.mp4` — the same splitext trap
+    # #12 hit on upload.
+    typed_stem = raw_new
+    for ext in fu.MEDIA_EXTENSIONS:
+        if typed_stem.lower().endswith(ext):
+            typed_stem = typed_stem[:-len(ext)]
+            break
+    if not secure_filename(typed_stem):
+        return jsonify({"error": f"{raw_new!r} cannot be used as a filename here — a "
+                                 "name needs at least one Latin letter, digit, dash "
+                                 "or underscore before its extension"}), 400
+    new = secure_filename(raw_new)
     if not new:
         return jsonify({"error": "new name required"}), 400
-    out_dir = resolve_media_dir(data.get("dir"))
+    out_dir = resolve_media_dir(which)
     try:
         old_path = fu.safe_path(old, out_dir)
     except fu.PathError as e:
@@ -651,10 +1001,23 @@ def set_export_settings():
     data = request.get_json(force=True)
     settings = _load_export_settings()
     if "output_dir" in data:
-        output_dir = (data.get("output_dir") or "").strip()
+        try:
+            output_dir = _str_field(data.get("output_dir"), "output_dir", required=False).strip()
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
         if output_dir:
             if not os.path.isabs(output_dir):
                 return jsonify({"error": "output_dir must be an absolute path"}), 400
+            # The source folder is the one directory an export must never land
+            # in. Nothing overwrites a source if it does — O_EXCL plus the
+            # uniqueness loop turn a collision into `a_1.mp4`, verified by md5 —
+            # but the renders then appear in the Media Bin's input list, where
+            # they read as footage and where Clear Media deletes them along with
+            # the real sources (finding #14).
+            if os.path.realpath(output_dir) == os.path.realpath(fu.INPUT_DIR):
+                return jsonify({"error": "the export directory cannot be the "
+                                         "source folder (input/) — renders would "
+                                         "appear in the Media Bin as footage"}), 400
             if not os.path.isdir(output_dir):
                 try:
                     os.makedirs(output_dir, exist_ok=True)
@@ -723,8 +1086,9 @@ def _parse_time_to_sec(value):
     """Parse a ffmpeg -ss/-to style time value: either a plain number of
     seconds ("12.5") or a "[HH:]MM:SS[.ms]" timecode ("00:00:05.000"), the
     two forms /api/trim's start/end fields actually accept (see the legacy
-    UI's own placeholder text). Only used to size a size-capped mode's
-    bitrate budget — trimming itself is still done by ffmpeg's own -ss/-to."""
+    UI's own placeholder text). Sizes a size-capped mode's bitrate budget, and
+    judges the two fields on every path — trimming itself is still done by
+    ffmpeg's own -ss/-to, which is why the values are passed on unchanged."""
     s = str(value).strip()
     if ":" not in s:
         return float(s)
@@ -739,10 +1103,16 @@ def _parse_time_to_sec(value):
 # ---------- trim ----------
 
 @app.route("/api/trim", methods=["POST"])
+@cancel_on_disconnect
 def trim():
     data = request.get_json(force=True)
     try:
-        in_path = fu.safe_path(data["input"], fu.INPUT_DIR)
+        in_name = _str_field(data.get("input"), "input")
+        out_request = _str_field(data.get("output"), "output", required=False)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    try:
+        in_path = fu.safe_path(in_name, fu.INPUT_DIR)
     except fu.PathError as e:
         return jsonify({"error": str(e)}), 400
     if not os.path.exists(in_path):
@@ -753,24 +1123,52 @@ def trim():
     if not end:
         return jsonify({"error": "end time is required"}), 400
 
+    # Judged on EVERY path, not just the size-capped one that needs the number:
+    # -ss/-to are handed to ffmpeg verbatim, so an unparseable or reversed pair
+    # used to start a real encode and come back as a 500 "ffmpeg failed" for what
+    # is plainly a bad request (finding #11). What ffmpeg receives is unchanged —
+    # still the caller's own strings, so a timecode stays a timecode.
+    try:
+        start_sec = _parse_time_to_sec(start)
+        end_sec = _parse_time_to_sec(end)
+    except (TypeError, ValueError):
+        return jsonify({"error": "start/end must be numeric seconds or a HH:MM:SS.ms timecode"}), 400
+    if not (math.isfinite(start_sec) and math.isfinite(end_sec)):
+        return jsonify({"error": "start/end must be finite times"}), 400
+    if start_sec < 0:
+        return jsonify({"error": "start must not be negative"}), 400
+    if end_sec <= start_sec:
+        return jsonify({"error": f"end ({end}) must be later than start ({start})"}), 400
+
     try:
         info = fu.get_video_info(in_path)
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 500
 
+    # A start at or past the end of the file is not a trim, and ffmpeg does not
+    # treat it as an error: measured, `start=900` on a 3-second source exited 0
+    # and wrote a 262-byte file with no frames in it, which the route reported as
+    # a successful render (finding #14). Only checked when the duration was
+    # actually READ — get_video_info reports 0.0 for a container that carries no
+    # duration, and trim is one of the routes that works fine on such a file, so
+    # `duration_known` is the gate here as it is everywhere else (#11).
+    if info["duration_known"] and start_sec >= info["duration"]:
+        return jsonify({"error": f"start ({start}) is at or past the end of "
+                                 f"{in_name}, which is {info['duration']:.3f}s long"}), 400
+
     export_dir = get_output_dir()
-    out_name = fu.unique_output_name(data.get("output") or _derive_name(data["input"], "trimmed"),
-                                     export_dir)
+    try:
+        out_name = fu.unique_output_name(out_request or _derive_name(in_name, "trimmed"),
+                                         export_dir)
+    except fu.PathError as e:
+        return jsonify({"error": str(e)}), 400
     out_path = os.path.join(export_dir, out_name)
 
     input_args = ["-i", in_path, "-ss", str(start), "-to", str(end)]
 
     quality = get_export_quality()
     if quality in fu.MULTIPASS_QUALITIES:
-        try:
-            trim_duration = _parse_time_to_sec(end) - _parse_time_to_sec(start)
-        except ValueError:
-            return jsonify({"error": "start/end must be numeric seconds or a HH:MM:SS.ms timecode"}), 400
+        trim_duration = end_sec - start_sec
         try:
             out_name = multipass_export_render(input_args, [], info, out_path, trim_duration)
         except RuntimeError as e:
@@ -787,9 +1185,20 @@ def trim():
 # ---------- splice ----------
 
 @app.route("/api/splice", methods=["POST"])
+@cancel_on_disconnect
 def splice():
     data = request.get_json(force=True)
-    names = data.get("inputs") or []
+    # A bare string here is the case worth naming: it has a len() and it iterates,
+    # so `"a.mp4"` used to be read as five separate one-character filenames and
+    # reported as `input file not found: .../a` (finding #11).
+    try:
+        names = [
+            _str_field(n, f"inputs[{i}]")
+            for i, n in enumerate(_list_field(data.get("inputs"), "inputs", required=False))
+        ]
+        out_request = _str_field(data.get("output"), "output", required=False)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     if len(names) < 2:
         return jsonify({"error": "need at least 2 inputs to splice"}), 400
 
@@ -828,7 +1237,10 @@ def splice():
     }
 
     export_dir = get_output_dir()
-    out_name = fu.unique_output_name(data.get("output") or "spliced.mp4", export_dir)
+    try:
+        out_name = fu.unique_output_name(out_request or "spliced.mp4", export_dir)
+    except fu.PathError as e:
+        return jsonify({"error": str(e)}), 400
     out_path = os.path.join(export_dir, out_name)
 
     filt = fu.build_concat_filter(len(in_paths), target_w, target_h, target_fps, has_audio_flags)
@@ -963,6 +1375,21 @@ def _a1_bed_lane(raw_beds, bed_infos):
                 f"{in_sec:.3f}s–{end_sec:.3f}s has no audio in it — "
                 f"this file's audio is {audio_dur:.3f}s long"
             )
+        # The same judgement for an UNTRIMMED bed, which the guard above cannot
+        # reach: with in_sec 0 and no out_sec the reach is the whole measured
+        # audio duration, so a file whose duration could not be read at all came
+        # out as a zero-length bed and was placed on the lane in silence — the
+        # render succeeded, A1 was empty, and nothing said why (finding #14, the
+        # same root cause as #11's duration_known gate, which was applied to the
+        # three video routes only). Measured with a 44-byte WAV carrying a
+        # zero-length data chunk: /api/render_a1 and /api/render_timeline both
+        # returned 200, while the same bed WITH a trim was correctly refused.
+        if reach <= 0.0:
+            raise ValueError(
+                f"A1 clip {n + 1} ({raw_bed.get('input')}): no audio duration "
+                "could be read from this file, so there is nothing to place on "
+                "A1 — the file may be empty, truncated, or missing its header"
+            )
         placements.append((start, reach))
         trims.append(None if (in_sec <= 0 and out_sec is None) else (in_sec, end_sec))
     return placements, trims
@@ -1002,16 +1429,29 @@ def _a1_noise_gain_db(data):
 
 
 @app.route("/api/render_timeline", methods=["POST"])
+@cancel_on_disconnect
 def render_timeline():
     data = request.get_json(force=True)
     clips = data.get("clips") or []
     if not clips:
         return jsonify({"error": "need at least 1 clip"}), 400
 
+    # Judged before anything indexes a clip: `{"clips": "a.mp4"}` is a string that
+    # iterates into one-character "clips", and a clip whose `input` is not a string
+    # reached os.path.join as one. Both were 500s, and the KeyError case answered
+    # with the bare key name `'input'` (finding #11).
+    try:
+        in_names = []
+        for i, c in enumerate(clips):
+            _obj_field(c, f"clip {i}")
+            in_names.append(_str_field(c.get("input"), f"clip {i}: input"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
     try:
         in_paths = [
-            fu.safe_path(c["input"], get_output_dir() if c.get("dir") == "output" else fu.INPUT_DIR)
-            for c in clips
+            fu.safe_path(name, get_output_dir() if c.get("dir") == "output" else fu.INPUT_DIR)
+            for c, name in zip(clips, in_names)
         ]
     except (fu.PathError, KeyError) as e:
         return jsonify({"error": str(e)}), 400
@@ -1031,9 +1471,16 @@ def render_timeline():
         if not raw_ov:
             overlay_specs_raw.append(None)
             continue
+        # Own try/return rather than the one below, whose message prefixes the
+        # clip itself — these already carry the full label (finding #11).
+        try:
+            _obj_field(raw_ov, f"clip {i} overlay")
+            ov_name = _str_field(raw_ov.get("input"), f"clip {i} overlay: input")
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
         try:
             ov_path = fu.safe_path(
-                raw_ov["input"],
+                ov_name,
                 get_output_dir() if raw_ov.get("dir") == "output" else fu.INPUT_DIR,
             )
         except (fu.PathError, KeyError) as e:
@@ -1082,8 +1529,15 @@ def render_timeline():
     bed_infos = []
     raw_beds = _a1_request_beds(data)
     for n, raw_bed in enumerate(raw_beds):
+        # Typed first so the reply names the field: a non-object bed used to be
+        # indexed anyway and answered in Python's own words — "A1 clip 1: string
+        # indices must be integers" (finding #11).
         try:
-            bed_name = raw_bed["input"]
+            _obj_field(raw_bed, f"A1 clip {n + 1}")
+            bed_name = _str_field(raw_bed.get("input"), f"A1 clip {n + 1}: input")
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        try:
             bed_path = fu.safe_path(
                 bed_name,
                 get_output_dir() if raw_bed.get("dir") == "output" else fu.INPUT_DIR,
@@ -1133,11 +1587,23 @@ def render_timeline():
     # follows. Only inSec/outSec/hold durations come from the request.
     clip_specs = []
     for i, (c, info) in enumerate(zip(clips, infos)):
+        # A source whose container carries no duration measures as 0s, and every
+        # window is then "invalid ... for source duration 0.0" — true, but it
+        # never says the duration is what could not be read (finding #11).
+        if not info["duration_known"]:
+            return jsonify({"error": f"clip {i}: cannot read the duration of {in_names[i]} — "
+                                     "its container reports none, so no trim window can be "
+                                     "checked against it"}), 400
         try:
             in_sec = float(c["inSec"])
             out_sec = float(c["outSec"])
         except (KeyError, ValueError, TypeError):
             return jsonify({"error": f"clip {i}: inSec/outSec must be numeric"}), 400
+        # NaN passes every comparison below (`nan < 0` and `nan > duration` are
+        # both False), so without this it validated clean and reached the filter
+        # graph as the literal `nan`.
+        if not (math.isfinite(in_sec) and math.isfinite(out_sec)):
+            return jsonify({"error": f"clip {i}: inSec/outSec must be finite numbers"}), 400
         if out_sec <= in_sec or in_sec < 0 or out_sec > info["duration"] + 0.001:
             return jsonify({"error": f"clip {i}: invalid inSec/outSec for source duration {info['duration']}"}), 400
         # Clamp the trim window to the video stream's own end. The container
@@ -1151,10 +1617,24 @@ def render_timeline():
 
         is_first = i == 0
         is_last = i == len(clips) - 1
-        lead_hold = float(c.get("headHoldSec") or 0) if is_first else 0.0
-        # Freezing an already-frozen frame is a pixel no-op, so a trailing
-        # tail-hold and round-hold (Raise) on the same last clip just add.
-        trail_hold = (float(c.get("tailHoldSec") or 0) + float(c.get("roundHoldSec") or 0)) if is_last else 0.0
+        # Bounded below at 0: a hold EXTENDS a clip, so a negative one is a client
+        # bug that used to render silently, and a non-numeric or NaN one used to
+        # be a 500 or reach tpad as `nan` (finding #11). The frontend's own Hold
+        # form already refuses both (HoldFrameForm.jsx), so nothing it can send
+        # is rejected here.
+        try:
+            lead_hold = _num_field(c.get("headHoldSec"), f"clip {i}: headHoldSec",
+                                   required=False, default=0.0, lo=0) if is_first else 0.0
+            # Freezing an already-frozen frame is a pixel no-op, so a trailing
+            # tail-hold and round-hold (Raise) on the same last clip just add.
+            trail_hold = (
+                _num_field(c.get("tailHoldSec"), f"clip {i}: tailHoldSec",
+                           required=False, default=0.0, lo=0)
+                + _num_field(c.get("roundHoldSec"), f"clip {i}: roundHoldSec",
+                             required=False, default=0.0, lo=0)
+            ) if is_last else 0.0
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
 
         # Speed is a pure PTS change either way — a stretch holds frames, a
         # compression drops them — so the only quality constraint is the
@@ -1394,15 +1874,18 @@ def render_timeline():
     }
 
     export_dir = get_output_dir()
-    out_name = data.get("output") or "render.mp4"
-    # Ensure unique within the export directory
-    base, ext = os.path.splitext(out_name)
-    candidate = out_name
-    n = 1
-    while os.path.exists(os.path.join(export_dir, candidate)):
-        candidate = f"{base}_{n}{ext}"
-        n += 1
-    out_name = candidate
+    try:
+        out_name = _str_field(data.get("output"), "output", required=False) or "render.mp4"
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    # Judged and made unique within the export directory. This route had its own
+    # copy of the uniqueness loop, as did render_a1 and reformat — four
+    # implementations of one rule, and the three inline ones never checked the
+    # name itself (finding #14).
+    try:
+        out_name = fu.unique_output_name(out_name, export_dir)
+    except fu.PathError as e:
+        return jsonify({"error": str(e)}), 400
     out_path = os.path.join(export_dir, out_name)
 
     # Where each bed sits on the A1 lane and how far its SOUND reaches — what
@@ -1467,6 +1950,7 @@ def render_timeline():
 
 
 @app.route("/api/render_a1", methods=["POST"])
+@cancel_on_disconnect
 def render_a1():
     """Render the A1 track ALONE to a .wav, timed to the V1 sequence.
 
@@ -1500,11 +1984,21 @@ def render_a1():
     if not raw_beds and not fill_noise_on:
         return jsonify({"error": "nothing on A1 to render: load an audio track or turn on A1 Room Tone"}), 400
 
+    # Same typing as render_timeline's clip list, for the same reason and in the
+    # same words: this route takes the payload that one takes (finding #11).
+    try:
+        in_names = []
+        for i, c in enumerate(clips):
+            _obj_field(c, f"clip {i}")
+            in_names.append(_str_field(c.get("input"), f"clip {i}: input"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
     in_paths = []
     try:
-        for c in clips:
+        for c, name in zip(clips, in_names):
             in_paths.append(fu.safe_path(
-                c["input"], get_output_dir() if c.get("dir") == "output" else fu.INPUT_DIR
+                name, get_output_dir() if c.get("dir") == "output" else fu.INPUT_DIR
             ))
     except (fu.PathError, KeyError) as e:
         return jsonify({"error": str(e)}), 400
@@ -1527,11 +2021,23 @@ def render_a1():
     # render fine on V1.
     clip_specs = []
     for i, (c, info) in enumerate(zip(clips, infos)):
+        # A source whose container carries no duration measures as 0s, and every
+        # window is then "invalid ... for source duration 0.0" — true, but it
+        # never says the duration is what could not be read (finding #11).
+        if not info["duration_known"]:
+            return jsonify({"error": f"clip {i}: cannot read the duration of {in_names[i]} — "
+                                     "its container reports none, so no trim window can be "
+                                     "checked against it"}), 400
         try:
             in_sec = float(c["inSec"])
             out_sec = float(c["outSec"])
         except (KeyError, ValueError, TypeError):
             return jsonify({"error": f"clip {i}: inSec/outSec must be numeric"}), 400
+        # NaN passes every comparison below (`nan < 0` and `nan > duration` are
+        # both False), so without this it validated clean and reached the filter
+        # graph as the literal `nan`.
+        if not (math.isfinite(in_sec) and math.isfinite(out_sec)):
+            return jsonify({"error": f"clip {i}: inSec/outSec must be finite numbers"}), 400
         if out_sec <= in_sec or in_sec < 0 or out_sec > info["duration"] + 0.001:
             return jsonify({"error": f"clip {i}: invalid inSec/outSec for source duration {info['duration']}"}), 400
         video_dur = info.get("video_duration") or info["duration"]
@@ -1550,6 +2056,17 @@ def render_a1():
             return jsonify({"error": f"clip {i}: speed must be in (0, {MAX_SPEED:g}]"}), 400
         is_first = i == 0
         is_last = i == len(clips) - 1
+        try:
+            lead_hold = _num_field(c.get("headHoldSec"), f"clip {i}: headHoldSec",
+                                   required=False, default=0.0, lo=0) if is_first else 0.0
+            trail_hold = (
+                _num_field(c.get("tailHoldSec"), f"clip {i}: tailHoldSec",
+                           required=False, default=0.0, lo=0)
+                + _num_field(c.get("roundHoldSec"), f"clip {i}: roundHoldSec",
+                             required=False, default=0.0, lo=0)
+            ) if is_last else 0.0
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
         clip_specs.append({
             "inSec": in_sec,
             "outSec": out_sec,
@@ -1561,8 +2078,10 @@ def render_a1():
             # and therefore where room tone must stay out. Getting it wrong here
             # would desync the stem from the render it is meant to match.
             "has_audio": info["has_audio"],
-            "lead_hold_sec": float(c.get("headHoldSec") or 0) if is_first else 0.0,
-            "trail_hold_sec": (float(c.get("tailHoldSec") or 0) + float(c.get("roundHoldSec") or 0)) if is_last else 0.0,
+            # Same bounds as render_timeline's, and for the same reason — a stem
+            # that accepted a hold the render rejects would not match it.
+            "lead_hold_sec": lead_hold,
+            "trail_hold_sec": trail_hold,
         })
 
     # The A1 lane is the only real input (plus the noise asset) — resolved and
@@ -1573,8 +2092,15 @@ def render_a1():
     bed_indexes = []
     bed_infos = []
     for n, raw_bed in enumerate(raw_beds):
+        # Typed first so the reply names the field: a non-object bed used to be
+        # indexed anyway and answered in Python's own words — "A1 clip 1: string
+        # indices must be integers" (finding #11).
         try:
-            bed_name = raw_bed["input"]
+            _obj_field(raw_bed, f"A1 clip {n + 1}")
+            bed_name = _str_field(raw_bed.get("input"), f"A1 clip {n + 1}: input")
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        try:
             bed_path = fu.safe_path(
                 bed_name,
                 get_output_dir() if raw_bed.get("dir") == "output" else fu.INPUT_DIR,
@@ -1625,12 +2151,20 @@ def render_a1():
 
     # Always a .wav, whatever name the client asked for.
     export_dir = get_output_dir()
-    base = os.path.splitext(data.get("output") or "render_A1")[0]
-    candidate = f"{base}.wav"
-    n = 1
-    while os.path.exists(os.path.join(export_dir, candidate)):
-        candidate = f"{base}_{n}.wav"
-        n += 1
+    try:
+        out_request = _str_field(data.get("output"), "output", required=False)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    # The extension is this route's to choose, not the caller's — a stem comes in
+    # ("render_A1", or whatever the client typed) and a .wav always comes out, so
+    # the shared check is given .wav as the one allowed suffix AFTER the stem has
+    # been re-extended. Everything else it judges — no directory components, no
+    # empty name — applies here exactly as it does to a video render.
+    base = os.path.splitext(out_request or "render_A1")[0]
+    try:
+        candidate = fu.unique_output_name(f"{base}.wav", export_dir, allowed=(".wav",))
+    except fu.PathError as e:
+        return jsonify({"error": str(e)}), 400
     out_path = os.path.join(export_dir, candidate)
 
     args = []
@@ -1669,6 +2203,7 @@ def _clip_total_sec(spec):
 # ---------- reformat ----------
 
 @app.route("/api/reformat", methods=["POST"])
+@cancel_on_disconnect
 def reformat():
     """Scale a single clip DOWN to fit inside a (resolution tier, aspect
     ratio) bounding box (fu.REFORMAT_PRESETS), preserving its own aspect
@@ -1690,8 +2225,13 @@ def reformat():
         return jsonify({"error": f"ratio must be 'adaptive' or one of {list(fu.REFORMAT_RATIOS)}"}), 400
 
     try:
+        in_name = _str_field(data.get("input"), "input")
+        out_request = _str_field(data.get("output"), "output", required=False)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    try:
         in_path = fu.safe_path(
-            data.get("input"), get_output_dir() if data.get("dir") == "output" else fu.INPUT_DIR
+            in_name, get_output_dir() if data.get("dir") == "output" else fu.INPUT_DIR
         )
     except fu.PathError as e:
         return jsonify({"error": str(e)}), 400
@@ -1712,14 +2252,11 @@ def reformat():
         out_w, out_h = fu.reformat_scale_dims(info["width"], info["height"], target_w, target_h)
 
     export_dir = get_output_dir()
-    out_name = data.get("output") or _derive_name(data.get("input", "reformat.mp4"), "reformat")
-    base, ext = os.path.splitext(out_name)
-    candidate = out_name
-    n = 1
-    while os.path.exists(os.path.join(export_dir, candidate)):
-        candidate = f"{base}_{n}{ext}"
-        n += 1
-    out_name = candidate
+    try:
+        out_name = fu.unique_output_name(out_request or _derive_name(in_name, "reformat"),
+                                         export_dir)
+    except fu.PathError as e:
+        return jsonify({"error": str(e)}), 400
     out_path = os.path.join(export_dir, out_name)
 
     input_args = ["-i", in_path]
@@ -1744,20 +2281,27 @@ def reformat():
 # ---------- hold frame ----------
 
 @app.route("/api/hold_frame", methods=["POST"])
+@cancel_on_disconnect
 def hold_frame():
     data = request.get_json(force=True)
+    # One field per message: "time and duration must be numeric seconds" left the
+    # caller to work out which of the two it was, a list reached float() as a
+    # TypeError the handler above did not catch, and a NaN passed the range check
+    # below (every comparison against it is False) to reach ffmpeg (finding #11).
     try:
-        in_path = fu.safe_path(data["input"], fu.INPUT_DIR)
+        in_name = _str_field(data.get("input"), "input")
+        out_request = _str_field(data.get("output"), "output", required=False)
+        t = _num_field(data.get("time"), "time")
+        dur = _num_field(data.get("duration"), "duration")
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    try:
+        in_path = fu.safe_path(in_name, fu.INPUT_DIR)
     except fu.PathError as e:
         return jsonify({"error": str(e)}), 400
     if not os.path.exists(in_path):
         return jsonify({"error": "input file not found"}), 404
 
-    try:
-        t = float(data["time"])
-        dur = float(data["duration"])
-    except (KeyError, ValueError):
-        return jsonify({"error": "time and duration must be numeric seconds"}), 400
     if dur <= 0:
         return jsonify({"error": "duration must be positive"}), 400
 
@@ -1765,6 +2309,9 @@ def hold_frame():
         info = fu.get_video_info(in_path)
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 500
+    if not info["duration_known"]:
+        return jsonify({"error": f"cannot read the duration of {in_name} — its container "
+                                 "reports none, so the frame to hold cannot be located"}), 400
     fps = info["fps"] or 30.0
     # Bound by the video stream's duration, not the container's — the
     # container can outlast the last video frame (e.g. audio runs longer),
@@ -1774,8 +2321,11 @@ def hold_frame():
         return jsonify({"error": f"time must be within [0, {video_dur})"}), 400
 
     export_dir = get_output_dir()
-    out_name = fu.unique_output_name(data.get("output") or _derive_name(data["input"], "held"),
-                                     export_dir)
+    try:
+        out_name = fu.unique_output_name(out_request or _derive_name(in_name, "held"),
+                                         export_dir)
+    except fu.PathError as e:
+        return jsonify({"error": str(e)}), 400
     out_path = os.path.join(export_dir, out_name)
 
     filt = fu.build_holdframe_filter(t, dur, fps, info["has_audio"])
@@ -1815,10 +2365,16 @@ def hold_frame():
 # ---------- reverse ----------
 
 @app.route("/api/reverse", methods=["POST"])
+@cancel_on_disconnect
 def reverse():
     data = request.get_json(force=True)
     try:
-        in_path = fu.safe_path(data["input"], fu.INPUT_DIR)
+        in_name = _str_field(data.get("input"), "input")
+        out_request = _str_field(data.get("output"), "output", required=False)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    try:
+        in_path = fu.safe_path(in_name, fu.INPUT_DIR)
     except fu.PathError as e:
         return jsonify({"error": str(e)}), 400
     if not os.path.exists(in_path):
@@ -1843,8 +2399,11 @@ def reverse():
         }), 200
 
     export_dir = get_output_dir()
-    out_name = fu.unique_output_name(data.get("output") or _derive_name(data["input"], "reversed"),
-                                     export_dir)
+    try:
+        out_name = fu.unique_output_name(out_request or _derive_name(in_name, "reversed"),
+                                         export_dir)
+    except fu.PathError as e:
+        return jsonify({"error": str(e)}), 400
     out_path = os.path.join(export_dir, out_name)
 
     input_args = ["-i", in_path]
@@ -1869,6 +2428,14 @@ def reverse():
 
 def _derive_name(input_name, suffix):
     base, ext = os.path.splitext(input_name)
+    # The source's own container, unless the app cannot WRITE that container: a
+    # .webm source derived a .webm output, which every render path fails on
+    # (fu.RENDERABLE_EXTENSIONS explains why). It now derives .mp4 instead, so a
+    # name the user never typed is never reported back to them as a bad output
+    # name — and a .webm source becomes renderable by default rather than a
+    # guaranteed 500 (finding #14).
+    if ext.lower() not in fu.RENDERABLE_EXTENSIONS:
+        ext = ".mp4"
     return f"{base}_{suffix}{ext}"
 
 
@@ -1939,8 +2506,11 @@ def ask_claude(instruction, context, session_id=None):
 @app.route("/api/chat", methods=["POST"])
 def chat():
     data = request.get_json(force=True)
-    instruction = (data.get("message") or "").strip()
-    session_id = data.get("session_id") or None
+    try:
+        instruction = _str_field(data.get("message"), "message", required=False).strip()
+        session_id = _str_field(data.get("session_id"), "session_id", required=False) or None
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     if not instruction:
         return jsonify({"error": "empty message"}), 400
 
@@ -2019,6 +2589,7 @@ def _output_arg_info(argv):
 
 
 @app.route("/api/execute", methods=["POST"])
+@cancel_on_disconnect
 def execute():
     data = request.get_json(force=True)
     cmd = data.get("command", "")
@@ -2032,8 +2603,10 @@ def execute():
     argv = argv[:1] + ["-nostdin"] + argv[1:]
 
     try:
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=600,
-                                stdin=subprocess.DEVNULL)
+        # fu.run_tracked, not subprocess.run: same call, but the child is in the
+        # registry the shutdown handlers kill from, so a chat-issued encode is no
+        # more able to outlive the server than a Render is (finding #8).
+        result = fu.run_tracked(argv, timeout=600)
     except subprocess.TimeoutExpired:
         return jsonify({"error": "ffmpeg timed out after 600s"}), 504
 
@@ -2063,6 +2636,33 @@ def execute():
 
 
 if __name__ == "__main__":
+    # Say once, up front, that the render engine is not installed. Every render,
+    # probe and preview fails without it, and until now each one failed on its
+    # own terms with nothing tying the failures together — while README.txt has
+    # carried a troubleshooting entry called "The app says it can't find ffmpeg"
+    # for a message the app never actually printed (finding #12). Printed rather
+    # than raised: the server is still worth having up (the UI loads, files list,
+    # projects open), and refusing to start would take away the one screen that
+    # could explain itself.
+    for _name, _path in fu.missing_tools():
+        print(f"  !!  {fu.missing_tool_message(_path)}", flush=True)
+    # Sweep the preview cache once, before serving. Nothing ever evicted it, so
+    # it grew to 602 MB here with 83% of that unreachable (finding #13). Doing it
+    # at startup rather than only on a cache miss means a user who has stopped
+    # previewing new files still gets the space back, and it is the one moment
+    # with no request in flight to race.
+    _gone, _bytes = fu.prune_preview_cache([fu.INPUT_DIR, get_output_dir()])
+    if _gone:
+        print(f"  ..  preview cache: removed {_gone} file(s), "
+              f"reclaimed {_bytes / 1e6:.0f} MB", flush=True)
+    # A render outlives the request that started it only in the sense that
+    # ffmpeg is a separate process: nothing here used to be able to stop one, so
+    # every reloader restart (including the one the line below arms for VERSION)
+    # left the encoder running, orphaned onto PID 1, with the result going
+    # nowhere. Handlers installed before app.run so they are in place for the
+    # first request, not just for renders that start after some later event
+    # (finding #8).
+    fu.install_shutdown_handlers()
     # `extra_files` puts VERSION under the reloader's watch alongside the .py
     # files it already follows. APP_VERSION is read once at import, so without
     # this a bump would leave the running server reporting the old number until

@@ -15,6 +15,227 @@ the day the version file appeared. There are no tags for them and never will be 
 `v0.25.0` is the first real tag. Treat the older entries as a history, not a
 download list.
 
+## 0.45.0 — 2026-08-28
+
+**Closing the tab, hitting reload, or pressing Stop in the browser now actually stops the render.**
+Until now it only stopped *you* watching it: ffmpeg carried on at full speed for as long as the job
+needed, wrote its file, and put it in the export folder, so a mistaken 90-second render meant either
+waiting it out or quitting the whole app. Now the render is stopped within about a second of the
+browser going away, and nothing is left behind — no file in the export folder, no half-written file
+in the staging folder, and no leftover pass-1 statistics files from the size-limited modes. A
+two-pass render abandoned during pass 1 no longer starts pass 2.
+
+Two things this deliberately does **not** do. Renders you did *not* abandon are untouched — if you
+have two renders going and close one tab, the other finishes and commits exactly as before, and a
+render nobody interrupts produces the same bytes as it did in 0.44.0. And **previews are not
+cancelled**: the small proxy file the app builds so a clip can play in the browser keeps building
+even if you navigate away, because it lands in the preview cache and the next person to open that
+clip gets it instantly instead of waiting again.
+
+One rough edge worth knowing: a command you run from the chat panel writes straight to the export
+folder rather than staging, so cancelling one leaves the truncated file it had written so far under
+the name you gave it — the same leftover any failed chat command already leaves. Delete it and
+re-run.
+
+## 0.44.0 — 2026-08-28
+
+**A round of small sharp edges, most of which used to fail quietly.** Nothing here changes how a render
+looks; what changes is that the app now says what went wrong instead of doing something surprising.
+
+**A render can no longer disappear into a folder you didn't ask for.** Typing an output name with a
+slash in it — `8/25 hero cut` — used to succeed and quietly write the render into a new `8/` folder
+inside your export directory, where the Export Bin could not list it, preview it, rename it or delete
+it. The name was still reported back as if all was well. Names like that, plus `../something.mp4`, `.`,
+`..` and a name with no usable extension, now come back as a clear refusal that says why, and every one
+of the seven things that writes a file (Render, Trim, Splice, Reformat, Hold, Reverse, Render A1) checks
+the same way, so they can't disagree.
+
+**Naming a render `.webm` no longer fails after the encode.** WebM files can be imported, previewed and
+used on the timeline exactly as before — that part now works end to end for the first time — but the app
+only ever writes H.264/HEVC, which a `.webm` file cannot contain, so asking for one used to run the
+whole render and then fail. It is refused up front, and a `.webm` source renders to `.mp4`.
+
+**Playback no longer freezes at the end of a 24 fps clip.** A clip trimmed all the way to the end of its
+file could stop mid-timeline: the picture froze, the transport still said it was playing, and nothing
+said anything. It now hands off to the next clip when the file genuinely runs out of frames, at any
+frame rate.
+
+**A deleted render can no longer reappear in the panel.** Deleting or clearing an export while the app
+was still fetching its details could put that file straight back into the right-hand column — selected
+row, Media Info Out, and the player pointed at a file no longer on disk. Those answers are now ignored.
+
+**Preview thumbnails no longer mix two files up.** Two different files with the same name — one in your
+Media Bin, one in your export folder — could be served the same converted preview, so one of them showed
+the wrong video. Previews are now kept per folder as well as per file. One-time effect of the fix:
+existing cached previews no longer match, so they are cleaned up and rebuilt the next time you preview
+those files.
+
+**Your export settings are no longer someone else's.** `.export_settings.json` was committed to the
+repository, so a fresh copy of the app inherited the developer's quality mode. It is no longer tracked,
+and it is written in a way that a crash mid-save can't wipe your export folder, quality mode and saved
+presets.
+
+**Smaller ones, all of them messages that were missing or wrong:**
+
+- Setting your export folder to the app's own `input/` folder is refused — renders used to land there and
+  show up as if they were your footage.
+- Trimming from a start time past the end of the file says so, and names the file's real length, instead
+  of producing an empty or failed render.
+- An audio bed whose length can't be read is reported by name instead of silently landing as a
+  zero-length clip on A1.
+- Renaming a file to a name written in a non-Latin script (`видео.mp4`) used to store it as `mp4.mp4`.
+  It now explains that a name needs at least one Latin letter, digit, dash or underscore.
+- Choosing an export folder works when a folder in the path contains a quote mark.
+- Clearing the Media Bin on a fresh copy of the app no longer errors when the `input/` folder was never
+  created.
+- Reading a file's details can no longer hang forever on an unreadable file or a disconnected drive.
+
+## 0.43.0 — 2026-08-28
+
+**The preview cache now cleans up after itself — 502 MB of it on this machine.** Files the browser can't
+play natively (ProRes, HEVC, WAV) get converted once behind the scenes so the preview player can show
+them, and the result is kept in a hidden `.preview_cache` folder. Nothing ever removed anything from it:
+delete a render from the Export Bin, rename a file, or re-render over one, and its converted copy stayed
+on disk forever with nothing able to reach it again. Measured today: 602 MB across 334 files, of which
+298 files and 502 MB were already unreachable — most of it from Export Bin renders that had long since
+been cleared.
+
+The app now sweeps the folder when it starts and again whenever it converts something new, removing only
+entries that no longer match any file in your Media Bin or export folder, and printing what it reclaimed
+(`preview cache: removed 298 file(s), reclaimed 502 MB`). There is also a 2 GB ceiling on what remains, so
+the folder can't grow without limit on a very large project; if that ever kicks in, the previews you've
+used least recently go first. Nothing you can see changes — previews still play the same and still open
+instantly the second time — and anything the sweep removes is rebuilt automatically the next time you
+click that file, which takes a couple of seconds.
+
+## 0.42.0 — 2026-08-27
+
+**A fresh copy of the app now works without being told to make folders first.** The setup notes ask you
+to create `input/` and `output/` by hand, and a copy that skipped that step answered every request about
+media with a server error: the Media Bin, the Export Bin and uploading all failed, and the reason given
+was a missing-file error naming a folder rather than anything you could act on. Both folders are now
+created the moment anything looks in them or saves into them, so the empty bins you see on a new copy
+are genuinely empty rather than broken. Your own chosen export folder is never invented this way — if
+the folder in Export Settings isn't there, the app still falls back to `output/` as before.
+
+**When ffmpeg isn't installed, the app now says so.** Previously every render, trim, reverse, hold,
+preview and click-a-file-for-details came back as "internal server error", with the real reason buried in
+a detail line that most of the screens don't show — so on a machine without ffmpeg the app looked broken
+in eight different ways instead of one. Now each of those failures reads "cannot find ffprobe — this app
+looked for it at /opt/homebrew/bin/ffprobe. Install it with: brew install ffmpeg", the terminal prints the
+same sentence once at startup, and clicking a file whose details can't be read shows that sentence in the
+Media Info panel instead of a table of dashes. (README.txt has always had a troubleshooting entry called
+"The app says it can't find ffmpeg"; the app now actually says it.)
+
+**Browse for an export folder no longer does nothing in silence.** If macOS has been told not to let this
+app control System Events, the folder picker never opens — and the app used to treat that exactly like you
+pressing Cancel, so the button appeared dead. It now explains that the picker was blocked and where to
+allow it (System Settings ▸ Privacy & Security ▸ Automation), and reminds you that you can type the path
+into the field instead. Pressing Cancel still closes quietly, as it should. If the picker hangs instead of
+failing, the two-minute wait now ends with that same explanation rather than with a paragraph of AppleScript.
+
+**Files with non-Latin names can be added again.** Dropping `видео.mp4` or `影片.mp4` into the Media Bin was
+refused with "unsupported file type: mp4" — naming a format the app fully supports as the unsupported one.
+The problem was that the app checked the extension after stripping non-English characters from the name.
+It now reads the extension from the name your system actually sent, so these files are accepted; because the
+app can only store plain-ASCII filenames, they land as `upload.mp4` and can be renamed in the bin. Files
+that really aren't media are still refused, and now the message names the extension it objected to (`.txt`)
+rather than the whole filename.
+
+## 0.41.0 — 2026-08-27
+
+**Clicking through the bins quickly no longer shows one file's details under another file's name.**
+Both bins ask the backend about a file when you click it, and the answers come back in whatever order
+the backend finishes them — so clicking a big file and then a small one could leave the small file's
+name highlighted with the big file's resolution, duration and codec beside it, its picture in the
+preview, and the Reformat panel pointed at it. Measured in a real browser: with one answer held back
+1.5 seconds, every part of the panel described the earlier click. Now the newest click always wins
+and older answers are discarded. The Export Bin had the same problem, and there it also dragged the
+highlighted row back to the older file; it is fixed the same way.
+
+**Dropping several files at once no longer stops at the first one that fails.** A drop of three files
+where the second failed used to add the first and abandon the third without attempting it, and the
+only message named the connection rather than the files. Now every file is attempted, the ones that
+work still land in the order they were dropped, and one message at the end lists exactly which files
+didn't and why: "1 of 3 files could not be added to V1: • two.mp4 — cannot reach the backend…". The
+same applies to the A1 audio lane.
+
+**Playback no longer hangs forever on a clip whose file has gone missing.** If a source file was
+moved, renamed or deleted while the app was open, playback would reach that clip and stop dead —
+still showing itself as playing, with the timecode frozen and nothing said. It now stops cleanly at
+that point and writes a line in the Actions tab naming the file: "playback stopped at "bravo.mp4" —
+its source file could not be loaded (moved, renamed or deleted?)". The clip stays on the timeline and
+still renders; it's only the preview that can't show it.
+
+**Opening a project now asks before throwing away unsaved work.** Opening a project (or importing
+one) replaces all three lanes and clears the undo history with them, so anything unsaved was gone for
+good with no warning — measured: three clips became one, with Undo unavailable and no prompt. There
+is now a confirmation naming the project you're about to open, with Cancel returning you to your work
+so you can save first. It only asks when there is something to lose: a project opened and not touched
+— or edited and then edited back to how it was saved — opens without a prompt, and neither does
+opening one on a fresh session. What counts as work is the three lanes plus the room-tone settings;
+which clip happens to be selected doesn't, and a Render doesn't either.
+
+## 0.40.0 — 2026-08-27
+
+**When a request is malformed, the app now says which field is wrong instead of "internal server
+error".** Every operation the app performs — trim, splice, render, hold, reverse, reformat, saving a
+project, renaming a file, changing export settings, the Agent tab — is a small message sent to the
+backend. If any part of that message was the wrong shape (a number where a filename belongs, a list
+where a duration belongs, a key missing altogether), the backend used to fall over and report
+"internal server error", naming a Python type at best. That reads as *the app is broken* for what is
+really *this request was wrong*, and it gave nobody — user or developer — a clue which field to look
+at. Of 59 malformed requests tested, 42 came back as errors of that kind.
+
+All 59 now come back as a plain refusal that names the field: "clip 0: input must be a string",
+"inputs must be a list", "output must be a string", "time must be a number". Four of them used to
+get as far as starting a real encode before failing, so a bad request could occupy the machine for
+a while before saying anything.
+
+Three specific cases used to be *accepted* and now aren't, which is the only behaviour here that
+someone could notice as a change rather than an improvement:
+
+- A negative head or tail hold (`-3` seconds) used to render silently, as if it were zero. It is now
+  refused. A hold extends a clip, so a negative one is always a mistake — and the Hold form in the
+  interface already refuses to send one.
+- `true` in place of a hold time used to be read as one second. It is now refused.
+- A wrongly-typed starting folder for the export-directory Browse button used to open the folder
+  picker anyway. It is now refused before the dialog appears.
+
+**Files whose duration can't be read now say so.** A few containers don't record their own length —
+most commonly anything that was written to a pipe rather than a file, because the writer can't go
+back and fill the number in. Such a file measured as a confident zero seconds, so every attempt to
+use it on the timeline came back as "invalid inSec/outSec for source duration 0.0" or "time must be
+within [0, 0.0)". Both statements are true and neither mentions the actual problem. The message now
+names it: "cannot read the duration of nodur.mkv — its container reports none, so no trim window can
+be checked against it". Trim and Reverse still work on these files, exactly as before, because
+neither needs to know the length.
+
+Nothing about a valid request changed. All 24 normal operations tested produce the same result as
+0.39.0 — 22 of them byte-for-byte identical, and the two that write Matroska files are
+frame-for-frame identical (Matroska stamps a unique ID into every file it writes, so two runs of the
+same command never match byte-wise even without a code change).
+
+## 0.39.0 — 2026-08-27
+
+**Quitting the server no longer leaves a render running behind it.** Because the app runs in
+development mode, it restarts itself the moment you save a code file or bump the version — and
+until now, if a render was in progress when that happened (or when you pressed Ctrl-C, closed the
+Terminal window, or ran `kill`), the ffmpeg doing the encoding was cut loose. It kept running at
+full tilt on every CPU core, with no window left to deliver its result to, and a two-pass export
+left its scratch files (`.ffpass`, `.mbtree`) sitting in a hidden folder that nothing would ever
+clean up. The only way to notice was a fan spinning up for a file you were never going to get.
+
+The app now keeps track of the ffmpeg processes it starts and stops them when it shuts down for
+any of those reasons, clearing the half-written scratch files with them. Renders that finish
+normally are untouched — same output, byte for byte — and this changes nothing you can see while
+the app is running.
+
+One thing this deliberately does **not** change: if you close the browser tab or your connection
+drops while the server itself stays up, the render still runs to completion (it just has nowhere
+to send the finished file). Stopping a single render on demand would need a Cancel button, which
+is a separate piece of work.
+
 ## 0.38.0 — 2026-08-27
 
 **Hold Frame now works on video with no sound.** Before this, freezing a frame failed on any

@@ -52,6 +52,10 @@ export default function MediaLibrary({ files, trackTags = {}, inUseNames = null,
   // MediaContext videoRef the center editing preview/timeline scrubs.
   const previewRef = useRef(null)
   const listRef = useRef(null)
+  // Ticket for the newest probe request. Probes resolve in whatever order the
+  // backend finishes them, so a slow reply for an earlier click can land after
+  // a fast one for a later click and describe the wrong file — see selectFile.
+  const probeSeqRef = useRef(0)
   const [favorites, setFavorites] = useState(() => loadFavorites('input'))
   const [query, setQuery] = useState('')
   const [sortBy, setSortBy] = useState('date')
@@ -88,7 +92,13 @@ export default function MediaLibrary({ files, trackTags = {}, inUseNames = null,
 
   function selectFile(name) {
     setSelectedName(name)
+    // Take a ticket, and drop the reply if another click has been made since:
+    // otherwise a slow probe overwrites a newer one and Media Info In, the bin
+    // preview and the Reformat target all end up describing the older file
+    // under the newer file's name.
+    const seq = ++probeSeqRef.current
     probe(name, 'input').then(info => {
+      if (seq !== probeSeqRef.current) return
       const url = info.browser_playable === false
         ? `/preview/input/${encodeURIComponent(name)}`
         : `/input/${encodeURIComponent(name)}`

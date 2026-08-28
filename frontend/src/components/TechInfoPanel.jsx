@@ -75,6 +75,29 @@ export default function TechInfoPanel({ info, title = 'Media Info', collapsible 
     )
   }
 
+  // A probe that FAILED comes back in the same slot as one that succeeded —
+  // `{error, detail}`, with none of the fields below. Rendering it through the
+  // rows drew every value as "—", which reads as a file that has no metadata
+  // rather than one that could not be read: on a machine with no ffprobe
+  // installed, clicking any file in the bin looked like a normal, if empty,
+  // answer (finding #12). The name still shows, because knowing WHICH file
+  // could not be read is half the message.
+  if (info.error) {
+    return (
+      <div className="rounded-md bg-neutral-900 border border-neutral-800">
+        {header}
+        {expanded && (
+          <div className="p-2 font-mono text-[9px] space-y-1">
+            <p className="text-neutral-400 truncate">{info._name || ''}</p>
+            <p className="text-amber-400 whitespace-pre-wrap break-words">
+              could not read this file — {info.error}
+            </p>
+          </div>
+        )}
+      </div>
+    )
+  }
+
   const fileRows = [
     ['File name', info._name || '—'],
     ['Format', info.format_name || '—'],
