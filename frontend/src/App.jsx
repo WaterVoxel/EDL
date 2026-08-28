@@ -39,7 +39,14 @@ import { workFingerprint } from './projectWork'
 import { matchOverlays } from './overlayMatch'
 import { shotOutputNames } from './renderNames'
 
-const MIN_RIGHT_PANEL = 260
+// How far each side column can be dragged. The two minimums are deliberately
+// the same number: the right column used to stop at 260 while the left went to
+// 180, so the right one couldn't be pushed as far out of the way as the left
+// even though its widest setting is already the larger of the two. Nothing in
+// the right column needs 260 — the Export Bin rows and Media Info Out are the
+// same kind of narrow list the left column holds at 180, and the output preview
+// is a `<video>` that scales to whatever width it gets.
+const MIN_RIGHT_PANEL = 180
 const MAX_RIGHT_PANEL = 720
 const MIN_LEFT_PANEL = 180
 const MAX_LEFT_PANEL = 560
@@ -97,6 +104,93 @@ function GearIcon() {
   )
 }
 
+// The project group's seven icons — Library / Save / Save As / Export / Import /
+// Export EDL / New. Same 24-grid stroked idiom as the three above, so the whole
+// top-right row reads as one set of ten square buttons rather than a row of
+// words followed by a row of glyphs.
+//
+// Two choices worth knowing, both about telling a pair apart at 13px:
+//   · Save and Save As share ONE silhouette on purpose — the same floppy, with a
+//     `+` where Save's label block sits. "Another one of these", which is exactly
+//     what Save As does. Two unrelated glyphs would hide that they are siblings.
+//   · Export and Import are a mirrored pair over a shared baseline: the arrow
+//     points down onto the line to leave for disk, up off it to come back in.
+//     Export's geometry is deliberately the same three paths as the frame-grab
+//     DownloadIcon (FrameGrabButtons.jsx), because both mean "write a file out".
+// Export EDL is text-lines-plus-arrow rather than a page, because a page with
+// lines in it is already taken: that is DocIcon, the About button, two buttons
+// along. Its three lines are EQUAL length on purpose — drawn short-to-long they
+// were a sort-descending glyph, which the Media Bin's own sort control already
+// means. Every one of them is icon-only, so every one carries a `title` — that
+// tooltip is now the only place the button's name exists.
+function LibraryIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3.5 17.2V6.2a1.7 1.7 0 0 1 1.7-1.7h3.2l1.9 2.3h6.3a1.7 1.7 0 0 1 1.7 1.7v1.6" />
+      <path d="M3.5 17.4l2-6.2h15.2l-2 6.2a1.7 1.7 0 0 1-1.6 1.2H5.1a1.7 1.7 0 0 1-1.6-1.2Z" />
+    </svg>
+  )
+}
+
+function SaveIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M5.4 3.9h9.2l4.5 4.5v10.2a1.7 1.7 0 0 1-1.7 1.7H5.4a1.7 1.7 0 0 1-1.7-1.7V5.6a1.7 1.7 0 0 1 1.7-1.7Z" />
+      <path d="M7.7 3.9v4.3h6.6V3.9" />
+      <path d="M7.7 19.6v-5.1h8.6v5.1" />
+    </svg>
+  )
+}
+
+function SaveAsIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M5.4 3.9h9.2l4.5 4.5v10.2a1.7 1.7 0 0 1-1.7 1.7H5.4a1.7 1.7 0 0 1-1.7-1.7V5.6a1.7 1.7 0 0 1 1.7-1.7Z" />
+      <path d="M7.7 3.9v4.3h6.6V3.9" />
+      <path d="M12 12.4v5M9.5 14.9h5" />
+    </svg>
+  )
+}
+
+function ExportIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 3.5v11" />
+      <path d="M7.5 10.5 12 15l4.5-4.5" />
+      <path d="M4 19.5h16" />
+    </svg>
+  )
+}
+
+function ImportIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 15.5v-11" />
+      <path d="M7.5 8.5 12 4l4.5 4.5" />
+      <path d="M4 19.5h16" />
+    </svg>
+  )
+}
+
+function ExportEdlIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3.5 6.5h10.5M3.5 11h10.5M3.5 15.5h10.5" />
+      <path d="M18 9.6v7.6" />
+      <path d="M15.6 14.8l2.4 2.4 2.4-2.4" />
+    </svg>
+  )
+}
+
+function NewIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="5.2" y="3.5" width="13.6" height="17" rx="1.8" />
+      <path d="M12 9v6M9 12h6" />
+    </svg>
+  )
+}
+
 function AppInner() {
   const [inputFiles, setInputFiles] = useState([])
   const [outputFiles, setOutputFiles] = useState([])
@@ -147,10 +241,11 @@ function AppInner() {
   // activeClips: no clip on it owns editable timing (the lane starts at V1's
   // picture start and the render pads or cuts the whole run to V1's length), so
   // there is nothing for Trim, Hold, Reverse, Speed or Round Up to act on. A1
-  // has its own selection instead (selectedBedIndex below), used by Split alone —
-  // deliberately not a third focusedTrack value, so selecting an audio clip never
-  // takes the rest of the toolbar, or Delete, away from the video clip they were
-  // pointed at. Order IS the lane,
+  // has its own selection instead (selectedBedIndex below), read by Split and by
+  // the Move ◀ ▶ buttons — the two tools that mean something on an audio clip.
+  // Deliberately not a third focusedTrack value: those two read the bed selection
+  // directly, and the rest of the toolbar simply goes empty-handed, which is
+  // cheaper than teaching every control a third track. Order IS the lane,
   // so this is an array and the render sends it in order. Undoable like the
   // other two — add and remove are the only edits it has, and both are as
   // destructive as any V1 edit.
@@ -172,12 +267,13 @@ function AppInner() {
   const [a1Visible, setA1Visible] = useState(true)
   const [a1Muted] = useState(false)
   const toggleA1Visible = useCallback(() => setA1Visible(v => !v), [])
-  // Which A1 clip Split will cut. An INDEX, not an id: A1 clips have no id (the
-  // same file can legitimately sit on the lane twice, so identity is position —
-  // which is also why onRemove takes an index). Everything reads the clip through
-  // `selectedBed` below rather than the index, so an index left pointing past the
-  // end of a shorter lane (an undo, a project load) degrades to "nothing
-  // selected" instead of to the wrong clip.
+  // Which A1 clip Split cuts and Move ◀ ▶ move. An INDEX, not an id: A1 clips
+  // have no id (the same file can legitimately sit on the lane twice, so identity
+  // is position — which is also why onRemove takes an index). Nothing acts on the
+  // index without first checking that a clip is actually there: Split goes through
+  // `selectedBed` below, and MoveClipButtons tests `beds[selectedBedIndex]`. So an
+  // index left pointing past the end of a shorter lane (an undo, a project load)
+  // degrades to "nothing selected" instead of to the wrong clip.
   const [selectedBedIndex, setSelectedBedIndex] = useState(null)
   const selectedBed = selectedBedIndex == null ? null : (audioBeds[selectedBedIndex] || null)
   // The A1 lane's live playhead, in LANE seconds. A function put here by
@@ -206,6 +302,24 @@ function AppInner() {
     setSelectedId2(id)
     setSelectedPart2(id == null ? 'main' : part)
     if (id != null) setSelectedBedIndex(null)
+  }, [])
+  // And the other direction, so exactly ONE clip is ever ringed: picking an audio
+  // clip drops the video selection. It used to leave it, which put two rings on
+  // the timeline at once and no way to tell which one the toolbar meant — bad
+  // enough with Split, worse now that Move ◀ ▶ follows the audio clip too. The
+  // ring is the promise about what the toolbar acts on, so the tools that don't
+  // understand A1 (Trim, Hold, Reverse, Speed, Round Up, Duplicate, Crop, Raise)
+  // read "select a clip" rather than quietly acting on a clip with no ring. Same
+  // for Delete/Backspace, which acts on the focused V1/V2 clip and so now does
+  // nothing while an audio clip is selected — removal there is still the × on the
+  // bar. Click the video clip again and the whole toolbar is back on it.
+  const selectBed = useCallback(index => {
+    setSelectedBedIndex(index)
+    if (index == null) return
+    setSelectedId(null)
+    setSelectedPart('main')
+    setSelectedId2(null)
+    setSelectedPart2('main')
   }, [])
   const [rendering, setRendering] = useState(false)
   const [showRenderDialog, setShowRenderDialog] = useState(false)
@@ -243,8 +357,9 @@ function AppInner() {
     setTimeDisplayMode(m => m === 'timecode' ? 'frames' : 'timecode')
   }, [])
   // Timeline, the Agentic Assistant Editor, Reformat, and the Actions log
-  // share one tabbed dock at the bottom of the center column — only one is
-  // visible at a time.
+  // share one dock at the bottom of the center column — only one is visible at
+  // a time, picked by the top bar's Mode menu (the name is still `centerTab`:
+  // it is the dock's own state, and the menu is only the control that sets it).
   const [centerTab, setCenterTab] = useState('timeline')
   // The row above the dock is a SLOT: Timeline.jsx portals its action bar
   // (transport clock, Undo/V2 Reconstruct/V2 Analyzer, the render buttons) into it,
@@ -1076,8 +1191,8 @@ function AppInner() {
   // A1 APPENDS: a new file starts where the last one on the lane ends, exactly
   // as a V1 clip starts where the previous clip ends. Nothing is replaced, so
   // building a bed out of several pieces (a music cue, then a voice-over) is a
-  // matter of adding them in order — and the order they're added in IS the
-  // order they play, since A1 has no reorder.
+  // matter of adding them in order — and the order they're added in is the order
+  // they play until one is dragged somewhere else (handleMoveBed below).
   //
   // Shared tail of both routes onto A1: a file already sitting in input/ (the
   // bin's + button) and a freshly uploaded one (the A1 drop zone). Probes for
@@ -1139,6 +1254,27 @@ function AppInner() {
     setSelectedBedIndex(sel => (
       sel == null || sel === index ? null : sel > index ? sel - 1 : sel
     ))
+  }
+
+  // The whole lane arrives already moved, because the gesture that produced it
+  // needs the lane to decide where a clip can legally land — AudioBedBar runs
+  // clipMath.moveBed against the lane as it was when the drag began, so each
+  // update is a pure function of the cursor rather than of the update before it.
+  // `gesture` folds the drag's stream of updates into one undo step, exactly as
+  // an edge-drag trim does.
+  //
+  // Selection rides along, like V1's applyMove: a clip dragged past a neighbour
+  // changes index (moveBed keeps the array sorted by start), and identity on A1
+  // is position, so without this the ring — and Split — would be left on
+  // whichever clip slid into the old slot. The PLAYHEAD deliberately doesn't
+  // follow: on V1 it does because the preview should keep showing the clip being
+  // moved, but here it marks where Split will cut, which a move has no opinion
+  // about.
+  // `gesture` is undefined when the move came from the toolbar's Move ◀ ▶ rather
+  // than from a drag: one press is one edit, so it wants its own undo step.
+  function handleMoveBed(beds, index, gesture) {
+    setAudioBeds(beds, { coalesce: gesture })
+    selectBed(index)
   }
 
   // All three V2 tools below work on `track2Clips[0]` — ONE file, one window.
@@ -1675,16 +1811,19 @@ function AppInner() {
       <DuplicateButton selectedClip={activeSelectedClip} clips={activeClips} setClips={setActiveClips} onSelectId={setActiveSelectedId} />
       <div className="w-px h-3.5 bg-neutral-700" />
       {/* Reorder without dragging. V2 gets no seek: like clicking a V2 clip, it
-          leaves the playhead alone — V1 is the timeline of record. */}
+          leaves the playhead alone — V1 is the timeline of record. With an audio
+          clip selected these move THAT clip along A1, the second tool (with
+          Split) that an A1 selection redirects. */}
       <MoveClipButtons
         selectedClip={activeSelectedClip} clips={activeClips} setClips={setActiveClips}
         onSelectId={setActiveSelectedId}
         onSeek={focusedTrack === 1 ? (sec => timelineSeekRef.current?.(sec)) : null}
+        selectedBedIndex={selectedBedIndex} beds={audioBeds} onMoveBed={handleMoveBed}
       />
       <div className="w-px h-3.5 bg-neutral-700" />
       <ReverseForm selectedClip={activeSelectedClip} setClips={setActiveClips} />
       <div className="w-px h-3.5 bg-neutral-700" />
-      {/* The one tool an A1 selection redirects: with an audio clip selected,
+      {/* The other tool an A1 selection redirects: with an audio clip selected,
           Split cuts that clip instead of the video one. */}
       <SpliceButton
         selectedClip={activeSelectedClip} clips={activeClips} setClips={setActiveClips}
@@ -1715,10 +1854,37 @@ function AppInner() {
             button on the right is now the only way in, and it looks like one. */}
         <div className="flex items-center gap-2">
           <span className="text-xs font-bold text-white tracking-tight">GENAI EDITOR</span>
-          <span className="text-[9px] text-neutral-600 border border-neutral-700 rounded px-1 py-0.5">EDL mode</span>
-          {/* Quiet metadata, not a label: same 9px scale and muted neutral-600 as
-              the "EDL mode" chip beside it, but deliberately WITHOUT its border
-              box — a second outlined pill would read as a second mode. This is
+          {/* Mode: the center dock's pane switch, and the ONLY one — it replaced
+              a static "EDL mode" chip that was styled like a control and was not
+              one, and then replaced the four-button tab bar that used to sit
+              above the dock, so the place that names the mode is the place you
+              change it. `centerTab` is still the state everything reads; this is
+              now its only writer besides the tour. Values are centerTab's own,
+              not display strings — 'assistant' shows as Agent, which is how that
+              pane has always been labelled.
+              `data-tour="reformat"` lives here because the tour's Reformat step
+              used to spotlight that tab button; this control is its anchor now,
+              and like the tab bar it is visible whichever pane is up. */}
+          <label
+            data-tour="reformat"
+            className="flex items-center gap-1 text-[9px] uppercase tracking-wide text-neutral-500"
+          >
+            Mode
+            <select
+              value={centerTab}
+              onChange={e => setCenterTab(e.target.value)}
+              title="Which pane the center dock shows — Timeline, Agent, Reformat or Actions"
+              className="text-[10px] rounded bg-neutral-950 border border-neutral-700 text-neutral-300 px-1 py-0.5"
+            >
+              <option value="timeline">Timeline</option>
+              <option value="assistant">Agent</option>
+              <option value="reformat">Reformat</option>
+              <option value="actions">Actions</option>
+            </select>
+          </label>
+          {/* Quiet metadata, not a label: 9px and muted like the Mode label
+              beside it, but deliberately with no border box of its own — an
+              outlined pill here would read as a second control. This is
               the number a bug report is identified by, so it is always visible
               rather than buried in the About dialog (it is in there too).
               `APP_VERSION` comes from vite.config by way of the repo-root
@@ -1743,32 +1909,42 @@ function AppInner() {
           )}
           <button
             onClick={() => setShowLibrary(true)}
-            title="Open the project library"
-            className="px-2.5 py-1 text-[10px] rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 hover:border-neutral-500"
-          >Library</button>
+            title="Library — open a saved project"
+            className="w-6 h-6 flex items-center justify-center rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 hover:border-neutral-500"
+          >
+            <LibraryIcon />
+          </button>
           <button
             onClick={handleSave}
             disabled={timelineClips.length === 0}
-            title="Save project to the library (Cmd/Ctrl+S)"
-            className="px-2.5 py-1 text-[10px] rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 hover:border-neutral-500 disabled:opacity-40"
-          >Save</button>
+            title="Save — save project to the library (Cmd/Ctrl+S)"
+            className="w-6 h-6 flex items-center justify-center rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 hover:border-neutral-500 disabled:opacity-40"
+          >
+            <SaveIcon />
+          </button>
           <button
             onClick={handleSaveAs}
             disabled={timelineClips.length === 0}
-            title="Save a copy under a new name, without overwriting the current project"
-            className="px-2.5 py-1 text-[10px] rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 hover:border-neutral-500 disabled:opacity-40"
-          >Save As</button>
+            title="Save As — save a copy under a new name, without overwriting the current project"
+            className="w-6 h-6 flex items-center justify-center rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 hover:border-neutral-500 disabled:opacity-40"
+          >
+            <SaveAsIcon />
+          </button>
           <button
             onClick={handleExportProject}
             disabled={timelineClips.length === 0}
-            title="Download the project as a .nara file"
-            className="px-2.5 py-1 text-[10px] rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 hover:border-neutral-500 disabled:opacity-40"
-          >Export</button>
+            title="Export — download the project as a .nara file"
+            className="w-6 h-6 flex items-center justify-center rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 hover:border-neutral-500 disabled:opacity-40"
+          >
+            <ExportIcon />
+          </button>
           <button
             onClick={() => importInputRef.current?.click()}
-            title="Load a project from a .nara file"
-            className="px-2.5 py-1 text-[10px] rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 hover:border-neutral-500"
-          >Import</button>
+            title="Import — load a project from a .nara file"
+            className="w-6 h-6 flex items-center justify-center rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 hover:border-neutral-500"
+          >
+            <ImportIcon />
+          </button>
           <input
             ref={importInputRef}
             type="file"
@@ -1783,11 +1959,22 @@ function AppInner() {
           <button
             onClick={handleExportEdl}
             disabled={timelineClips.length === 0}
-            title="Export EDL file"
-            className="px-2.5 py-1 text-[10px] rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 hover:border-neutral-500 disabled:opacity-40"
-          >Export EDL</button>
+            title="Export EDL — write the edit decision list as a file"
+            className="w-6 h-6 flex items-center justify-center rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 hover:border-neutral-500 disabled:opacity-40"
+          >
+            <ExportEdlIcon />
+          </button>
           <div className="w-px h-4 bg-neutral-700" />
-          <button onClick={() => location.reload()} className="px-2.5 py-1 text-[10px] rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 hover:border-neutral-500">New</button>
+          {/* Gained a tooltip when it lost its label: it reloads the page, so an
+              unsaved timeline goes with it, and that is worth knowing BEFORE the
+              click now that the button is a glyph. */}
+          <button
+            onClick={() => location.reload()}
+            title="New — start a fresh session (reloads the app; unsaved timeline edits are lost)"
+            className="w-6 h-6 flex items-center justify-center rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 hover:border-neutral-500"
+          >
+            <NewIcon />
+          </button>
           {/* Encoder settings, not project settings — but it sits with the
               icon buttons because it's icon-only, and beside Export/Import
               because it decides what those exports are made of. Lit while the
@@ -1889,30 +2076,11 @@ function AppInner() {
             <CropOverlay selectedClip={activeSelectedClip} setClips={setActiveClips} stageRef={previewStageRef} animateEnabled={animateEnabled} freeEnabled={freeEnabled} />
           </div>
 
-          {/* Timeline / AGENT / Actions tab bar — sits above the edit
-              toolbar so it reads as "which dock pane" before "which tool
-              acts on the current selection." Only one pane (below the
-              toolbar) is visible at a time. Selected state is text color
-              only (violet), not a background highlight. */}
-          <div className="flex items-center gap-1 p-2">
-            <button
-              onClick={() => setCenterTab('timeline')}
-              className={`flex-1 px-2 py-1 text-[9px] font-semibold uppercase tracking-wide rounded bg-neutral-900 border border-neutral-800 ${centerTab === 'timeline' ? 'text-violet-400' : 'text-neutral-500 hover:text-neutral-300'}`}
-            >Timeline</button>
-            <button
-              onClick={() => setCenterTab('assistant')}
-              className={`flex-1 px-2 py-1 text-[9px] font-semibold uppercase tracking-wide rounded bg-neutral-900 border border-neutral-800 ${centerTab === 'assistant' ? 'text-violet-400' : 'text-neutral-500 hover:text-neutral-300'}`}
-            >AGENT</button>
-            <button
-              data-tour="reformat"
-              onClick={() => setCenterTab('reformat')}
-              className={`flex-1 px-2 py-1 text-[9px] font-semibold uppercase tracking-wide rounded bg-neutral-900 border border-neutral-800 ${centerTab === 'reformat' ? 'text-violet-400' : 'text-neutral-500 hover:text-neutral-300'}`}
-            >Reformat</button>
-            <button
-              onClick={() => setCenterTab('actions')}
-              className={`flex-1 px-2 py-1 text-[9px] font-semibold uppercase tracking-wide rounded bg-neutral-900 border border-neutral-800 ${centerTab === 'actions' ? 'text-violet-400' : 'text-neutral-500 hover:text-neutral-300'}`}
-            >Actions</button>
-          </div>
+          {/* The dock's pane switch used to be a four-button tab bar in this
+              spot. It is now the Mode menu in the top bar and nowhere else —
+              one control, one place. Nothing else moved: the panes below still
+              key off `centerTab`, and the row under this comment is still the
+              Timeline's portal slot. */}
 
           {/* The Timeline's action bar lands here — Timeline.jsx portals it
               into this element (see `timelineBarSlot`), because every control
@@ -1920,7 +2088,7 @@ function AppInner() {
               row keeps this position's chrome; only its contents came from
               elsewhere. The element itself always stays mounted (a portal
               needs a stable target), but it drops its padding and borders on
-              the other dock tabs — the Timeline is unmounted then, so the row
+              the other modes — the Timeline is unmounted then, so the row
               would otherwise show as an empty strip. */}
           <div
             ref={setTimelineBarSlot}
@@ -1929,7 +2097,7 @@ function AppInner() {
           />
 
           {/* Timeline / AGENT / Actions pane content — only one visible at
-              a time, per the tab bar above. Timeline sets this wrapper's
+              a time, per the top bar's Mode menu. Timeline sets this wrapper's
               natural content height (shrink-0, unconstrained); switching
               to AGENT/Actions pins the wrapper to that SAME height
               (centerDockHeight, measured off Timeline via the ResizeObserver
@@ -1992,8 +2160,9 @@ function AppInner() {
                   audioBeds={audioBeds}
                   onAddToA1={handleAddToA1}
                   onRemoveBed={handleRemoveBed}
+                  onMoveBed={handleMoveBed}
                   selectedBedIndex={selectedBedIndex}
-                  onSelectBed={setSelectedBedIndex}
+                  onSelectBed={selectBed}
                   laneClockRef={laneClockRef}
                   timelineSeekRef={timelineSeekRef}
                   a1Visible={a1Visible}

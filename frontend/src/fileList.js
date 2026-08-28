@@ -171,13 +171,39 @@ export function filterByTrack(files, track, tags) {
 // can be filed away, which is the file you most want to organise.
 //
 // Stored the way the other sticky per-file bin state already is: localStorage,
-// keyed by filename, as { [folderName]: [filename, ...] }. A file belongs to at
-// most one folder — moveToBinFolder strips it from every other folder first —
-// and a filename that is no longer in input/ is simply ignored when laying the
-// list out, so nothing here needs pruning.
+// keyed by filename, as { [folderName]: { parent, files: [filename, ...] } }. A
+// file belongs to at most one folder — moveFilesToBinFolder strips it from every
+// other folder first — and a filename that is no longer in input/ is simply
+// ignored when laying the list out, so nothing here needs pruning.
+//
+// `parent` is what makes folders nest: null for a top-level folder, otherwise
+// the name of the folder it sits in. Names stay GLOBALLY unique (they are the
+// keys), so unlike a real filesystem you cannot have two "Raw" folders under
+// different parents — uniqueFolderName numbers the second one instead. That
+// keeps every entry point here, and every piece of view state in MediaLibrary
+// (collapse, rename, drag, the context menu), keyed by a plain name rather than
+// a path or an id, which is the whole reason nesting was a small change.
+//
+// The pre-nesting shape stored the member array directly ({ [name]: [file] }).
+// loadBinFolders still reads it and treats those folders as top-level, so an
+// existing bin keeps its folders across the upgrade with nothing to migrate.
 const BIN_FOLDERS_KEY = 'nara-bin-folders'
 
 export const DEFAULT_FOLDER_NAME = 'New Folder'
+
+// True when `candidate` sits somewhere inside `ancestor`. The one question every
+// folder move has to ask: a folder dropped into its own descendant would take
+// that branch with it and detach the lot from the tree.
+export function isDescendantFolder(candidate, ancestor, folders) {
+  const seen = new Set()
+  let cur = folders[candidate]?.parent ?? null
+  while (cur != null && !seen.has(cur)) {
+    if (cur === ancestor) return true
+    seen.add(cur)
+    cur = folders[cur]?.parent ?? null
+  }
+  return false
+}
 
 export function loadBinFolders() {
   try {
@@ -186,8 +212,27 @@ export function loadBinFolders() {
     // Shape-guard every entry: this value is hand-editable in devtools and a
     // malformed one must not take the whole bin down with it.
     const out = {}
-    for (const [name, members] of Object.entries(parsed)) {
-      if (name && Array.isArray(members)) out[name] = members.filter(m => typeof m === 'string')
+    for (const [name, value] of Object.entries(parsed)) {
+      if (!name) continue
+      // The pre-nesting shape: the value WAS the member array.
+      if (Array.isArray(value)) {
+        out[name] = { parent: null, files: value.filter(m => typeof m === 'string') }
+        continue
+      }
+      if (!value || typeof value !== 'object') continue
+      out[name] = {
+        parent: typeof value.parent === 'string' ? value.parent : null,
+        files: Array.isArray(value.files) ? value.files.filter(m => typeof m === 'string') : [],
+      }
+    }
+    // A parent that no longer exists, or one that closes a loop, would make the
+    // tree unwalkable — buildBinRows would never reach those folders and, worse,
+    // a cycle would recurse forever. Both go back to the top level. Fixing one
+    // link breaks its cycle, so a second pass isn't needed.
+    for (const name of Object.keys(out)) {
+      const p = out[name].parent
+      if (p == null) continue
+      if (!out[p] || p === name || isDescendantFolder(p, name, out)) out[name] = { ...out[name], parent: null }
     }
     return out
   } catch {
@@ -215,10 +260,12 @@ export function uniqueFolderName(base, folders) {
 }
 
 // Returns { folders, name } — `name` is what the folder ended up called, which
-// the caller needs in order to put it straight into rename mode.
-export function createBinFolder(base, folders) {
+// the caller needs in order to put it straight into rename mode. `parent` nests
+// the new folder inside an existing one; an unknown parent means top level
+// rather than an error, since the only way to pass one is a stale menu.
+export function createBinFolder(base, folders, parent = null) {
   const name = uniqueFolderName(base || DEFAULT_FOLDER_NAME, folders)
-  const next = { ...folders, [name]: [] }
+  const next = { ...folders, [name]: { parent: parent && folders[parent] ? parent : null, files: [] } }
   saveBinFolders(next)
   return { folders: next, name }
 }
@@ -235,50 +282,76 @@ export function renameBinFolder(oldName, newName, folders) {
   // place in the stored object. Display sorts by name regardless; this is for
   // whoever reads the raw value.
   const next = {}
-  for (const [key, members] of Object.entries(folders)) {
-    if (key === oldName) next[name] = members
-    else next[key] = members
+  for (const [key, entry] of Object.entries(folders)) {
+    // Children point at their parent BY NAME, so a rename has to follow through
+    // to them or the whole branch below would fall out of the tree.
+    const patched = entry.parent === oldName ? { ...entry, parent: name } : entry
+    if (key === oldName) next[name] = patched
+    else next[key] = patched
   }
   saveBinFolders(next)
   return { folders: next, name }
 }
 
 // Removes the grouping only. The files are in input/ and stay there; they just
-// show at the top level again.
+// show one level up — in the removed folder's parent, or at the top level when
+// it had none. Its subfolders move up with them, keeping their own contents:
+// removing a level should not scatter a three-deep branch across the bin.
 export function deleteBinFolder(name, folders) {
   if (!(name in folders)) return folders
-  const next = { ...folders }
-  delete next[name]
+  const up = folders[name].parent ?? null
+  const next = {}
+  for (const [key, entry] of Object.entries(folders)) {
+    if (key === name) continue
+    next[key] = (entry.parent ?? null) === name ? { ...entry, parent: up } : entry
+  }
+  // Files land in the parent by being listed there. At the top level there is no
+  // entry to list them in — being in no folder IS the top level.
+  if (up != null && next[up]) next[up] = { ...next[up], files: [...next[up].files, ...folders[name].files] }
   saveBinFolders(next)
   return next
 }
 
-// Move `fileName` into `folderName`, or to the top level when it's null.
-// Stripping the file out of every folder first is what guarantees it can only
-// ever be in one — otherwise it would render as two rows sharing a React key.
-export function moveToBinFolder(fileName, folderName, folders) {
-  // A folder that vanished mid-drag, or a drop where the file already is.
+// Move every name in `fileNames` into `folderName`, or to the top level when
+// it's null, in one write. Stripping the files out of every folder first is what
+// guarantees each can only ever be in one — otherwise a file would render as two
+// rows sharing a React key.
+export function moveFilesToBinFolder(fileNames, folderName, folders) {
+  // A folder that vanished mid-drag.
   if (folderName != null && !(folderName in folders)) return folders
-  if (folderOfFile(fileName, folders) === folderName) return folders
+  // Files already where they are being dropped aren't a move; if that's all of
+  // them, the whole drop is a no-op and the caller can skip a state update.
+  const moving = [...new Set(fileNames)].filter(n => folderOfFile(n, folders) !== folderName)
+  if (moving.length === 0) return folders
+  const cut = new Set(moving)
   const next = {}
-  let changed = false
-  for (const [key, members] of Object.entries(folders)) {
-    const kept = members.filter(m => m !== fileName)
-    if (kept.length !== members.length) changed = true
-    next[key] = kept
+  for (const [key, entry] of Object.entries(folders)) {
+    const kept = entry.files.filter(m => !cut.has(m))
+    next[key] = kept.length === entry.files.length ? entry : { ...entry, files: kept }
   }
-  if (folderName != null) {
-    next[folderName] = [...next[folderName], fileName]
-    changed = true
-  }
-  if (!changed) return folders
+  if (folderName != null) next[folderName] = { ...next[folderName], files: [...next[folderName].files, ...moving] }
+  saveBinFolders(next)
+  return next
+}
+
+// Re-parent a folder: `parentName` null puts it back at the top level. Returns
+// the same object unchanged (and writes nothing) for anything that isn't a real
+// move, including the one that would corrupt the tree — dropping a folder into
+// its own descendant, which would cut that branch loose from the root.
+export function moveFolderToParent(name, parentName, folders) {
+  if (!(name in folders)) return folders
+  if (parentName != null && !(parentName in folders)) return folders
+  if (parentName === name) return folders
+  if ((folders[name].parent ?? null) === (parentName ?? null)) return folders
+  if (parentName != null && isDescendantFolder(parentName, name, folders)) return folders
+  const next = { ...folders, [name]: { ...folders[name], parent: parentName ?? null } }
   saveBinFolders(next)
   return next
 }
 
 export function folderOfFile(name, folders) {
-  for (const [folder, members] of Object.entries(folders)) {
-    if (members.includes(name)) return folder
+  for (const [folder, entry] of Object.entries(folders)) {
+    if (entry.files.includes(name)) return folder
   }
   return null
 }
@@ -289,49 +362,90 @@ export function folderOfFile(name, folders) {
 export function renameBinFolderFile(oldName, newName, folders) {
   const owner = folderOfFile(oldName, folders)
   if (!owner) return folders
-  const next = { ...folders, [owner]: folders[owner].map(m => (m === oldName ? newName : m)) }
+  const entry = folders[owner]
+  const next = { ...folders, [owner]: { ...entry, files: entry.files.map(m => (m === oldName ? newName : m)) } }
   saveBinFolders(next)
   return next
 }
 
 // Lays the bin out as one flat list of rows in display order, so the component
 // still renders a single <ul> and the keyboard walk stays an index step:
-//   { type: 'folder', name, count, open }
-//   { type: 'file', file, folder: <folderName|null> }
+//   { type: 'folder', name, count, depth, open, parent }
+//   { type: 'file', file, folder: <folderName|null>, depth }
 //
-// Folders come first as a block, sorted by name — a folder has no mtime, so
-// the Date sort orders the files inside them rather than the folders
-// themselves. Sorting and both filters run through the same sortFiles /
+// Nesting is why this walks the tree: each folder emits its subfolders (whole
+// subtrees, recursively) before its own files, and `depth` — 0 at the top level,
+// counting the containers above the row — is what the component indents by.
+//
+// Folders come first as a block within each level, sorted by name: a folder has
+// no mtime, so the Date sort orders the files inside them rather than the
+// folders themselves. Sorting and both filters run through the same sortFiles /
 // filterFiles / filterByTrack used before folders existed, applied within each
 // container, so favourites still float to the top of wherever they live.
 //
-// While a filter is active every folder is forced open and folders with no
-// match drop out entirely: a query has to be able to reach a file inside a
-// collapsed folder or that file is simply unfindable.
+// A folder's `count` is its whole subtree — its own matching files plus every
+// descendant's. Closed is now the default, so a folder that holds nothing
+// directly but has fifty files two levels down has to say fifty, not zero.
 //
-// `pinnedFolder` survives that cull. It's the folder being named: a brand-new
-// folder is empty by definition, so creating one while a filter is active would
-// otherwise hide the very row whose name is waiting to be typed.
+// While a filter is active every folder is forced open and folders whose subtree
+// holds no match drop out entirely: a query has to be able to reach a file
+// inside a collapsed folder or that file is simply unfindable.
+//
+// `pinnedFolder` and its ancestors survive that cull. It's the folder being
+// named: a brand-new folder is empty by definition, so creating one while a
+// filter is active would otherwise hide the very row whose name is waiting to be
+// typed — and hiding the parent it was created inside would hide it just as well.
 export function buildBinRows({ files, folders, favorites, query, trackFilter, trackTags, sortBy, sortDir, collapsed = new Set(), pinnedFolder = null }) {
   const filtering = Boolean(query) || trackFilter !== 'all'
   const matched = filterByTrack(filterFiles(files, query), trackFilter, trackTags)
   const arrange = list => sortFiles(list, favorites, sortBy, sortDir)
   const dir = sortDir === 'desc' ? -1 : 1
-  const rows = []
   const filed = new Set()
 
-  for (const name of Object.keys(folders).sort((a, b) => a.localeCompare(b) * dir)) {
-    const members = new Set(folders[name])
-    const inside = arrange(matched.filter(f => members.has(f.name)))
-    for (const f of inside) filed.add(f.name)
-    if (filtering && inside.length === 0 && name !== pinnedFolder) continue
-    const open = filtering || !collapsed.has(name)
-    rows.push({ type: 'folder', name, count: inside.length, open })
-    if (open) for (const f of inside) rows.push({ type: 'file', file: f, folder: name })
+  // Each folder's own matching files, and each folder's children, resolved once
+  // up front — the walk below would otherwise re-scan every file per level.
+  const inside = new Map()
+  const children = new Map()
+  for (const [name, entry] of Object.entries(folders)) {
+    const members = new Set(entry.files)
+    const mine = arrange(matched.filter(f => members.has(f.name)))
+    inside.set(name, mine)
+    for (const f of mine) filed.add(f.name)
+    const parent = entry.parent ?? null
+    if (!children.has(parent)) children.set(parent, [])
+    children.get(parent).push(name)
   }
+  for (const list of children.values()) list.sort((a, b) => a.localeCompare(b) * dir)
+
+  const subtreeCount = name =>
+    inside.get(name).length + (children.get(name) ?? []).reduce((n, c) => n + subtreeCount(c), 0)
+
+  // The chain from the folder being named up to the root, all of it exempt from
+  // the filter cull.
+  const pinned = new Set()
+  for (let cur = pinnedFolder; cur != null && !pinned.has(cur); cur = folders[cur]?.parent ?? null) pinned.add(cur)
+
+  const rows = []
+  const seen = new Set()
+  const walk = (parent, depth) => {
+    for (const name of children.get(parent) ?? []) {
+      // Belt and braces: loadBinFolders and moveFolderToParent both refuse to
+      // build a cycle, and a cycle here would recurse until the stack blew.
+      if (seen.has(name)) continue
+      seen.add(name)
+      const count = subtreeCount(name)
+      if (filtering && count === 0 && !pinned.has(name)) continue
+      const open = filtering || !collapsed.has(name)
+      rows.push({ type: 'folder', name, count, depth, open, parent })
+      if (!open) continue
+      walk(name, depth + 1)
+      for (const f of inside.get(name)) rows.push({ type: 'file', file: f, folder: name, depth: depth + 1 })
+    }
+  }
+  walk(null, 0)
   // Everything a folder didn't claim, at the top level, under the same sort.
   for (const f of arrange(matched.filter(f => !filed.has(f.name)))) {
-    rows.push({ type: 'file', file: f, folder: null })
+    rows.push({ type: 'file', file: f, folder: null, depth: 0 })
   }
   return rows
 }

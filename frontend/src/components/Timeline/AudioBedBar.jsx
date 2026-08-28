@@ -1,7 +1,14 @@
+import { useRef } from 'react'
 import {
   sequencePosToPx, sequenceClipBounds, sequenceVideoStartSec, normalizeBeds,
-  bedLaneEndSec, bedPlayedSec, bedInSec, bedOutSec,
+  bedLaneEndSec, bedPlayedSec, bedInSec, bedOutSec, moveBed,
 } from '../../clipMath'
+import { nextGesture } from '../../hooks/useUndoableTracks'
+
+// How far the cursor has to travel before a press counts as a move rather than a
+// click. Without it, the click that selects a clip and puts the playhead where
+// Split will cut would nudge the clip by a pixel or two on the way.
+const MOVE_THRESHOLD_PX = 3
 
 /* A stretch of the lane with nothing of A1's own in it: silence with A1 Room Tone
  * off, room tone with it on. One component for all three kinds — the head hold,
@@ -34,17 +41,25 @@ function GapBlock({ left, width, noiseEnabled, title, className = '' }) {
  * picture starts. Clips are added end to end, so a lane normally reads as one
  * continuous run, but the positions are EXPLICIT: removing a clip leaves the
  * others exactly where they were and opens a hole, drawn hatched like any other
- * stretch the render has to fill. What no clip on it has is editable timing of
- * its own — the whole run starts where V1's PICTURE starts, and the render pads
- * it with silence or cuts it at the sequence's end. So these deliberately aren't
- * TimelineClips: there are no head/tail/round segments, no edge-drag trim, no
- * drag-to-reposition and no reorder. The two per-clip edits are remove and
- * SPLIT: clicking a clip selects it (for the toolbar's Split button, which cuts
- * it at the playhead) and, because the click also reaches the lane underneath,
- * moves the playhead to where you clicked — so "click where you want the cut,
- * then press Split" is one gesture. A split clip is two clips playing adjoining
- * parts of one file, which is why a clip's span is its PLAYED length rather than
- * its file's duration.
+ * stretch the render has to fill. What the LANE has no timing of its own is
+ * where it begins and ends — it starts where V1's PICTURE starts, and the render
+ * pads it with silence or cuts it at the sequence's end. So these deliberately
+ * aren't TimelineClips: there are no head/tail/round segments and no edge-drag
+ * trim. The three per-clip edits are MOVE, remove and SPLIT.
+ *
+ * Move is a drag along the lane, and it changes that clip's own startSec and
+ * nothing else's (clipMath.moveBed): drag it into a hole, out to the far end, or
+ * past a neighbour, which re-sorts the lane. Two clips can't overlap — the render
+ * has no way to express that — so a drag snaps to the nearest position where the
+ * clip fits, which means dragging it up against a neighbour closes a hole exactly.
+ *
+ * Clicking a clip selects it (for the toolbar's Split button, which cuts it at
+ * the playhead) and, because the click also reaches the lane underneath, moves
+ * the playhead to where you clicked — so "click where you want the cut, then
+ * press Split" is one gesture. A drag deliberately does NOT seek: it ends
+ * somewhere unrelated to where the cut belongs. A split clip is two clips playing
+ * adjoining parts of one file, which is why a clip's span is its PLAYED length
+ * rather than its file's duration.
  *
  * What the lane DOES have to show is how its total length compares to the
  * sequence, which is the one thing the user can't otherwise see and the one
@@ -89,8 +104,13 @@ function GapBlock({ left, width, noiseEnabled, title, className = '' }) {
  */
 export default function AudioBedBar({
   beds, clips, sequenceSec, pps, gapPx, muted = false, noiseEnabled = false,
-  onRemove, selectedIndex = null, onSelect,
+  onRemove, selectedIndex = null, onSelect, onMoveBed,
 }) {
+  // Set at pointerup when the press turned out to be a drag, read by the click
+  // that follows it. Cleared at the next pointerdown as well as by that click, so
+  // a drag whose click never arrives (the pointer left the window) can't swallow
+  // the next real one.
+  const draggedRef = useRef(false)
   // Where V1's picture starts — A1 is delayed to here by the render, so the
   // space it has to fill is the sequence MINUS the head hold.
   const startSec = sequenceVideoStartSec(clips)
@@ -162,6 +182,59 @@ export default function AudioBedBar({
     }
   })
 
+  // Drag a clip to a new position. A POINTER drag, not the HTML5 kind V1's
+  // reorder uses (conventions.md's two drag idioms): what moves is a VALUE — this
+  // clip's own startSec — so the clip can follow the cursor continuously and the
+  // snap is visible before the button comes up. It also leaves the lane's
+  // file-drop handlers untouched, which an HTML5 drag across the same element
+  // would light up.
+  //
+  // Every update is computed from the lane AS IT WAS at pointerdown plus the
+  // total cursor delta, never from the previous update. The gesture is then a
+  // pure function of where the cursor is: nothing accumulates, dragging back to
+  // where it started really does put it back, and the index moveBed returns is
+  // always an index into a freshly derived array — which matters because a clip
+  // dragged past a neighbour changes index mid-drag.
+  //
+  // dx / pps: on-screen pixels are lane seconds. Under a V1 clip floored to
+  // MIN_CLIP_PX the lane's interior is stretched over a wider box, so there the
+  // cursor and the clip drift slightly apart — the same approximation
+  // click-to-seek already makes, and the landing spot is a legal edge either way.
+  function handleMoveDrag(seg, e) {
+    if (!onMoveBed || e.button !== 0) return
+    // Stops the press from starting a text selection or the browser's own
+    // image-drag on the clip's label.
+    e.preventDefault()
+    draggedRef.current = false
+    const snapshot = lane
+    const startX = e.clientX
+    const fromSec = seg.bed.startSec || 0
+    // One token for the whole drag, so its stream of updates folds into a SINGLE
+    // undo step (see useUndoableTracks), exactly like an edge-drag trim.
+    const gesture = nextGesture('bedmove')
+    let dragged = false
+
+    function onMove(ev) {
+      const dx = ev.clientX - startX
+      if (!dragged && Math.abs(dx) < MOVE_THRESHOLD_PX) return
+      dragged = true
+      // Called even when moveBed hands back the same array: that IS the clip
+      // arriving home, and the caller has to be told to put it back. reduceEdit
+      // bails if it is already there, so this costs nothing.
+      const next = moveBed(snapshot, seg.index, fromSec + dx / pps)
+      onMoveBed(next.beds, next.index, gesture)
+    }
+
+    function onUp() {
+      document.removeEventListener('pointermove', onMove)
+      document.removeEventListener('pointerup', onUp)
+      draggedRef.current = dragged
+    }
+
+    document.addEventListener('pointermove', onMove)
+    document.addEventListener('pointerup', onUp)
+  }
+
   const bedPx = Math.max(posToPx(Math.min(startSec + laneEndSec, sequenceSec)) - startPx, 0)
   const laneEndPx = segs.length > 0 ? segs[segs.length - 1].left + segs[segs.length - 1].width : seqPx
   const lanePx = Math.max(seqPx, laneEndPx, 24)
@@ -176,9 +249,18 @@ export default function AudioBedBar({
              this bar, whose handler moves the playhead to where it landed. One
              click therefore both selects the clip and puts the playhead where
              Split will cut it. The × below does stop it, since removing a clip
-             is not a place to put the playhead. */
-          onClick={() => onSelect?.(seg.index)}
-          className={`group absolute top-0 bottom-0 rounded border border-emerald-500 bg-gradient-to-b from-emerald-700 to-emerald-900 overflow-hidden ${muted ? 'opacity-40' : ''} ${seg.index === selectedIndex ? 'ring-2 ring-sky-400 brightness-110' : ''}`}
+             is not a place to put the playhead.
+             A press that turned into a MOVE is the exception — the clip has just
+             travelled, and the point it was released at is not a cut point, so
+             that one is stopped and doesn't seek. */
+          onClick={e => {
+            if (draggedRef.current) { draggedRef.current = false; e.stopPropagation(); return }
+            onSelect?.(seg.index)
+          }}
+          onPointerDown={e => handleMoveDrag(seg, e)}
+          /* grab, like V1's clip body: the only standing hint that a clip on this
+             lane can be moved at all. */
+          className={`group absolute top-0 bottom-0 rounded border border-emerald-500 bg-gradient-to-b from-emerald-700 to-emerald-900 overflow-hidden select-none ${onMoveBed ? 'cursor-grab active:cursor-grabbing' : ''} ${muted ? 'opacity-40' : ''} ${seg.index === selectedIndex ? 'ring-2 ring-sky-400 brightness-110' : ''}`}
           style={{ left: seg.left, width: seg.width, zIndex: seg.index === selectedIndex ? 12 : 10 }}
           title={
             `${segs.length > 1 ? `A1 clip ${seg.index + 1} — ` : ''}${seg.bed.name} — ${seg.durSec.toFixed(2)}s`
@@ -187,6 +269,7 @@ export default function AudioBedBar({
             + (seg.trimmed ? ` — plays ${bedInSec(seg.bed).toFixed(2)}s to ${bedOutSec(seg.bed).toFixed(2)}s of the file` : '')
             + (seg.cut ? ` — runs past the end of the sequence, so ${Math.min(seg.fromSec + seg.durSec - sequenceSec, seg.durSec).toFixed(2)}s of it is cut` : '')
             + `. Click to select it, then Split to cut it at the playhead`
+            + (onMoveBed ? `. Drag it to move it along the lane — it snaps to wherever it fits, and no other clip moves` : '')
           }
         >
           <div className="absolute inset-0 flex items-center gap-1 px-1.5 pointer-events-none">

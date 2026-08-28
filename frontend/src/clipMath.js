@@ -765,3 +765,151 @@ export function bedLaneEndSec(beds) {
   return (beds || []).reduce(
     (end, b) => Math.max(end, (b.startSec || 0) + bedPlayedSec(b)), 0)
 }
+
+// A microsecond of slack, so a butt joint (this clip's start === that clip's
+// end) counts as fitting rather than as a hair of overlap. Deliberately far
+// below EPS-sized musical tolerances: this is float dust, not a snap distance.
+const BED_FIT_EPS = 1e-6
+
+// What one A1 clip is allowed to do on the lane, given where all the others
+// sit: whether a start is legal, and the shortlist of starts that touch
+// something. Used by moveBed, the one A1 edit that has to ask whether a position
+// is free — swapBeds holds the pair's own span, so it never needs to. The
+// candidate list is what a drag snaps to. The obstacles' own starts are never
+// modified here — that is what makes a drag a function of this clip alone.
+function bedGeometry(lane, index) {
+  const dur = bedPlayedSec(lane[index])
+  const others = lane
+    .filter((_, i) => i !== index)
+    .map(b => ({ start: b.startSec || 0, end: (b.startSec || 0) + bedPlayedSec(b) }))
+  return {
+    fits: s => s >= -BED_FIT_EPS
+      && others.every(o => s + dur <= o.start + BED_FIT_EPS || s >= o.end - BED_FIT_EPS),
+    // Butted against the far side or the near side of some other clip, or at the
+    // head of the lane. Not filtered for legality — the caller tests `fits`.
+    candidates: [0, ...others.flatMap(o => [o.end, o.start - dur])],
+  }
+}
+
+// Move ONE A1 clip to a new position on the lane. The A1 counterpart of
+// moveClip, and the single definition of an A1 move: a bed owns its `startSec`,
+// so moving one IS changing that number — it is never a reorder for its own
+// sake, and it never changes any OTHER clip's start. That last part is the
+// invariant the lane is built on (removing a clip leaves the rest exactly where
+// they were), so a move keeps it: nothing is pushed out of the way to make room.
+//
+// Two clips cannot overlap. The render concatenates the lane into ONE stream and
+// pads the holes with measured silence (ffmpeg_utils.a1_bed_source /
+// bed_lane_gaps), so "two beds sounding at once" has no representation at all —
+// which is why this SNAPS instead of placing blindly. `startSec` is where the
+// cursor asks for: if the clip fits there it goes there, and if it doesn't it
+// goes to the nearest position where it does — butted against a neighbour, or
+// into the next hole big enough to hold it. Dragging a clip left until it stops
+// therefore closes a hole exactly, with no need to land on the edge by hand.
+//
+// The array comes back sorted by start, because both normalizeBeds here and
+// normalize_bed_placements on the server read the lane in ARRAY order and clamp
+// a bed that starts before the one in front of it — an out-of-order array would
+// be silently pulled back into order and the move would look like it didn't
+// take. So the new INDEX comes back too: dragging a clip past a neighbour
+// changes its index, and identity on A1 is position (see App.handleRemoveBed),
+// so the caller's selection has to follow it.
+//
+// Same array reference back for a move that changes nothing or that has nowhere
+// legal to go, exactly like moveClip: reduceEdit bails on an unchanged slice, so
+// a drag that can't move anything spends no undo step.
+export function moveBed(beds, index, startSec) {
+  const lane = normalizeBeds(beds)
+  if (!Array.isArray(lane) || !Number.isInteger(index) || index < 0 || index >= lane.length) {
+    return { beds, index }
+  }
+  const { fits, candidates } = bedGeometry(lane, index)
+
+  const want = Math.max(Number.isFinite(startSec) ? startSec : 0, 0)
+  let start = null
+  if (fits(want)) {
+    start = want
+  } else {
+    // Where else it could sit: butted against the far side or the near side of
+    // some other clip, or at the head of the lane. A legal spot that isn't
+    // `want` always touches something — if it didn't, it could slide towards
+    // `want` and still fit, so it wasn't the nearest one.
+    for (const cand of candidates) {
+      if (cand < 0 || !fits(cand)) continue
+      if (start == null || Math.abs(cand - want) < Math.abs(start - want)) start = cand
+    }
+  }
+  if (start == null) return { beds, index }
+  if (Math.abs(start - (lane[index].startSec || 0)) <= BED_FIT_EPS) return { beds, index }
+
+  const moved = { ...lane[index], startSec: start }
+  // Sorted with the original index as the tiebreak, so the order of clips that
+  // share a start (only reachable with a zero-length one) is stable.
+  const ordered = lane
+    .map((bed, i) => ({ bed: i === index ? moved : bed, i }))
+    .sort((a, b) => ((a.bed.startSec || 0) - (b.bed.startSec || 0)) || (a.i - b.i))
+  return {
+    beds: ordered.map(o => o.bed),
+    index: ordered.findIndex(o => o.bed === moved),
+  }
+}
+
+// Which A1 clip the selected one would trade places with, going one clip earlier
+// (`dir` -1) or later (+1) — its array index, or null when there is no clip that
+// way. This is what enables/disables the toolbar's Move ◀ ▶ on A1, and it is the
+// same rule V1 uses: the first clip can't go earlier, the last can't go later.
+export function bedSwapTarget(beds, index, dir) {
+  const lane = normalizeBeds(beds)
+  if (!Array.isArray(lane) || !Number.isInteger(index) || !lane[index]) return null
+  const other = index + (dir < 0 ? -1 : 1)
+  return lane[other] ? other : null
+}
+
+// Trade one A1 clip's place with its neighbour's. This is what Move ◀ ▶ and
+// ⌥←/⌥→ do on A1 — the counterpart of moveClip's reorder on V1, and the one A1
+// edit that moves a clip OTHER than the selected one. Dragging still doesn't:
+// moveBed slides one clip into a spot that already fits (see its comment), which
+// is the right thing for a pointer aimed at a position but can't put two clips
+// in the other's order when neither has room to pass.
+//
+// The pair keeps the span it already occupied. The neighbour takes the selected
+// clip's start; the selected clip lands so that it ends exactly where the
+// neighbour used to end, with the gap that was between them still between them:
+//
+//     before   [ A ][ A ]   gap   [ B ][ B ][ B ]
+//     after    [ B ][ B ][ B ]   gap   [ A ][ A ]
+//              ^ unchanged                      ^ unchanged
+//
+// Holding the outer edges is what makes this safe with no fits() test at all:
+// the two clips between them cover the same stretch of lane as before, so a swap
+// can never collide with a third clip or run off the head of the lane, whatever
+// the durations are. Anchoring the pair's start alone (letting the far edge fall
+// where the durations put it) would have needed one, and could have refused a
+// swap that plainly ought to work.
+//
+// Same `{beds, index}` contract as moveBed, including the same array reference
+// back when there is no neighbour, so a press that can't do anything spends no
+// undo step. The index comes back because the two clips exchange array slots and
+// identity on A1 is position (see App.handleRemoveBed), so the caller's
+// selection has to follow the clip it was on.
+export function swapBeds(beds, index, dir) {
+  const lane = normalizeBeds(beds)
+  const other = bedSwapTarget(lane, index, dir)
+  if (other == null) return { beds, index }
+
+  const lo = Math.min(index, other)
+  const hi = Math.max(index, other)
+  const first = lane[lo]
+  const second = lane[hi]
+  const firstStart = first.startSec || 0
+  const secondDur = bedPlayedSec(second)
+  // Whatever silence sat between them stays between them. Clamped at 0 because
+  // normalizeBeds has already pulled any overlap apart, so a negative here would
+  // be float dust rather than a real hole.
+  const gap = Math.max((second.startSec || 0) - (firstStart + bedPlayedSec(first)), 0)
+
+  const next = lane.slice()
+  next[lo] = { ...second, startSec: firstStart }
+  next[hi] = { ...first, startSec: firstStart + secondDur + gap }
+  return { beds: next, index: index === lo ? hi : lo }
+}

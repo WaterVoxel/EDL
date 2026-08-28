@@ -516,6 +516,34 @@ export default function AboutDialog({ onClose }) {
               that showed the whole 86,362-frame shift the old behaviour would have caused.
             </p>
             <p>
+              <strong>Moving an audio clip.</strong> Drag a clip along A1 and it takes the position you
+              drop it at — into a gap, out past the end of the lane, or over to the far side of its
+              neighbours, which reorders the lane. Only that clip moves; nothing is pushed aside to
+              make room. Two clips can't overlap, since the render joins the lane into one stream, so
+              a drag snaps to the nearest position where the clip fits — which means dragging it up
+              against a neighbour closes a gap exactly, with no need to land on the edge by hand. The
+              whole drag is one undo step, and dragging a clip is the one press that does <em>not</em>{' '}
+              move the playhead: where you let go is a position, not a place to cut.
+            </p>
+            <p>
+              The toolbar's <strong>Move ◀ ▶</strong> (and ⌥← / ⌥→) move a selected audio clip too, for
+              the short ones that are hard to grab. A press makes the clip <em>trade places</em> with the
+              audio clip on that side. The pair keeps the stretch of lane it already had — both outer
+              edges, and any gap between the two clips stays between them — so a swap always works
+              whatever the two lengths are, nothing outside the pair moves, and pressing the other way
+              puts them back. It is the one press that moves an audio clip you didn't select. An arrow is
+              dark when there is no clip that way, which on A1 means the first and last clip of the lane,
+              exactly as on V1. Dragging is still the way to put a clip somewhere new.
+            </p>
+            <p>
+              Selecting an audio clip <strong>deselects the video clip</strong>, so only one clip is ever
+              outlined and the toolbar can't act on something you can't see. Move and Split then work on
+              the audio clip; the tools that mean nothing on audio — Trim, Hold, Reverse, Speed, Round
+              Up, Duplicate, Crop, Raise — read "select a clip" until you click a video clip again. The
+              Delete key follows the video clip, so it does nothing while an audio clip is selected:
+              removing one is the × on the clip itself.
+            </p>
+            <p>
               <strong>Cutting an audio clip.</strong> Click a clip on A1 — the playhead moves to where
               you clicked — and the toolbar's <strong>Split</strong> button divides it there into two
               clips playing adjoining parts of the one file. It is a cut, not a re-edit: the halves
@@ -656,7 +684,7 @@ export default function AboutDialog({ onClose }) {
 
           <Section title="Agentic Assistant Editor">
             <p>
-              The chat panel (AGENT tab, next to Timeline) turns a plain-English request into an ffmpeg command using
+              The chat panel (AGENT in the top bar's Mode menu) turns a plain-English request into an ffmpeg command using
               a local Claude Code CLI process, run non-interactively with no tool access of its own —
               it can only propose a command as structured text, never execute anything. On the first
               message of a conversation it's told which files exist in Media Bin/Export Bin and, if a
@@ -701,11 +729,16 @@ export default function AboutDialog({ onClose }) {
               <strong>Delete</strong> in both media bins (renaming is blocked while a clip on the
               timeline — or the A1 bed — still points at that file) · favorites, sorting, and
               filtering in both media panels · <strong>folders in the Media Bin</strong>: drag a file
-              onto one to file it, drag it out to the top level again. They group the bin rather than
-              moving anything — <code>input/</code> stays flat, so filing a file can never break a
-              clip that points at it, and you can organise a file V1 is using right now. The
-              trade-off is that they don't show up in Finder and are remembered per browser, like
-              favorites are.
+              onto one to file it, drag it out to the top level again. Folders <strong>nest</strong>
+              — drop one on another to put it inside, or use <em>New folder inside</em> on a folder's
+              right-click menu — and they all start <strong>closed</strong>, each showing how many
+              files it holds counting its subfolders, so a big bin opens as a short list of names.
+              Select <strong>several files at once</strong> with ⌘-click (add or remove one) or
+              Shift-click (a run of them) and one drag files the lot; the right-click menu says how
+              many it will act on. They group the bin rather than moving anything —{' '}
+              <code>input/</code> stays flat, so filing a file can never break a clip that points at
+              it, and you can organise a file V1 is using right now. The trade-off is that they
+              don't show up in Finder and are remembered per browser, like favorites are.
             </p>
           </Section>
 

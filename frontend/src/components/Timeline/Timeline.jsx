@@ -10,7 +10,7 @@ import TransportBar from './TransportBar'
 import { useMedia } from '../../context/MediaContext'
 import { probe } from '../../api'
 import { useTimelinePlayback } from '../../hooks/useTimelinePlayback'
-import { clipTotalSec, clipTotalPx, clipHeadPx, clipMainPx, clipTailPx, clipRoundPx, clipMainSec, clipSpeed, sanitizeHoldPlacement, timelinePosToPx, sequenceVideoStartSec, clipStartSec, moveClip, dropTargetIndex, fuseGroups, fuseGroupIds, trimLossSec, deleteLossSec } from '../../clipMath'
+import { clipTotalSec, clipTotalPx, clipHeadPx, clipMainPx, clipTailPx, clipRoundPx, clipMainSec, clipSpeed, sanitizeHoldPlacement, timelinePosToPx, sequenceVideoStartSec, clipStartSec, moveClip, swapBeds, dropTargetIndex, fuseGroups, fuseGroupIds, trimLossSec, deleteLossSec } from '../../clipMath'
 import { addKeyframe, removeNearestKeyframe, sampleCropOrigin, clipTFromTimelinePos, retimeKeyframesForTrim } from '../../cropAnimation'
 
 const PPS = 60
@@ -46,7 +46,7 @@ export default function Timeline({
   v1Visible = true, onToggleV1, v2Visible = true, onToggleV2, hasOverlay = false,
   v2RenderMode = 'A', onSetV2RenderMode,
   v2ShotMode = '1', onSetV2ShotMode, v2ShotProgress = null,
-  audioBeds = [], onAddToA1, onRemoveBed, a1Visible = true, onToggleA1,
+  audioBeds = [], onAddToA1, onRemoveBed, onMoveBed, a1Visible = true, onToggleA1,
   selectedBedIndex = null, onSelectBed, laneClockRef = null, timelineSeekRef = null,
   a1Muted = false, noiseEnabled = false,
   // Called from V1's trim and delete with the SIGNED source seconds the edit
@@ -352,6 +352,16 @@ export default function Timeline({
   // One slot earlier/later on whichever track is focused — what ⌥←/⌥→ and the
   // EDL arrows both mean.
   function nudgeSelected(delta) {
+    // An audio clip selected means the video selection was dropped (App.selectBed),
+    // so this is unambiguous: ⌥←/⌥→ move the audio clip, matching the Move ◀ ▶
+    // buttons the shortcut is advertised as. On A1 that means swapping with the
+    // neighbouring audio clip — same edit, same function, since the toolbar's
+    // branch calls swapBeds too and the two surfaces can't be allowed to drift.
+    if (selectedBedIndex != null && onMoveBed && audioBeds[selectedBedIndex]) {
+      const next = swapBeds(audioBeds, selectedBedIndex, delta)
+      if (next.beds !== audioBeds) onMoveBed(next.beds, next.index)
+      return
+    }
     if (focusedTrack === 2) {
       const from = track2Clips.findIndex(c => c.id === selectedId2)
       if (from !== -1) applyMove2(from, from + delta)
@@ -491,9 +501,14 @@ export default function Timeline({
       // preventDefault is outside the selection check on purpose: with nothing
       // selected ⌥← does nothing at all rather than quietly frame-stepping,
       // which would look like the shortcut moved the wrong thing.
+      //
+      // A selected AUDIO clip counts here but deliberately not for Delete above:
+      // ⌥arrow is the same edit as the Move buttons, which now move audio clips
+      // too, while removing an audio clip is still the × on the bar.
+      const hasBedSelection = selectedBedIndex != null && !!audioBeds[selectedBedIndex]
       if (e.altKey && !e.metaKey && !e.ctrlKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
         e.preventDefault()
-        if (!hasSelection) return
+        if (!hasSelection && !hasBedSelection) return
         nudgeSelected(e.key === 'ArrowLeft' ? -1 : 1)
         return
       }
@@ -520,10 +535,12 @@ export default function Timeline({
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-    // `clips`/`track2Clips` themselves, not just clips.length: ⌥arrow reorders
-    // the array it closes over, so a stale one would move the clip that used to
-    // be at that index. Length alone doesn't change on a reorder or a trim.
-  }, [focusedTrack, selectedId, selectedPart, selectedId2, selectedPart2, clips, track2Clips, transport, canUndo, onUndo])
+    // `clips`/`track2Clips`/`audioBeds` themselves, not just clips.length: ⌥arrow
+    // reorders the array it closes over, so a stale one would move the clip that
+    // used to be at that index. Length alone doesn't change on a reorder or a
+    // trim — and on A1 it doesn't change on a move either, where the whole edit is
+    // a `startSec` inside the array.
+  }, [focusedTrack, selectedId, selectedPart, selectedId2, selectedPart2, clips, track2Clips, audioBeds, selectedBedIndex, onMoveBed, transport, canUndo, onUndo])
 
   // Scroll the lane while a reorder drag hovers near either edge, so a clip can
   // be moved somewhere off-screen. There is no zoom, PPS is fixed, and the lanes
@@ -1116,7 +1133,7 @@ export default function Timeline({
               {clips.length === 0 ? (
                 <label
                   {...v1FileDragProps}
-                  className={`flex-1 flex items-center justify-center gap-1.5 h-16 text-[11px] cursor-pointer transition-colors ${v1DragOver ? 'bg-indigo-950/40 text-indigo-300' : 'text-neutral-600 hover:text-neutral-400'}`}
+                  className={`flex-1 flex items-center justify-center gap-1.5 h-10 text-[11px] cursor-pointer transition-colors ${v1DragOver ? 'bg-indigo-950/40 text-indigo-300' : 'text-neutral-600 hover:text-neutral-400'}`}
                 >
                   <span>Drop clips here, choose files, or add them from the Media Bin</span>
                   <input
@@ -1136,7 +1153,14 @@ export default function Timeline({
                 <div
                   onClick={handleTimelineClick}
                   {...v1FileDragProps}
-                  className={`flex-1 flex items-stretch px-2 py-1.5 h-16 cursor-pointer transition-all ${v1DragOver ? 'bg-indigo-950/40' : 'bg-neutral-950'} ${!v1Visible ? 'opacity-35 grayscale' : ''}`}
+                  /* h-12/py-1 — the SAME box as V2's populated lane above, so the
+                     two video tracks are one height (A1 below is its own h-8, and
+                     stays that way). V1 used to be h-16/py-1.5 as the main track;
+                     the clip boxes lost 16px and nothing in TimelineClip needs
+                     them (the name/duration pair is two 8px lines, and V2 has
+                     drawn the same component at this height all along). Change
+                     this row's height and V2's line 1015 needs the same edit. */
+                  className={`flex-1 flex items-stretch px-2 py-1 h-12 cursor-pointer transition-all ${v1DragOver ? 'bg-indigo-950/40' : 'bg-neutral-950'} ${!v1Visible ? 'opacity-35 grayscale' : ''}`}
                 >
                   {clips.map((clip, i) => (
                     <TimelineClip
@@ -1322,6 +1346,7 @@ export default function Timeline({
                         onRemove={onRemoveBed}
                         selectedIndex={selectedBedIndex}
                         onSelect={onSelectBed}
+                        onMoveBed={onMoveBed}
                       />
                       <label
                         onClick={e => e.stopPropagation()}

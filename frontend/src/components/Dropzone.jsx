@@ -34,7 +34,7 @@ export default function Dropzone({ onUpload }) {
         over ? 'bg-indigo-500/10 text-indigo-300 border border-indigo-500' : 'bg-neutral-700 text-neutral-400 hover:text-neutral-200'
       }`}
     >
-      <span>{over ? 'Drop to upload' : '⇪ Drag here or Upload'}</span>
+      <span>{over ? 'Drop to upload' : '⇪ Drag/Upload'}</span>
       <input
         ref={inputRef}
         type="file"

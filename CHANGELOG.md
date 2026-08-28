@@ -15,6 +15,138 @@ the day the version file appeared. There are no tags for them and never will be 
 `v0.25.0` is the first real tag. Treat the older entries as a history, not a
 download list.
 
+## 0.53.0 — 2026-08-28
+
+**Move ◀ ▶ now swaps an A1 audio clip with the one next to it.** With an audio clip
+selected, a press (or ⌥← / ⌥→) makes it trade places with the audio clip on that side,
+the way Move already reorders clips on V1. The two clips keep the stretch of lane they
+had between them: the pair still starts and ends where it did, and any gap between them
+stays the same length, so nothing else on the lane shifts and pressing the other arrow
+puts them straight back. One press is one undo step, and an arrow is dark only on the
+lane's first and last clip — there is nothing to trade places with there.
+
+Before this, a press slid the clip up flush against its neighbour and a second press
+hopped it over — so two clips added end to end, with no gap between them, couldn't be
+reordered by the buttons at all. Dragging a clip along the lane is unchanged: that still
+moves just the one clip to wherever it fits.
+
+## 0.52.0 — 2026-08-28
+
+The Media Bin's upload button is now labelled **⇪ Drag/Upload** instead of "⇪ Drag here
+or Upload". It does the same two things it always did — drop files on it, or click it to
+pick some — and still says "Drop to upload" while you drag a file over it. The shorter
+name fits on one line, so the bin header no longer wraps when the left column is narrow.
+
+## 0.51.0 — 2026-08-28
+
+The V1 track is now the same height as V2 — the two video lanes match instead of V1
+standing 16px taller, so the timeline reads as one stack. The clip boxes on V1 are
+correspondingly shorter; nothing on them is cut off, since V2 has always drawn the
+same boxes at this height.
+
+The right column can also be pushed as far out of the way as the left one. Dragging
+its edge used to stop at 260 pixels wide while the left column went down to 180;
+both now stop at 180.
+
+## 0.50.0 — 2026-08-28
+
+**The toolbar's Move ◀ ▶ buttons move audio clips too, and selecting an audio clip now deselects the
+video clip.**
+
+Select a clip on A1 and the Move arrows — and ⌥← / ⌥→ — move that clip along the lane instead of moving
+a video clip. This is for the short pieces a Split leaves behind, which are as hard to grab on A1 as they
+are on V1. A press puts the clip flush against its neighbour on that side; press again and it hops over
+that neighbour to the first place beyond it. Nothing else on the lane moves, exactly as with dragging.
+An arrow is dark when there is nowhere legal to go that way — two clips added end to end have no room
+between them, so the second one has to be dragged before the buttons have anything to do.
+
+**Only one clip is outlined at a time now.** Clicking an audio clip used to leave the video clip above it
+highlighted as well, so two clips looked selected and nothing said which one the toolbar would act on.
+Clicking an audio clip now clears the video selection, the way clicking a video clip has always cleared
+the audio one. Move and Split follow the audio clip; the tools that mean nothing on audio — Trim, Hold,
+Reverse, Speed, Round Up, Duplicate, Crop, Raise — go back to reading "select a clip" until you click a
+video clip again. The Delete key still belongs to the video tracks, so it does nothing while an audio
+clip is selected; removing one is still the × on the clip itself.
+
+## 0.49.0 — 2026-08-28
+
+**Audio clips on A1 can be dragged along the lane, the way video clips can.**
+
+Press an A1 clip and drag it left or right and it goes where you drop it. The cursor turns into a grab
+hand over a clip so you can tell the lane is draggable. Nothing else moves out of the way: the other
+clips stay exactly where they are, which is the same promise removing a clip already made.
+
+Because two audio clips can't play on top of each other, a clip that won't fit where you dropped it
+lands at the nearest place it does fit — usually butted right up against its neighbour. That makes
+closing a gap easy: drag the clip left until it stops moving and it's flush against the one before it,
+with no gap left to hear. Drag it back to where it started and nothing happens at all.
+
+The whole drag is one undo step, so one Cmd/Ctrl+Z puts the clip back. Dragging a clip is also the one
+press on A1 that does *not* move the playhead — a plain click still selects the clip and seeks there, so
+click-then-Split works as before.
+
+## 0.48.0 — 2026-08-28
+
+**Media Bin folders nest, hold more than one file per drag, and start closed.**
+
+Drop a folder onto another folder and it goes inside it, as deep as you like — or use **New folder
+inside** on a folder's right-click menu to make one there directly. Dragging a folder carries
+everything in it, and dropping one on empty list space puts it back at the top level. A folder can't be
+dropped into itself or into anything already inside it; those drops are simply refused rather than
+scrambling the tree. Removing a folder still deletes nothing: its files and any folders inside it move
+up one level, into whatever folder it was in.
+
+**Every folder is closed when the bin loads**, which is the point of the other two changes — a bin with
+fifty files in six folders now opens as six names you can read instead of a list you have to scroll. The
+number on a folder row counts everything inside it, subfolders included, so a closed folder still tells
+you what's in there. Open folders stay open until you reload, and a search still reaches inside closed
+folders exactly as before.
+
+**You can select several files and move them in one drag.** ⌘-click adds or removes a file, Shift-click
+takes a run of them, and a plain click goes back to one — the same as any file list. Drag any file in
+the selection and the whole selection goes with it. The right-click menu counts what it is about to do
+("Move 3 files out of folder", "Delete 3 files"), and the Delete confirmation lists the files by name
+before anything leaves `input/`. Arrow keys still walk one file at a time. The previewed file is the one
+whose name is blue; the rest of the selection is just highlighted.
+
+Folders are still a grouping and nothing more — `input/` stays flat, so filing a file can never break a
+clip that points at it. Existing folders come across as top-level folders with nothing to convert. One
+thing to know if you go back to an older version: it won't understand a nested folder, so it would show
+those files ungrouped at the top level. Two folders still can't share a name, even in different
+parents — the second one gets numbered.
+
+## 0.47.0 — 2026-08-28
+
+**The project buttons in the top bar are icons now.**
+
+Library, Save, Save As, Export, Import, Export EDL and New were words in boxes. They are drawn glyphs
+instead — an open folder, a floppy disk, the same floppy with a `+`, a down arrow onto a line, an up
+arrow off it, a list with a down arrow, and a blank page with a `+` — in the same order, doing exactly
+the same things. They are now the same 24×24 squares as the gear, the tour bulb and the manual button
+beside them, so the whole right-hand end of the top bar is one row of ten instead of seven words
+followed by three icons. The seven take 168px where the words needed 366, which gives that end of the
+bar back about 200px.
+
+The name of every button now lives in its tooltip, so hover anything you don't recognise. **New** never
+had a tooltip before and does now, which is the more useful half of this change: it reloads the app, so
+unsaved timeline edits go with it, and the tooltip says so before you click. If you'd rather learn the
+row in one go, the guided tour's first stop still walks it left to right.
+
+## 0.46.0 — 2026-08-28
+
+**A Mode menu in the top bar, where the "EDL mode" label used to sit.**
+
+The top-left corner had a small boxed label reading "EDL mode". It looked like a button and did
+nothing — it was decoration. In its place there is now a **Mode** dropdown listing the four panes the
+app actually works in: **Timeline**, **Agent**, **Reformat** and **Actions**. Picking one switches the
+panel at the bottom of the middle column, so the place that tells you which mode you are in is now the
+place you change it.
+
+The four buttons that used to sit above that panel — Timeline, AGENT, Reformat, Actions — are gone.
+The Mode menu is now the only place you switch panes, so there is one control instead of two showing
+the same thing, and the row they occupied goes back to the timeline. Everything the panes themselves
+do is unchanged, and the guided tour still walks you through them.
+
 ## 0.45.1 — 2026-08-28
 
 **Restarting the app no longer leaves a render running in the background.**

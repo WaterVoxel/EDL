@@ -1992,8 +1992,9 @@ def normalize_bed_placements(bed_placements, n_beds):
       previous one's audio ends. That is exactly the lane A1 had before beds
       carried a start at all, so an older client, an older .nara, or a caller
       that passes nothing renders the graph it always did.
-    - OVERLAP is clamped forward to the previous bed's end. This is not
-      hypothetical even with no drag-to-reposition in the UI: a same-named file
+    - OVERLAP is clamped forward to the previous bed's end. The UI cannot send
+      one — dragging a clip along the lane snaps it to a position where it fits
+      (clipMath.moveBed) — but it is still not hypothetical: a same-named file
       replaced in input/ by a longer one, a re-probe returning a different
       duration (VBR mp3, a different ffmpeg build), or a hand-edited .nara can
       all make bed j's audio run into bed j+1's start. Clamping degrades to the
