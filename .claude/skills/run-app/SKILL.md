@@ -20,12 +20,22 @@ assuming it carried over.
 2. Kill any stale backend, then start Flask (port 5001):
 
    ```bash
-   lsof -ti :5001 | xargs kill 2>/dev/null; sleep 1
+   for p in $(lsof -ti :5001); do ps -Eww -p $p | grep -q WERKZEUG_RUN_MAIN=true && kill $p; done; sleep 1
    source .venv/bin/activate && nohup python3 app.py < /dev/null > /tmp/flask_dev.log 2>&1 &
    sleep 2 && curl -s http://127.0.0.1:5001/api/files
    ```
 
    The curl should return a JSON list (possibly empty). If Flask errors about a missing module: `pip install -r requirements.txt` inside the venv.
+
+   **Signal the worker, not both processes.** `debug=True` runs two Python processes on 5001 — the
+   reloader monitor and the worker that serves requests — so the older `lsof -ti :5001 | xargs kill`
+   hit both. The monitor sits inside `subprocess.call`, which **SIGKILLs** the worker on its way out,
+   so the worker's shutdown handler never runs: a render in flight is orphaned at full CPU and its
+   staged file is left in `output/.partials/` (measured: encoder ran 8.5s more, file never committed).
+   The loop above kills only the worker — `WERKZEUG_RUN_MAIN=true` is in its environment and not the
+   monitor's — and the monitor then exits on its own, so the port still comes free. If something is
+   still holding 5001 afterwards it is not a reloader worker (a foreign process, or a Flask started
+   without the reloader) and `lsof -ti :5001 | xargs kill` is the right tool for it.
 
    **Keep the `< /dev/null`.** `nohup` redirects stdout and stderr but not stdin, so without it a
    backgrounded Flask still holds the terminal on fd 0 and the reloader's echo-restoring `tcsetattr`
@@ -53,4 +63,6 @@ assuming it carried over.
 
 ## Cleanup
 
-When done testing, kill the Flask instance you started (`lsof -ti :5001 | xargs kill`) and delete any test renders you created in `output/`. Leave a Vite server alone if it was already running before you started (it's often the user's own session).
+When done testing, kill the Flask instance you started (the same worker-only loop as step 2:
+`for p in $(lsof -ti :5001); do ps -Eww -p $p | grep -q WERKZEUG_RUN_MAIN=true && kill $p; done`)
+and delete any test renders you created in `output/`. Leave a Vite server alone if it was already running before you started (it's often the user's own session).

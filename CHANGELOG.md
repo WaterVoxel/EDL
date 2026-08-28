@@ -15,6 +15,29 @@ the day the version file appeared. There are no tags for them and never will be 
 `v0.25.0` is the first real tag. Treat the older entries as a history, not a
 download list.
 
+## 0.45.1 — 2026-08-28
+
+**Restarting the app no longer leaves a render running in the background.**
+
+The instructions for stopping the engine — in the install guide, in the restart skill, and the note
+in README — told you to kill everything listening on port 5001. There are two programs there when
+the app is running: the one that serves the app, and a small supervisor that watches the code for
+changes and restarts the first one. Killing the supervisor takes the server down the hard way, with
+no chance for it to tidy up, so a render that was in progress kept going with nobody watching: the
+video encoder ran on at full speed to the end, wrote its file into a temporary folder, and then
+nothing ever collected it. On the measurement here that was another 8.5 seconds of a busy Mac
+producing a file the app would never show you.
+
+The stop command now signals only the program that serves the app. It shuts the render down properly
+on its way out — the encoder stops within a second and the half-finished file is cleaned up — and the
+supervisor notices its charge has gone and exits by itself, so the port is free for the restart
+exactly as before. Three back-to-back restarts, no port conflicts.
+
+Nothing inside the app changed; this is the documented procedure being wrong rather than the software.
+If you are the one at the keyboard and the old copy is still rendering, the friendliest way to stop it
+is still to close its browser tab and wait a second — that has cancelled the render since 0.45.0.
+A render interrupted by stopping the server is reported as a failed render, which is what it is.
+
 ## 0.45.0 — 2026-08-28
 
 **Closing the tab, hitting reload, or pressing Stop in the browser now actually stops the render.**

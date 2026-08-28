@@ -91,7 +91,7 @@ found independently by 5 of them).
 | 16 | HIGH | The Agent tab can overwrite source media in `input/` | `ffmpeg_utils.py:2410` | VERIFIED | **FIXED** (0.32.0) |
 | 17 | HIGH | Hold Frame fails on every silent source — all 27 of this machine's videos | `ffmpeg_utils.py` `build_holdframe_filter` | VERIFIED | **FIXED** (0.38.0) |
 | 18 | HIGH | V2's lane drew short of V1's; its end read frame 356, not 361 | `clipMath.js:9`, `Timeline.jsx:18` | VERIFIED | **FIXED** (0.37.0) |
-| 19 | MEDIUM | The documented restart command orphans a running encoder | `_reloader.py:275`, run-app SKILL.md:23 | VERIFIED | OPEN |
+| 19 | MEDIUM | The documented restart command orphans a running encoder | `_reloader.py:275`, run-app SKILL.md:23 | VERIFIED | **FIXED** (0.45.1) |
 
 Items 15 and 16 were found while fixing #7 and are new since the original audit. Item 17 was found
 by #4's real-installation smoke test. Item 18 was reported by the user. Item 19 was found while
@@ -3935,8 +3935,8 @@ unilaterally, because each removes or reverses documented existing behavior.
 
 ## 19. MEDIUM — The documented restart command orphans a running encoder
 
-**Status:** OPEN — found while re-measuring #8's shutdown half; recorded, not fixed (out of scope for
-that task)
+**Status:** FIXED — 2026-08-28, shipped in 0.45.1 (see [Resolution](#resolution-19) below). Found
+while re-measuring #8's shutdown half; recorded then, fixed now.
 **Confidence:** VERIFIED by measurement, on both the pre-0.45.0 and post-0.45.0 code
 **Where:** werkzeug `_reloader.py:275` (`subprocess.call`) + `_reloader.py:446`
 (`signal(SIGTERM, lambda *a: sys.exit(0))`); triggered by `.claude/skills/run-app/SKILL.md:23`
@@ -3983,6 +3983,160 @@ half and probably where this belongs; the staging leftover would then be cleaned
 existing handler.
 
 **Effort:** ~10 minutes for the skill-side ordering; longer if the monitor's shutdown is reworked.
+
+<a id="resolution-19"></a>
+### Resolution — 0.45.1 (2026-08-28)
+
+#### Re-measuring the finding first
+The 0.45.0 rigs had been deleted, so this was measured from scratch: a scratch instance on port
+5095 with its own root (`/tmp/g19`, `port=5001` → `5095`, launched with the repo's own
+`.venv/bin/python`), a 60.0s / 255 MB 1080p `-qp 0` fixture, and a real `/api/reformat` render in
+flight — encoder confirmed running and its staged file confirmed present before any signal was sent.
+Harness `/tmp/h19/rig.py`. The real server on 5001 was never signalled. Five ways of stopping the
+backend, all on shipped 0.45.0 code:
+
+| what was signalled | signal | encoder afterwards | staged file |
+|---|---|---|---|
+| **both listeners** — the documented `lsof -ti :5001 \| xargs kill` | TERM | **orphaned**, ran 8.5s more to completion | **left** |
+| **worker then monitor** — this entry's own Fix suggestion | TERM | **orphaned**, ran 4.8s more | **left** |
+| monitor only | TERM | **orphaned**, ran 4.8s more | **left** |
+| **worker only** | TERM | stopped by t+0.0s, log `stopped 1 running ffmpeg process on exit` | cleaned |
+| both listeners | INT | stopped by t+0.0s, same log line | cleaned |
+
+```
+case=both listeners=[97022, 97027] worker=97027 monitor=[97022] encoder=['97038'] staged=['97027.…/case.mp4']
+SIGTERM -> [97022, 97027]
+  t+  0.0s  listening=False worker_alive=False  encoder=['97038']  staged=['97027.…/case.mp4']
+  t+  8.5s  listening=False worker_alive=False  encoder=None       staged=['97027.…/case.mp4']
+  t+  9.2s  FINAL listeners=[] encoder=None staged=['97027.…/case.mp4'] committed=False
+
+case=ordered listeners=[97750, 97755] worker=97755 monitor=[97750] encoder=['97765'] staged=['97755.…/case.mp4']
+SIGTERM -> [97755, 97750]                      # worker FIRST, monitor second
+  t+  4.8s  listening=False worker_alive=False  encoder=None       staged=['97755.…/case.mp4']
+
+case=worker listeners=[97242, 97247] worker=97247 monitor=[97242] encoder=['97257'] staged=['97247.…/case.mp4']
+SIGTERM -> [97247]
+  t+  0.0s  listening=False worker_alive=False  encoder=None       staged=None
+```
+
+So the finding reproduces exactly as recorded, and the fix this entry proposed does **not** work —
+see Reasoning.
+
+#### Changes made
+Documentation only; no application code was touched. Every place the project told an operator how to
+stop the backend now signals the reloader **worker** alone, identified by `WERKZEUG_RUN_MAIN=true` in
+its environment:
+
+```bash
+for p in $(lsof -ti :5001); do ps -Eww -p $p | grep -q WERKZEUG_RUN_MAIN=true && kill $p; done
+```
+
+- **`.claude/skills/run-app/SKILL.md:23`** (step 2, "kill any stale backend") — command replaced, plus
+  a paragraph after the block explaining why both-pids is wrong and what to do if something is still
+  holding 5001 afterwards (then it is not a reloader worker, and the blunt kill is the right tool).
+- **`.claude/skills/run-app/SKILL.md`, Cleanup** — same command, referred back to step 2.
+- **`agentic_installation.MD`, Phase 5** — the backend line in the start block. The `:5173` Vite line
+  is unchanged: Vite has no reloader monitor and no encoder to orphan.
+- **`agentic_installation.MD`, the two-process note** — was *"`lsof -ti :5001 | xargs kill` handles
+  both"*, which is true and is precisely the problem; it now says signal the worker only and why.
+- **`agentic_installation.MD`, Stopping** and its **`Address already in use`** troubleshooting row —
+  the row now points at the Stopping commands instead of carrying its own copy of the blunt kill.
+- **`README.txt`**, the same troubleshooting entry — this one is for a person, not an agent, so it
+  keeps the one-line `lsof -ti :5001 | xargs kill` and gains the sentence that actually helps at that
+  keyboard: if the old copy is still rendering, close its browser tab first and give it a second,
+  which since 0.45.0 stops the render cleanly.
+
+#### Reasoning
+- **Worker only, in one step — not the two-step this entry proposed.** Measured above: signalling the
+  worker first and the monitor second still orphans the encoder. The monitor's SIGTERM handler
+  (`_reloader.py:446`) calls `sys.exit(0)` immediately, which unwinds through
+  `subprocess.call`'s bare `except: p.kill()` (`subprocess.py:349-355`) — SIGKILL to a worker that is
+  only just starting its cleanup, and that cleanup needs up to the 2.0s grace `_stop_procs` gives
+  ffmpeg. Signalling the monitor *at all* is the defect, in either order; monitor-only orphans too.
+- **The second step is not needed.** `restart_with_reloader` returns as soon as the child exits with
+  anything other than 3 (`_reloader.py:275-277`), so the monitor exits by itself. Measured: port free
+  0.8s after the worker was signalled, and three back-to-back stop/start rounds with no
+  `Address already in use`.
+- **Not SIGINT to both, even though it measured clean.** It is clean by timing, not by construction:
+  `Popen.wait` gives the child `_sigint_wait_secs = 0.25` (`subprocess.py:848`) before re-raising into
+  the same `p.kill()`, so the worker's cleanup only completes if it finishes inside 250 ms while the
+  encoder's own SIGTERM grace is 2.0s. Worker-only has no such window, and it costs the operator no
+  more than SIGINT would.
+- **Not a code change, because there is no code of ours that could win.** The killing signal is
+  SIGKILL and it comes from werkzeug's monitor. `run_with_reloader` installs its own SIGTERM handler
+  *after* `install_shutdown_handlers()` has already run, so the app cannot keep a handler in the
+  monitor process; the only in-process alternatives are dropping the reloader — which #15's fix and
+  the `extra_files=[VERSION_FILE]` version watch both depend on — or monkeypatching a third-party
+  internal, which would silently rot on the next werkzeug bump. The reachable trigger was this
+  project's own documentation, so that is where the fix belongs. Same shape as #15, also fixed by
+  correcting a documented command line rather than the app.
+- **The worker is identified by its environment, not by pid order.** The worker is spawned after the
+  monitor and respawned on every reload, so "highest pid of the two" would usually be right — but
+  macOS pids wrap at 99999 and this machine was already handing out pids in the 97000s during these
+  measurements. After a wrap the newest listener has the *lowest* number and a `sort -n | tail -1`
+  command would silently signal the monitor: exactly the failure it was written to prevent.
+  `WERKZEUG_RUN_MAIN=true` is set by `restart_with_reloader` for the child only, and is what werkzeug
+  itself uses to tell the two apart. This stopped being hypothetical during this very task — bumping
+  `VERSION` restarted the real server's worker and the pid wrapped, so on 5001 right now:
+
+  ```
+  485   ppid=44065  werkzeug_run_main=1     <- the worker
+  44065 ppid=8001   werkzeug_run_main=0     <- the monitor
+  -- naive 'newest pid' selector would pick: 44065
+  -- env-marker selector picks: 485
+  ```
+
+#### Observations
+- **This entry's own Fix section was wrong** about the two-step, and about ordering being the issue at
+  all. Left in place above as written, with the measurement that refutes it, because the reasoning was
+  the reason the fix looked like a ten-minute job.
+- **An operator-initiated stop shows up in the UI as a failed render (HTTP 500), not as a
+  cancellation (499).** 0.45.0's client-disconnect path is not involved: the worker kills ffmpeg from
+  `atexit`, the request thread sees ffmpeg fail, and the 500 goes out before the process exits. That
+  is honest — the render really did fail — and it is what the log shows too.
+- **`ps -Eww -p <pid>` shows the environment only for your own processes** on macOS. Anyone stopping
+  someone else's worker (a different account, or root looking at another user's process) will not see
+  the marker, the loop will kill nothing, and they will fall through to the blunt kill and the old
+  behaviour. Not worth guarding for a single-user local app; recorded so it is not a surprise.
+- **The monitor leaves nothing behind when it is not signalled** — port free, no stray process. In the
+  harness it lingers as a zombie only because the harness is its parent and never waits on it; a real
+  shell reaps it.
+- **Out of scope, recorded not fixed:** nothing here helps a `kill -9` of the worker, Force Quit, or a
+  crash — those still leave a staged file under `output/.partials/` (already recorded as #9's SIGKILL
+  caveat). The only thing that could clean them is a startup sweep of `.partials/<pid>.<tid>`
+  directories whose pid is no longer alive, next to the preview-cache prune. That is new behaviour
+  rather than a repair of this finding, so it stays unbuilt.
+
+#### Verification
+The stop line was not retyped for the test — it is **read out of `SKILL.md`** by the harness and
+executed as-is (only `:5001` → `:5095` for the scratch instance), so what was verified is what
+shipped:
+
+```
+case=snippet listeners=[99024, 99027] worker=99027 monitor=[99024] encoder=['99038'] staged=['99027.…/case.mp4']
+  doc line: for p in $(lsof -ti :5001); do ps -Eww -p $p | grep -q WERKZEUG_RUN_MAIN=true && kill $p; done; sleep 1
+  zsh rc=0 out='' err=''
+  t+  1.2s  listening=False worker_alive=False  encoder=None  staged=None
+  t+  1.7s  FINAL listeners=[] encoder=None staged=None committed=False
+  log tail: … "POST /api/reformat HTTP/1.1" 500 - | stopped 1 running ffmpeg process on exit
+  cleaned: staged=None outputs=(empty)
+```
+
+Restart loop, no render running — the ordinary case the skill is actually used for:
+
+```
+round 1: stop_rc=0  api/files=200  listeners=[98178 98183]
+round 2: stop_rc=0  api/files=200  listeners=[98208 98212]
+round 3: stop_rc=0  api/files=200  listeners=[98231 98234]
+after final stop: listeners=[]  'Address already in use' in log: 0
+```
+
+Both documented copies of the line parse under `zsh -n` **and** `bash -n` (rc=0, no stderr). Selection
+was then checked against the **real installation** with a dry run that echoed instead of killing —
+`would kill 92065` out of listeners `44065 92065`, i.e. the worker, not the monitor — so the shipped
+line targets correctly on 5001 without the user's server being touched. Cleanup: scratch instance and
+its 255 MB fixture removed (`/tmp/g19`, `/tmp/h19`), port 5095 clear, no ffmpeg processes left, and
+`git status` shows only the intended files.
 
 ---
 

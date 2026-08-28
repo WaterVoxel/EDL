@@ -259,7 +259,9 @@ TROUBLESHOOTING
 -------------------
 
 "Address already in use" when starting the app
-    Something is already using that spot on your computer. Try:
+    Something is already using that spot on your computer. If the old
+    copy of the app is still rendering, close its browser tab first and
+    give it a second — that stops the render. Then:
         lsof -ti :5001 | xargs kill
     Then try Step 3 again. (Use :5173 instead of :5001 if the frontend
     is the one showing this error.)

@@ -205,7 +205,7 @@ Two processes must run at once. If Flask is down, the UI at 5173 loads but every
 # --- backend on 127.0.0.1:5001 ---
 eval "$(/opt/homebrew/bin/brew shellenv)"   # so the app resolves ffmpeg off Apple Silicon
 cd "$REPO_ROOT"
-lsof -ti :5001 | xargs kill 2>/dev/null; sleep 1
+for p in $(lsof -ti :5001); do ps -Eww -p $p | grep -q WERKZEUG_RUN_MAIN=true && kill $p; done; sleep 1
 source .venv/bin/activate && nohup python3 app.py < /dev/null > /tmp/flask_dev.log 2>&1 &
 
 # --- frontend on 127.0.0.1:5173 ---
@@ -221,7 +221,11 @@ Notes that matter:
 - `app.py:1640` pins `host="127.0.0.1", port=5001, debug=True`. Ports are **not** configurable
   from the CLI; do not pass flags.
 - `debug=True` means Flask's reloader runs **two** Python processes on 5001. That is normal.
-  `lsof -ti :5001 | xargs kill` handles both.
+  **Signal the worker only** — the loop above matches `WERKZEUG_RUN_MAIN=true` in the environment,
+  which only the worker has, and the monitor exits by itself once its child does, so the port comes
+  free either way. Killing both (the older `lsof -ti :5001 | xargs kill`) makes the monitor SIGKILL
+  the worker from inside `subprocess.call`, which skips the worker's shutdown handler and leaves a
+  running render orphaned at full CPU with a staged file nothing will ever commit.
 - **The `< /dev/null` on the Flask line is required — do not drop it.** `nohup` redirects stdout and
   stderr but never stdin, so without it a backgrounded Flask keeps the Terminal's tty on fd 0; the
   reloader then calls `tcsetattr` to restore echo, which from a background process group raises
@@ -303,7 +307,7 @@ installs and when something is broken.
 Stopping:
 
 ```bash
-lsof -ti :5001 | xargs kill 2>/dev/null
+for p in $(lsof -ti :5001); do ps -Eww -p $p | grep -q WERKZEUG_RUN_MAIN=true && kill $p; done
 lsof -ti :5173 | xargs kill 2>/dev/null
 ```
 
@@ -313,7 +317,7 @@ lsof -ti :5173 | xargs kill 2>/dev/null
 
 | Symptom | Cause and fix |
 | --- | --- |
-| `Address already in use` on start | Old server still bound. `lsof -ti :5001 \| xargs kill` (or `:5173`), then restart. |
+| `Address already in use` on start | Old server still bound. Use the Stopping commands above (worker-only for 5001, plain kill for 5173), then restart. |
 | Vite says it is on **5174** | Port 5173 was taken. Kill the old Vite and restart so the promised URL is the live one. |
 | `ModuleNotFoundError: No module named 'flask'` | The venv was not activated, or Phase 2 was skipped. `source .venv/bin/activate && pip install -r requirements.txt`. |
 | `command not found: ffmpeg` / `node` / `npx` | Homebrew's shellenv was not loaded in this shell. Re-run `eval "$(/opt/homebrew/bin/brew shellenv)"`. |
