@@ -37,7 +37,7 @@ import { analyzeAgainstV1, batchCutAgainstV1, reconstructFromV1, sequencePieces 
 import { mergeExportPresets } from './exportPresets'
 import { workFingerprint } from './projectWork'
 import { matchOverlays } from './overlayMatch'
-import { shotOutputNames } from './renderNames'
+import { shotOutputNames, nameStem } from './renderNames'
 
 // How far each side column can be dragged. The two minimums are deliberately
 // the same number: the right column used to stop at 260 while the left went to
@@ -857,10 +857,13 @@ function AppInner() {
     }))
   }
 
-  // V2 Render in 1+ mode: one pass per cut, in track order, writing
-  // `<name>_01`, `_02`… (see renderNames.shotOutputNames — the same function
-  // the dialog previewed the series with, so the names shown are the names
-  // written).
+  // V2 Render in 1+ mode: one pass per cut, in track order. The names come from
+  // renderNames.shotOutputNames — the same function the dialog previewed the
+  // series with, so the names shown are the names written — driven by the
+  // dialog's three naming controls in `naming`: V1 name (on by default, each
+  // file named after the clip it renders, `<clip>.mp4`), and Prefix/Suffix
+  // wrapped around whichever base name is in play. With V1 name off it is the
+  // typed name plus an index, `<name>_01`, `_02`…, as it always was.
   //
   // Each pass is the ordinary single-clip render the backend already does, so
   // every per-clip decision — holds, round-up, reverse, speed, crop, its V2
@@ -886,9 +889,24 @@ function AppInner() {
   // as a multi-clip payload that the server concatenates exactly as the joined
   // `1`-mode render would. V1 and an unfused V2 lane have no fused runs at all,
   // so every group is a single clip and this behaves precisely as it did.
-  async function renderShots(sourceClips, overlays, baseName, noAudio, noise, settings) {
+  // The name each shot of a 1+ series would take from the clip it renders — one
+  // stem per GROUP, in cut order, for the render dialog's V1 name box. The label
+  // the user reads off the clip box (`displayName || sourceName`), so a renamed
+  // duplicate exports under the name it shows, and the FIRST member of a fused
+  // run names the whole run, which is the only member the user sees a name for.
+  // One function for the dialog's preview and for the render, so the two can't
+  // disagree about which clip named which file.
+  function shotStemsFor(clips) {
+    return fuseGroups(clips).map(g => nameStem(g.clips[0]?.displayName || g.clips[0]?.sourceName || ''))
+  }
+
+  async function renderShots(sourceClips, overlays, baseName, noAudio, noise, settings, naming = {}) {
     const groups = fuseGroups(sourceClips)
-    const names = shotOutputNames(baseName, groups.length)
+    const names = shotOutputNames(baseName, groups.length, {
+      stems: naming.useClipNames ? shotStemsFor(sourceClips) : null,
+      prefix: naming.prefix,
+      suffix: naming.suffix,
+    })
     for (let i = 0; i < groups.length; i++) {
       setV2ShotProgress({ done: i, total: groups.length })
       // Holds belong to the SEQUENCE, not to a clip: a head hold opens the
@@ -961,7 +979,10 @@ function AppInner() {
     ])
   }
 
-  async function handleRenderConfirm(outputName, noAudio = false) {
+  // `naming` is the render dialog's series-naming block — `{useClipNames,
+  // prefix, suffix}`, only ever acted on by the 1+ path below, since a
+  // single-file render's whole name was typed into the field.
+  async function handleRenderConfirm(outputName, noAudio = false, naming = {}) {
     setShowRenderDialog(false)
     setRendering(true)
     try {
@@ -1001,7 +1022,7 @@ function AppInner() {
             ...prev,
           ])
         }
-        const ok = await renderShots(sourceClips, overlays, outputName, noAudio, noise, settings)
+        const ok = await renderShots(sourceClips, overlays, outputName, noAudio, noise, settings, naming)
         // Clean only when the whole series landed: a stopped series left some
         // of the track unrendered, and the dot is what says so. `silent` —
         // clearing dirty dots is bookkeeping the user didn't do, so it must not
@@ -2042,7 +2063,14 @@ function AppInner() {
 
         {/* Center: Preview + toolbar + Timeline */}
         <div className="flex-1 flex flex-col min-w-0">
-          <div data-tour="previewHeader" className="flex items-center justify-between px-2.5 py-1 border-b border-neutral-800 bg-neutral-900">
+          {/* An ISLAND, like the render bar below the stage: `mx-2 my-2` insets
+              it by the same 8px, and `rounded-md border border-neutral-800` is
+              the Timeline card's chrome, so every panel in this column reads as
+              a card with the same edges. It used to be a full-bleed strip whose
+              `border-b` doubled as the seam against the preview stage; the gap
+              now does that job, and the stage itself stays edge to edge because
+              it's a picture, not a panel. */}
+          <div data-tour="previewHeader" className="flex items-center justify-between mx-2 my-2 px-2.5 py-1 rounded-md border border-neutral-800 bg-neutral-900">
             {/* The "Preview" label used to sit here; the two frame grabs took
                 its place (the panel's position already says what it is). */}
             <FrameGrabButtons />
@@ -2089,11 +2117,18 @@ function AppInner() {
               elsewhere. The element itself always stays mounted (a portal
               needs a stable target), but it drops its padding and borders on
               the other modes — the Timeline is unmounted then, so the row
-              would otherwise show as an empty strip. */}
+              would otherwise show as an empty strip.
+              It is drawn as an ISLAND, not a full-bleed strip: `mx-2` insets
+              it by the same 8px the Timeline wrapper's `p-2` gives the card
+              below, and `rounded-md border border-neutral-800` is that card's
+              own chrome (Timeline.jsx's root), so the two read as two cards in
+              one column instead of a banded header over a card. `mt-2` is the
+              matching gap to the preview stage above, which stays edge to edge
+              because it's a picture, not a panel. */}
           <div
             ref={setTimelineBarSlot}
             data-tour="renderBar"
-            className={centerTab === 'timeline' ? 'px-2.5 py-1.5 border-y border-neutral-800 bg-neutral-900' : ''}
+            className={centerTab === 'timeline' ? 'mx-2 mt-2 px-2.5 py-1.5 rounded-md border border-neutral-800 bg-neutral-900' : ''}
           />
 
           {/* Timeline / AGENT / Actions pane content — only one visible at
@@ -2265,6 +2300,13 @@ function AppInner() {
           shotCount={renderTarget !== 'v1' && v2ShotMode === '1+'
             ? fuseGroups(renderTarget === 'v2' ? track2Clips : timelineClips).length
             : 0}
+          // The clip name behind each shot, for the dialog's V1 name box —
+          // through the same helper renderShots names the files with, off the
+          // same track it renders (V2's clips in A, V1's in A/B), so a preview
+          // can't credit a file to a clip the render wouldn't.
+          shotStems={renderTarget !== 'v1' && v2ShotMode === '1+'
+            ? shotStemsFor(renderTarget === 'v2' ? track2Clips : timelineClips)
+            : []}
           showNoAudioOption
           onConfirm={handleRenderConfirm}
           onCancel={() => setShowRenderDialog(false)}

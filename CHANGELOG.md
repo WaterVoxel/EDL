@@ -15,6 +15,50 @@ the day the version file appeared. There are no tags for them and never will be 
 `v0.25.0` is the first real tag. Treat the older entries as a history, not a
 download list.
 
+## 0.56.1 — 2026-08-28
+
+Fixed the batch render dialog: the **Suffix** field stuck out past the right edge of the
+window. Prefix and Suffix now split the width evenly and both sit inside the dialog, and
+long text typed into either one — or a long filename — stays inside it too instead of
+stretching the window.
+
+## 0.56.0 — 2026-08-28
+
+The row above the picture — the **IMAGE** frame grabs and the **V1 CROP** controls — is now
+a rounded card too, inset and lined up with the render row and the timeline card below it,
+so the middle column reads as three cards around the picture rather than two bands and a
+card. The picture itself still fills the column edge to edge, and nothing in the row moved.
+
+## 0.55.0 — 2026-08-28
+
+The row with **V1 Render**, **V2 Render**, **A1 Render**, the V2 tools and the transport is
+now a rounded card of its own instead of a band stretching to both sides of the middle
+column. It sits inset by the same margin as the timeline card below it, with the same
+corner radius and border, so the two line up as a pair. Nothing in the row moved or
+changed — it just stops touching the edges.
+
+## 0.54.0 — 2026-08-28
+
+**A batch render now names each file after the clip it renders, and can add a prefix or a
+suffix.** When V2 Render is set to **1+** — one file per cut — the render dialog shows
+three new controls above Render:
+
+- **V1 name**, ticked by default: every file takes the name of the clip it comes from, so
+  a batch of eight cuts comes out under the eight names you can read on the timeline
+  instead of `myrender_01`…`_08`. The name you type in the dialog then only decides the
+  file type (`.mp4`, `.mov`…). Cuts that share a clip name — several cuts of the same
+  source file, the usual result of the V2 Batch Analyzer — are numbered in cut order, and
+  only those; a cut whose name is already one of a kind stays plain. Untick the box and
+  everything goes back to the typed name plus `_01`, `_02`… as before.
+- **Prefix** and **Suffix**, both empty until you type in them: whatever you put there
+  wraps the name, before the extension. `PRE_` and `_v2` turn `SHOT_0040` into
+  `PRE_SHOT_0040_v2.mp4`. Spaces count, so a prefix of `SHOW 01 ` reads as you typed it.
+
+The dialog previews the whole series before you render, so what it lists is what lands in
+the Export Bin. Nothing changes for a single-file render — V1 Render, A1 Render and V2
+Render on mode **1** ask for one name exactly as they did. Files already in the export
+folder are still never overwritten.
+
 ## 0.53.0 — 2026-08-28
 
 **Move ◀ ▶ now swaps an A1 audio clip with the one next to it.** With an audio clip

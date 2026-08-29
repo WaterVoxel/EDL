@@ -405,11 +405,16 @@ export default function AboutDialog({ onClose }) {
             <p>
               <strong>⑤ 1 / 1+</strong> — the switch beside it, deciding how many files that same
               click writes. <em>1</em> is one file, the whole track joined into a single clip.{' '}
-              <em>1+</em> renders every cut on its own:{' '}
-              <span className="font-mono text-neutral-400">&lt;name&gt;_01</span>,{' '}
-              <span className="font-mono text-neutral-400">_02</span>… in track order, one ffmpeg
-              pass each, for handing individual shots to a tool that takes one clip at a time. The
-              two switches are independent — A / A/B decides what a shot contains, 1 / 1+ decides
+              <em>1+</em> renders every cut on its own, one ffmpeg pass each, for handing individual
+              shots to a tool that takes one clip at a time. The render dialog then names them:{' '}
+              <strong>V1 name</strong>, ticked by default, calls each file after the clip it renders
+              — the name you type there only supplies the extension, and cuts that share a clip name
+              are numbered in cut order. Untick it and every file goes back to the typed name plus an
+              index: <span className="font-mono text-neutral-400">&lt;name&gt;_01</span>,{' '}
+              <span className="font-mono text-neutral-400">_02</span>… in track order. The{' '}
+              <strong>Prefix</strong> and <strong>Suffix</strong> fields under the box wrap whichever
+              name that is, inside the extension, and the dialog previews the whole series before you
+              render it. The two switches are independent — A / A/B decides what a shot contains, 1 / 1+ decides
               how it's split — and the cuts belong to whichever track the render is built from:
               V2's own clips in A, V1's in A/B. <em>1+</em> and <strong>②</strong> are the two halves
               of the same choice: send the shots out separately, or send one joined file out and cut

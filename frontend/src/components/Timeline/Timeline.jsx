@@ -876,7 +876,8 @@ export default function Timeline({
         )}
         {/* How MANY files "V2 Render" writes: 1 = the whole track joined into
             a single clip (the original behavior, and the default), 1+ = one
-            file per cut, numbered in track order.
+            file per cut, each named after the clip it renders (or numbered in
+            track order — the render dialog's naming block decides).
             Deliberately a SECOND switch rather than four modes in one: this
             axis is orthogonal to A / A/B, which decides what each shot
             CONTAINS. Same styling as that group because it's the same kind of
@@ -899,7 +900,7 @@ export default function Timeline({
             <button
               onClick={() => onSetV2ShotMode?.('1+')}
               aria-pressed={v2ShotMode === '1+'}
-              title={`1+ — render every cut as its own file (${v2ShotCount} ${v2ShotCount === 1 ? 'shot' : 'shots'}), numbered in track order`}
+              title={`1+ — render every cut as its own file (${v2ShotCount} ${v2ShotCount === 1 ? 'shot' : 'shots'}), each named after its own clip, or numbered in track order (the render dialog picks)`}
               className={`px-1.5 py-0.5 border-l border-teal-700 ${v2ShotMode === '1+' ? 'bg-teal-700 text-white' : 'text-teal-400 hover:bg-teal-900/40'}`}
             >
               1+
