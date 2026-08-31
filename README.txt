@@ -6,17 +6,76 @@ slow down, hold, round-up -- is staged as a non-destructive decision and
 only applied to your media when you click Render. Your original files
 are never changed.
 
-This guide assumes no prior experience. Follow the steps in order.
+This guide assumes no prior experience.
 
 Once the app is running, click the document icon at the far right of the
 top bar for a full explanation of its features from inside the app. The
 lightbulb next to it starts a guided tour.
 
-There are two ways to install. Pick one:
+
+════════════════════════════════════════════════════════
+   TO LAUNCH THE APP: DOUBLE-CLICK "start.command"
+════════════════════════════════════════════════════════
+
+In this same folder there is a file called "start.command". Double-click
+it and the app starts -- it opens the two Terminal windows the app needs,
+starts both halves, waits until they are ready, and opens the editor in
+your browser. Nothing to type.
+
+That is all most people ever need, and the section below is just the
+detail. The one exception: if the app has never been set up on this Mac
+at all, do THE ONE-TIME INSTALL further down first, then come back here.
+
+
+LAUNCHING THE APP
+--------------------
+
+A window appears listing what it checks, then two more Terminal windows
+open -- one titled "backend", one titled "frontend". Those two are the
+app itself; leave them open while you work. When both are ready your
+browser opens to:
+
+    http://127.0.0.1:5173/
+
+TO STOP THE APP: click into each of the two Terminal windows and press
+Ctrl+C. It is then safe to close them.
+
+Four things to know:
+
+  - THE FIRST DOUBLE-CLICK MAY BE BLOCKED. If this project arrived as a
+    download or a zip, macOS refuses to run the file and shows a warning
+    about an unidentified developer. Right-click "start.command", choose
+    Open, then click Open in the dialog that appears. You only do this
+    once -- after that, double-click works normally.
+
+  - IF THE APP IS ALREADY RUNNING, it leaves it alone and just opens the
+    browser. It will not restart anything out from under you, so a render
+    in progress is safe.
+
+  - IT FIXES ITS OWN SETUP. If the Python environment, the interface
+    packages, or the input/ output/ projects/ folders are missing, it
+    creates them before starting. On a brand-new copy of this folder that
+    first launch takes a couple of minutes; every launch after that is a
+    few seconds.
+
+  - IT CANNOT INSTALL HOMEBREW. If it stops and tells you ffmpeg or
+    Node.js is missing, do STEP 1 below once, then double-click again.
+
+Prefer typing commands yourself? The by-hand version is STEP 2 through
+STEP 5 below, and it still works exactly as before.
+
+
+THE ONE-TIME INSTALL
+-----------------------
+
+Only needed once per Mac. Two ways -- pick one:
 
     OPTION A -- let Claude do it for you (below). Fastest, and it
                 checks its own work.
     OPTION B -- do it by hand, STEP 0 onward. No extra tools needed.
+
+Either way, once it is done you launch the app by double-clicking
+"start.command" from then on.
 
 
 OPTION A: INSTALL WITH CLAUDE (THE EASY WAY)
@@ -66,8 +125,9 @@ That is the whole installation. Nothing else to type.
 Two things worth knowing:
 
   - The servers are not permanent. They stop when you restart the Mac
-    or close the Terminal. To start them again later, either run the
-    STEP 3 and STEP 4 commands below, or ask Claude:
+    or close the Terminal. You do not need Claude to start them again:
+    from now on, just double-click "start.command" (see LAUNCHING THE
+    APP above). Asking Claude still works if you'd rather:
 
         Start the GenAI Editor servers -- see agentic_installation.MD
         Phase 5.
@@ -230,14 +290,18 @@ stop it. It's safe to close both windows after that.
 THE NEXT TIME YOU WANT TO USE THE APP
 ----------------------------------------
 
-You don't need to repeat Step 1, or the "FIRST TIME ONLY" commands in
-Step 3. Just do Steps 2 through 5 again: two Terminal windows, run the
-Step 3 commands in one (you can skip the "pip install" line after the
-first time), run the Step 4 commands in the other (you can skip
-"npm install" after the first time), then open the browser address from
-Step 5.
+Double-click "start.command". That's it -- see LAUNCHING THE APP near the
+top of this file.
 
-If you installed with Claude (OPTION A), you can also just ask it:
+The install steps never need repeating: not STEP 1, and not the "FIRST
+TIME ONLY" commands in STEP 3.
+
+If you would rather keep doing it by hand, repeat STEP 2 through STEP 5 --
+two Terminal windows, the STEP 3 commands in one (skip the "pip install"
+line after the first time), the STEP 4 commands in the other (skip
+"npm install" after the first time), then open the address from STEP 5.
+
+And if you have Claude Code, you can always just ask:
 
     Start the GenAI Editor servers -- see agentic_installation.MD
     Phase 5.
@@ -257,6 +321,27 @@ projects/  Saved project files, so you can close the app and pick up
 
 TROUBLESHOOTING
 -------------------
+
+Double-clicking "start.command" does nothing, or macOS warns about an
+unidentified developer
+    macOS blocks scripts that came from a download. Right-click the file,
+    choose Open, then click Open in the dialog. Once only.
+
+Double-clicking "start.command" opens it in a text editor instead of
+running it
+    The file lost its permission to run (this happens when a project is
+    copied around). Fix it once, in Terminal:
+        chmod +x [PROJECT FOLDER]/start.command
+    Then double-click again.
+
+"start.command" says ffmpeg or Node.js is missing
+    It can install the app's own pieces but not the system tools. Do
+    STEP 1 once, then double-click it again.
+
+"start.command" says a server never answered
+    Look at the Terminal window it opened for that half -- backend or
+    frontend -- and read the error there. That window is left open on
+    purpose so the message is not lost.
 
 "Address already in use" when starting the app
     Something is already using that spot on your computer. If the old

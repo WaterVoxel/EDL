@@ -20,7 +20,7 @@ A local, macOS-only, EDL-style video editor: Flask + ffmpeg backend (`app.py`, `
 
 ## Install / setup
 
-- [agentic_installation.MD](agentic_installation.MD) (root) — read when asked to install, set up, or repair this app on a machine: dependency install, runtime directories, both servers, and the acceptance gate (`127.0.0.1:5001` + `127.0.0.1:5173` both serving). `README.txt` OPTION A points users here. For a routine restart of an already-installed app, use the **run-app** skill instead.
+- [agentic_installation.MD](agentic_installation.MD) (root) — read when asked to install, set up, or repair this app on a machine: dependency install, runtime directories, both servers, and the acceptance gate (`127.0.0.1:5001` + `127.0.0.1:5173` both serving). `README.txt` OPTION A points users here. For a routine restart of an already-installed app, use the **run-app** skill instead. `start.command` (root) is the human equivalent of that skill — a double-clickable launcher that repairs setup, opens a Terminal window per server, reuses anything already running, and opens the browser; keep it in step with the skill.
 
 ## Skills (.claude/skills/)
 

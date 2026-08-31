@@ -15,6 +15,35 @@ the day the version file appeared. There are no tags for them and never will be 
 `v0.25.0` is the first real tag. Treat the older entries as a history, not a
 download list.
 
+## 0.58.0 — 2026-08-31
+
+**You can start the app by double-clicking it now.** A new `start.command` sits next to
+`README.txt`; double-click it in Finder and it opens one Terminal window for the backend and
+one for the interface, waits until both are actually answering, and opens the editor in your
+browser. Stopping it is unchanged — Ctrl+C in each window, or close them.
+
+It checks its own footing before it starts anything. If the Python environment, the frontend
+packages, or the `input/` `output/` `projects/` folders are missing it creates them, so the
+file also works on a fresh copy of the project (that first run takes a couple of minutes).
+If ffmpeg or Node is missing it stops and says which one and how to install it, rather than
+failing halfway through. It also quietly re-syncs the version number if `VERSION` and
+`frontend/package.json` have drifted, which otherwise stops the interface from starting at all.
+
+**It never restarts something that is already running.** If a backend is already up on port
+5001 it is left alone and reused — a render in progress is safe — and the same goes for an
+interface already on 5173. If port 5173 happens to be taken by something else, it notices that
+the interface landed on 5174 and opens that address instead of the wrong one.
+
+macOS may block the file the first time if the project arrived as a download: right-click it,
+choose Open, then Open again in the dialog.
+
+`README.txt` now leads with the double-click. A banner at the top says how to launch the app,
+a *LAUNCHING THE APP* section covers the details, and the install steps have been gathered
+under *THE ONE-TIME INSTALL* so it is obvious they happen once and never again. Troubleshooting
+gained four launcher entries — the download block, the file opening in a text editor because it
+lost its execute permission, the missing-Homebrew stop, and where to read a server's error. The
+manual two-window instructions are unchanged and still there for anyone who prefers them.
+
 ## 0.57.1 — 2026-08-31
 
 The word **MODE** is gone from the top left, and the version number sits in its place —
