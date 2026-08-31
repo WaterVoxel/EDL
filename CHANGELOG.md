@@ -17,6 +17,13 @@ download list.
 
 ## 0.58.0 — 2026-08-31
 
+**The Project Library can be searched and sorted.** It now has the same filter strip the Media
+Bin and the Export Bin have, across the top of the list: type to narrow it by name, switch
+between Name and Date, and flip the arrow for ascending or descending. It still opens on newest
+first, exactly as before, so nothing changes unless you touch it. Once a search has emptied the
+list it says so rather than looking broken, and deleting a project no longer throws the list
+back to newest-first — it stays in the order you chose.
+
 **You can start the app by double-clicking it now.** A new `start.command` sits next to
 `README.txt`; double-click it in Finder and it opens one Terminal window for the backend and
 one for the interface, waits until both are actually answering, and opens the editor in your

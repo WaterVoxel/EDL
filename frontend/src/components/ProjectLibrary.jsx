@@ -1,10 +1,22 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { listProjects, loadProject, deleteProject } from '../api'
+import { filterFiles, sortFiles } from '../fileList'
+import SortFilterBar from './SortFilterBar'
+
+// Projects can't be favorited, but sortFiles takes a favorites Set to float
+// them to the top. One frozen empty Set rather than a fresh `new Set()` per
+// render, so the memo below isn't invalidated on every keystroke.
+const NO_FAVORITES = new Set()
 
 export default function ProjectLibrary({ onOpen, onClose }) {
   const [projects, setProjects] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  // Same defaults as the Export Bin: newest first, which is what this dialog
+  // did unconditionally before the bar existed.
+  const [query, setQuery] = useState('')
+  const [sortBy, setSortBy] = useState('date')
+  const [sortDir, setSortDir] = useState('desc')
 
   // setLoading(false) lived inside the .then, so a failed listing left the dialog
   // reading "Loading…" forever with the error state never set — the library
@@ -13,7 +25,9 @@ export default function ProjectLibrary({ onOpen, onClose }) {
   function refresh() {
     setLoading(true)
     listProjects().then(items => {
-      setProjects([...items].sort((a, b) => b.modified - a.modified))
+      // Stored unsorted — ordering is the sort bar's job now, so that a
+      // refresh (after a delete) can't fight the order the user picked.
+      setProjects(items)
       setLoading(false)
     }).catch(e => {
       setError(e.message)
@@ -22,6 +36,14 @@ export default function ProjectLibrary({ onOpen, onClose }) {
   }
 
   useEffect(() => { refresh() }, [])
+
+  // `filterFiles` + `sortFiles` are the same two helpers the Media Bin and the
+  // Export Bin sort with — a project entry is `{name, modified}`, the shape
+  // they already expect, so the three lists can't drift in behaviour.
+  const visible = useMemo(
+    () => sortFiles(filterFiles(projects, query), NO_FAVORITES, sortBy, sortDir),
+    [projects, query, sortBy, sortDir],
+  )
 
   // The try/catch is the backstop for a reply that is not JSON at all: r.json()
   // REJECTS on one, and with nothing catching it the click did literally nothing
@@ -63,33 +85,51 @@ export default function ProjectLibrary({ onOpen, onClose }) {
 
         {error && <p className="text-[10px] text-red-400">{error}</p>}
 
-        <ul className="flex-1 overflow-y-auto divide-y divide-neutral-800 border border-neutral-800 rounded">
-          {loading ? (
-            <li className="px-3 py-3 text-[11px] text-neutral-600 text-center">Loading…</li>
-          ) : projects.length === 0 ? (
-            <li className="px-3 py-3 text-[11px] text-neutral-600 text-center">
-              No saved projects yet — press Save to add the current timeline here.
-            </li>
-          ) : (
-            projects.map(p => (
-              <li key={p.name} className="flex items-center gap-2 px-3 py-1.5 hover:bg-neutral-800/70 group">
-                <button
-                  onClick={() => handleOpen(p.name)}
-                  className="flex-1 min-w-0 text-left"
-                  title="Open this project"
-                >
-                  <div className="text-[11px] text-neutral-200 truncate">{p.name}</div>
-                  <div className="text-[9px] text-neutral-500">{new Date(p.modified * 1000).toLocaleString()}</div>
-                </button>
-                <button
-                  onClick={() => handleDelete(p.name)}
-                  title="Delete project"
-                  className="shrink-0 w-4 h-4 flex items-center justify-center rounded text-neutral-600 hover:text-white hover:bg-red-600 text-[10px] opacity-0 group-hover:opacity-100"
-                >×</button>
-              </li>
-            ))
+        <div className="border border-neutral-800 rounded flex-1 min-h-0 flex flex-col">
+          {/* Hidden while loading and while there is nothing saved at all — a
+              filter over an empty list is just a control that can't do
+              anything. It stays put once a filter has emptied the list, so
+              there is always a way to clear the query. */}
+          {!loading && projects.length > 0 && (
+            <SortFilterBar
+              query={query} onQueryChange={setQuery}
+              sortBy={sortBy} onSortByChange={setSortBy}
+              sortDir={sortDir} onSortDirChange={setSortDir}
+            />
           )}
-        </ul>
+
+          <ul className="flex-1 overflow-y-auto divide-y divide-neutral-800">
+            {loading ? (
+              <li className="px-3 py-3 text-[11px] text-neutral-600 text-center">Loading…</li>
+            ) : projects.length === 0 ? (
+              <li className="px-3 py-3 text-[11px] text-neutral-600 text-center">
+                No saved projects yet — press Save to add the current timeline here.
+              </li>
+            ) : visible.length === 0 ? (
+              <li className="px-3 py-3 text-[11px] text-neutral-600 text-center">
+                No project matches “{query}”.
+              </li>
+            ) : (
+              visible.map(p => (
+                <li key={p.name} className="flex items-center gap-2 px-3 py-1.5 hover:bg-neutral-800/70 group">
+                  <button
+                    onClick={() => handleOpen(p.name)}
+                    className="flex-1 min-w-0 text-left"
+                    title="Open this project"
+                  >
+                    <div className="text-[11px] text-neutral-200 truncate">{p.name}</div>
+                    <div className="text-[9px] text-neutral-500">{new Date(p.modified * 1000).toLocaleString()}</div>
+                  </button>
+                  <button
+                    onClick={() => handleDelete(p.name)}
+                    title="Delete project"
+                    className="shrink-0 w-4 h-4 flex items-center justify-center rounded text-neutral-600 hover:text-white hover:bg-red-600 text-[10px] opacity-0 group-hover:opacity-100"
+                  >×</button>
+                </li>
+              ))
+            )}
+          </ul>
+        </div>
       </div>
     </div>
   )
