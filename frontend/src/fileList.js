@@ -157,11 +157,11 @@ export function filterByTrack(files, track, tags) {
 }
 
 // ---------------------------------------------------------------------------
-// Media Bin folders
+// Bin folders (Media Bin over input/, Export Bin over output/)
 // ---------------------------------------------------------------------------
-// A bin folder is a VIEW over input/, not a directory on disk. The file stays
-// exactly where it is and keeps its filename, so moving it between folders
-// changes nothing a clip depends on.
+// A bin folder is a VIEW over the directory, not a directory on disk. The file
+// stays exactly where it is and keeps its filename, so moving it between
+// folders changes nothing a clip depends on.
 //
 // That is the whole reason it works this way. A clip records its source as a
 // bare filename (`sourceName`), so a real subdirectory would turn `cam.mp4`
@@ -187,7 +187,20 @@ export function filterByTrack(files, track, tags) {
 // The pre-nesting shape stored the member array directly ({ [name]: [file] }).
 // loadBinFolders still reads it and treats those folders as top-level, so an
 // existing bin keeps its folders across the upgrade with nothing to migrate.
+//
+// `scope` is which bin's folders these are — 'input' for the Media Bin, 'output'
+// for the Export Bin — and it only ever picks the storage key. The two bins hold
+// completely separate trees for the same reason favorites do (storageKey above):
+// the same filename can exist in both directories and means a different file in
+// each. It defaults to 'input' throughout, and 'input' keeps the original
+// un-namespaced key, so an existing bin's folders survive with nothing to
+// migrate. Every function below is otherwise scope-blind: it takes the tree it
+// is operating on as an argument, exactly as before.
 const BIN_FOLDERS_KEY = 'nara-bin-folders'
+
+function foldersKey(scope) {
+  return scope === 'input' ? BIN_FOLDERS_KEY : `${BIN_FOLDERS_KEY}-${scope}`
+}
 
 export const DEFAULT_FOLDER_NAME = 'New Folder'
 
@@ -205,9 +218,9 @@ export function isDescendantFolder(candidate, ancestor, folders) {
   return false
 }
 
-export function loadBinFolders() {
+export function loadBinFolders(scope = 'input') {
   try {
-    const parsed = JSON.parse(localStorage.getItem(BIN_FOLDERS_KEY) || '{}')
+    const parsed = JSON.parse(localStorage.getItem(foldersKey(scope)) || '{}')
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
     // Shape-guard every entry: this value is hand-editable in devtools and a
     // malformed one must not take the whole bin down with it.
@@ -240,9 +253,9 @@ export function loadBinFolders() {
   }
 }
 
-function saveBinFolders(folders) {
+function saveBinFolders(folders, scope) {
   try {
-    localStorage.setItem(BIN_FOLDERS_KEY, JSON.stringify(folders))
+    localStorage.setItem(foldersKey(scope), JSON.stringify(folders))
   } catch {
     // localStorage unavailable — folders just won't persist.
   }
@@ -263,17 +276,17 @@ export function uniqueFolderName(base, folders) {
 // the caller needs in order to put it straight into rename mode. `parent` nests
 // the new folder inside an existing one; an unknown parent means top level
 // rather than an error, since the only way to pass one is a stale menu.
-export function createBinFolder(base, folders, parent = null) {
+export function createBinFolder(base, folders, parent = null, scope = 'input') {
   const name = uniqueFolderName(base || DEFAULT_FOLDER_NAME, folders)
   const next = { ...folders, [name]: { parent: parent && folders[parent] ? parent : null, files: [] } }
-  saveBinFolders(next)
+  saveBinFolders(next, scope)
   return { folders: next, name }
 }
 
 // Also returns the resulting name, which differs from `newName` when that name
 // was taken. Returns the same object unchanged (and writes nothing) for a no-op
 // rename, so the caller can skip a needless state update.
-export function renameBinFolder(oldName, newName, folders) {
+export function renameBinFolder(oldName, newName, folders, scope = 'input') {
   if (!(oldName in folders)) return { folders, name: oldName }
   const trimmed = (newName || '').trim()
   if (!trimmed || trimmed === oldName) return { folders, name: oldName }
@@ -289,7 +302,7 @@ export function renameBinFolder(oldName, newName, folders) {
     if (key === oldName) next[name] = patched
     else next[key] = patched
   }
-  saveBinFolders(next)
+  saveBinFolders(next, scope)
   return { folders: next, name }
 }
 
@@ -297,7 +310,7 @@ export function renameBinFolder(oldName, newName, folders) {
 // show one level up — in the removed folder's parent, or at the top level when
 // it had none. Its subfolders move up with them, keeping their own contents:
 // removing a level should not scatter a three-deep branch across the bin.
-export function deleteBinFolder(name, folders) {
+export function deleteBinFolder(name, folders, scope = 'input') {
   if (!(name in folders)) return folders
   const up = folders[name].parent ?? null
   const next = {}
@@ -308,7 +321,7 @@ export function deleteBinFolder(name, folders) {
   // Files land in the parent by being listed there. At the top level there is no
   // entry to list them in — being in no folder IS the top level.
   if (up != null && next[up]) next[up] = { ...next[up], files: [...next[up].files, ...folders[name].files] }
-  saveBinFolders(next)
+  saveBinFolders(next, scope)
   return next
 }
 
@@ -316,7 +329,7 @@ export function deleteBinFolder(name, folders) {
 // it's null, in one write. Stripping the files out of every folder first is what
 // guarantees each can only ever be in one — otherwise a file would render as two
 // rows sharing a React key.
-export function moveFilesToBinFolder(fileNames, folderName, folders) {
+export function moveFilesToBinFolder(fileNames, folderName, folders, scope = 'input') {
   // A folder that vanished mid-drag.
   if (folderName != null && !(folderName in folders)) return folders
   // Files already where they are being dropped aren't a move; if that's all of
@@ -330,7 +343,7 @@ export function moveFilesToBinFolder(fileNames, folderName, folders) {
     next[key] = kept.length === entry.files.length ? entry : { ...entry, files: kept }
   }
   if (folderName != null) next[folderName] = { ...next[folderName], files: [...next[folderName].files, ...moving] }
-  saveBinFolders(next)
+  saveBinFolders(next, scope)
   return next
 }
 
@@ -338,14 +351,14 @@ export function moveFilesToBinFolder(fileNames, folderName, folders) {
 // the same object unchanged (and writes nothing) for anything that isn't a real
 // move, including the one that would corrupt the tree — dropping a folder into
 // its own descendant, which would cut that branch loose from the root.
-export function moveFolderToParent(name, parentName, folders) {
+export function moveFolderToParent(name, parentName, folders, scope = 'input') {
   if (!(name in folders)) return folders
   if (parentName != null && !(parentName in folders)) return folders
   if (parentName === name) return folders
   if ((folders[name].parent ?? null) === (parentName ?? null)) return folders
   if (parentName != null && isDescendantFolder(parentName, name, folders)) return folders
   const next = { ...folders, [name]: { ...folders[name], parent: parentName ?? null } }
-  saveBinFolders(next)
+  saveBinFolders(next, scope)
   return next
 }
 
@@ -359,12 +372,12 @@ export function folderOfFile(name, folders) {
 // A file renamed on disk has to keep its folder, exactly as renameFavorite and
 // renameTrackTag keep the ★ and the track tag — otherwise the file silently
 // jumps back to the top level.
-export function renameBinFolderFile(oldName, newName, folders) {
+export function renameBinFolderFile(oldName, newName, folders, scope = 'input') {
   const owner = folderOfFile(oldName, folders)
   if (!owner) return folders
   const entry = folders[owner]
   const next = { ...folders, [owner]: { ...entry, files: entry.files.map(m => (m === oldName ? newName : m)) } }
-  saveBinFolders(next)
+  saveBinFolders(next, scope)
   return next
 }
 
@@ -395,7 +408,11 @@ export function renameBinFolderFile(oldName, newName, folders) {
 // named: a brand-new folder is empty by definition, so creating one while a
 // filter is active would otherwise hide the very row whose name is waiting to be
 // typed — and hiding the parent it was created inside would hide it just as well.
-export function buildBinRows({ files, folders, favorites, query, trackFilter, trackTags, sortBy, sortDir, collapsed = new Set(), pinnedFolder = null }) {
+// `trackFilter`/`trackTags` default to the no-op pair (filterByTrack passes
+// everything through on 'all') because the Export Bin has no track tags at all —
+// a render isn't "used on V1" the way a source file is. Everything else here is
+// identical for both bins.
+export function buildBinRows({ files, folders, favorites, query, trackFilter = 'all', trackTags = {}, sortBy, sortDir, collapsed = new Set(), pinnedFolder = null }) {
   const filtering = Boolean(query) || trackFilter !== 'all'
   const matched = filterByTrack(filterFiles(files, query), trackFilter, trackTags)
   const arrange = list => sortFiles(list, favorites, sortBy, sortDir)

@@ -15,6 +15,36 @@ the day the version file appeared. There are no tags for them and never will be 
 `v0.25.0` is the first real tag. Treat the older entries as a history, not a
 download list.
 
+## 0.57.1 — 2026-08-31
+
+The word **MODE** is gone from the top left, and the version number sits in its place —
+`v0.57.1` now reads immediately after GENAI EDITOR, followed by the dropdown. The dropdown
+itself is unchanged and still switches the middle pane between Timeline, Agent, Reformat
+and Actions; it already named the pane it was showing, so the caption was saying it twice.
+Hovering the dropdown still explains what it does, and the version still turns amber with a
+⚠ when the page is running an older build than the server.
+
+## 0.57.0 — 2026-08-31
+
+**The Export Bin now has folders, exactly like the Media Bin.** The folder button in its
+header makes a folder and drops you straight into naming it; drag one render — or a
+folder — onto a folder to file it, drag it onto blank space to take it back out, and drop
+a folder onto another to nest it. Right-clicking a render, a folder, or the empty space
+below the list gives you the same menu the Media Bin does: rename, new folder, new folder
+inside, move out of folder, remove folder. Folders start closed and show how many files
+are inside, including anything in subfolders; searching forces them open so a match is
+never hidden inside a shut folder.
+
+As in the Media Bin, a folder is only a way of grouping the list — **nothing moves in
+`output/`**, so filing a render can't break a clip that uses it as its source, and
+renaming a render keeps it in its folder. The two bins keep separate folders: a folder you
+make in the Export Bin does not appear in the Media Bin, and the same filename in both is
+filed independently in each.
+
+The Media Bin's own folders are unchanged and keep the folders you already made. Under the
+hood both bins now run the same folder code, so from here a folder fix lands in both at
+once.
+
 ## 0.56.1 — 2026-08-28
 
 Fixed the batch render dialog: the **Suffix** field stuck out past the right edge of the

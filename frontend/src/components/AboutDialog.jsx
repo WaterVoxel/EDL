@@ -689,7 +689,7 @@ export default function AboutDialog({ onClose }) {
 
           <Section title="Agentic Assistant Editor">
             <p>
-              The chat panel (AGENT in the top bar's Mode menu) turns a plain-English request into an ffmpeg command using
+              The chat panel (AGENT in the top bar's pane dropdown) turns a plain-English request into an ffmpeg command using
               a local Claude Code CLI process, run non-interactively with no tool access of its own —
               it can only propose a command as structured text, never execute anything. On the first
               message of a conversation it's told which files exist in Media Bin/Export Bin and, if a

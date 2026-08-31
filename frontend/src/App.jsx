@@ -358,7 +358,7 @@ function AppInner() {
   }, [])
   // Timeline, the Agentic Assistant Editor, Reformat, and the Actions log
   // share one dock at the bottom of the center column — only one is visible at
-  // a time, picked by the top bar's Mode menu (the name is still `centerTab`:
+  // a time, picked by the top bar's pane menu (the name is still `centerTab`:
   // it is the dock's own state, and the menu is only the control that sets it).
   const [centerTab, setCenterTab] = useState('timeline')
   // The row above the dock is a SLOT: Timeline.jsx portals its action bar
@@ -1875,25 +1875,49 @@ function AppInner() {
             button on the right is now the only way in, and it looks like one. */}
         <div className="flex items-center gap-2">
           <span className="text-xs font-bold text-white tracking-tight">GENAI EDITOR</span>
-          {/* Mode: the center dock's pane switch, and the ONLY one — it replaced
-              a static "EDL mode" chip that was styled like a control and was not
+          {/* The center dock's pane switch, and the ONLY one — it replaced a
+              static "EDL mode" chip that was styled like a control and was not
               one, and then replaced the four-button tab bar that used to sit
-              above the dock, so the place that names the mode is the place you
-              change it. `centerTab` is still the state everything reads; this is
-              now its only writer besides the tour. Values are centerTab's own,
-              not display strings — 'assistant' shows as Agent, which is how that
-              pane has always been labelled.
+              above the dock. It carried a "Mode" caption until 0.57.1; the
+              dropdown names the pane it is showing, so the caption was a word
+              spent saying what the control already said, and the version number
+              now has that spot. `centerTab` is still the state everything reads;
+              this is now its only writer besides the tour. Values are
+              centerTab's own, not display strings — 'assistant' shows as Agent,
+              which is how that pane has always been labelled. */}
+          {/* The version sits where the word "Mode" used to, so the top-left is
+              one product identity (title + version) followed by the control,
+              rather than a caption for a dropdown that already says what it is.
+              A plain <div>, not a <label>, precisely because there is no longer
+              any label text — hence the select's aria-label, which is what now
+              names it; its `title` is the visible explanation.
+              Quiet metadata, not a label: 9px and muted, and deliberately with
+              no border box of its own — an outlined pill here would read as a
+              second control. This is the number a bug report is identified by,
+              so it is always visible rather than buried in the About dialog (it
+              is in there too). `APP_VERSION` comes from vite.config by way of
+              the repo-root VERSION file; never hardcode it here.
               `data-tour="reformat"` lives here because the tour's Reformat step
               used to spotlight that tab button; this control is its anchor now,
               and like the tab bar it is visible whichever pane is up. */}
-          <label
-            data-tour="reformat"
-            className="flex items-center gap-1 text-[9px] uppercase tracking-wide text-neutral-500"
-          >
-            Mode
+          <div data-tour="reformat" className="flex items-center gap-1.5">
+            <span
+              className={`text-[9px] font-mono ${versionMismatch ? 'text-amber-500' : 'text-neutral-600'}`}
+              title={versionMismatch
+                // Reachable and easy to miss: `npm run dev` keeps serving the
+                // bundle it built while the Flask reloader picks a bumped VERSION
+                // up immediately, so the two genuinely disagree until the page is
+                // reloaded. Worth saying out loud — a stale bundle is the state in
+                // which a bug report's version number lies.
+                ? `Version mismatch — this page was built at ${APP_VERSION} but the backend is running ${backendVersion}. Reload the page; if it persists, restart the Vite dev server.`
+                : `GenAI Editor ${APP_VERSION}${backendVersion ? ' — frontend and backend agree' : ''}`}
+            >
+              v{APP_VERSION}{versionMismatch ? ' ⚠' : ''}
+            </span>
             <select
               value={centerTab}
               onChange={e => setCenterTab(e.target.value)}
+              aria-label="Center pane"
               title="Which pane the center dock shows — Timeline, Agent, Reformat or Actions"
               className="text-[10px] rounded bg-neutral-950 border border-neutral-700 text-neutral-300 px-1 py-0.5"
             >
@@ -1902,27 +1926,7 @@ function AppInner() {
               <option value="reformat">Reformat</option>
               <option value="actions">Actions</option>
             </select>
-          </label>
-          {/* Quiet metadata, not a label: 9px and muted like the Mode label
-              beside it, but deliberately with no border box of its own — an
-              outlined pill here would read as a second control. This is
-              the number a bug report is identified by, so it is always visible
-              rather than buried in the About dialog (it is in there too).
-              `APP_VERSION` comes from vite.config by way of the repo-root
-              VERSION file; never hardcode it here. */}
-          <span
-            className={`text-[9px] font-mono ${versionMismatch ? 'text-amber-500' : 'text-neutral-600'}`}
-            title={versionMismatch
-              // Reachable and easy to miss: `npm run dev` keeps serving the
-              // bundle it built while the Flask reloader picks a bumped VERSION
-              // up immediately, so the two genuinely disagree until the page is
-              // reloaded. Worth saying out loud — a stale bundle is the state in
-              // which a bug report's version number lies.
-              ? `Version mismatch — this page was built at ${APP_VERSION} but the backend is running ${backendVersion}. Reload the page; if it persists, restart the Vite dev server.`
-              : `GenAI Editor ${APP_VERSION}${backendVersion ? ' — frontend and backend agree' : ''}`}
-          >
-            v{APP_VERSION}{versionMismatch ? ' ⚠' : ''}
-          </span>
+          </div>
         </div>
         <div data-tour="project" className="flex items-center gap-1.5">
           {projectName && (
@@ -2105,7 +2109,7 @@ function AppInner() {
           </div>
 
           {/* The dock's pane switch used to be a four-button tab bar in this
-              spot. It is now the Mode menu in the top bar and nowhere else —
+              spot. It is now the pane menu in the top bar and nowhere else —
               one control, one place. Nothing else moved: the panes below still
               key off `centerTab`, and the row under this comment is still the
               Timeline's portal slot. */}
@@ -2132,7 +2136,7 @@ function AppInner() {
           />
 
           {/* Timeline / AGENT / Actions pane content — only one visible at
-              a time, per the top bar's Mode menu. Timeline sets this wrapper's
+              a time, per the top bar's pane menu. Timeline sets this wrapper's
               natural content height (shrink-0, unconstrained); switching
               to AGENT/Actions pins the wrapper to that SAME height
               (centerDockHeight, measured off Timeline via the ResizeObserver

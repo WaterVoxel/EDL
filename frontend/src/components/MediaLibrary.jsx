@@ -4,13 +4,9 @@ import { useMedia } from '../context/MediaContext'
 import ClearButton from './ClearButton'
 import Dropzone from './Dropzone'
 import SortFilterBar from './SortFilterBar'
-import {
-  loadFavorites, toggleFavorite, renameFavorite,
-  loadBinFolders, createBinFolder, renameBinFolder, deleteBinFolder,
-  moveFilesToBinFolder, moveFolderToParent, isDescendantFolder,
-  folderOfFile, renameBinFolderFile, buildBinRows,
-  DEFAULT_FOLDER_NAME,
-} from '../fileList'
+import BinFolderRow, { FolderIcon, rowPad } from './BinFolderRow'
+import useBinFolders from '../hooks/useBinFolders'
+import { loadFavorites, toggleFavorite, renameFavorite } from '../fileList'
 
 const TRACK_FILTERS = [
   { key: 'all', label: 'All' },
@@ -18,38 +14,6 @@ const TRACK_FILTERS = [
   { key: 'v2', label: 'V2' },
   { key: 'a1', label: 'A1' },
 ]
-
-// Stroked 24-grid icons in the house style (see FrameGrabButtons) rather than a
-// glyph, because ▶ and ★ next to a 📁 emoji would read as three different eras.
-function FolderIcon({ plus = false }) {
-  return (
-    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M3.5 6.5a1.8 1.8 0 0 1 1.8-1.8h3.3a1.8 1.8 0 0 1 1.4.7l1.1 1.4h7.2a1.8 1.8 0 0 1 1.8 1.8v8.7a1.8 1.8 0 0 1-1.8 1.8H5.3a1.8 1.8 0 0 1-1.8-1.8V6.5Z" />
-      {plus && <path d="M12 10.8v5" />}
-      {plus && <path d="M9.5 13.3h5" />}
-    </svg>
-  )
-}
-
-// Left padding per nesting level, in px, applied as an inline style because the
-// depth is computed — Tailwind can't generate a class for a runtime value. 8px is
-// the `px-2` every row used before folders nested, so a top-level row is
-// unchanged and each level below steps in by 14.
-const ROW_PAD = 8
-const INDENT_PX = 14
-const rowPad = depth => ROW_PAD + INDENT_PX * depth
-
-function ChevronIcon({ open }) {
-  return (
-    <svg
-      viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor"
-      strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"
-      className={`transition-transform ${open ? 'rotate-90' : ''}`}
-    >
-      <path d="M9 5.5l7 6.5-7 6.5" />
-    </svg>
-  )
-}
 
 // `inUseNames` is the set of source filenames the timeline currently points at
 // (V1 + V2 clips and the A1 bed), passed down from App.jsx because it owns
@@ -87,39 +51,19 @@ export default function MediaLibrary({ files, trackTags = {}, inUseNames = null,
   // Right-click context menu: {kind: 'file'|'folder'|'empty', name, x, y} in
   // viewport coords, or null. `name` is null for 'empty'.
   const [menu, setMenu] = useState(null)
-  // Bin folders: { [folderName]: { parent, files: [filename] } }. A grouping
-  // over input/, not directories on disk, and nestable via `parent` — see
-  // fileList.js for why that distinction matters.
-  const [folders, setFolders] = useState(() => loadBinFolders())
-  // Which folders are shut. Collapse is view state, not a preference: unlike
-  // favorites and the folders themselves it isn't persisted. Seeded with EVERY
-  // folder, because closed is the default — the bin opens as a short list of
-  // folder names rather than every file at once, and you open what you want.
-  // The panel stays mounted for the session, so a folder you open stays open
-  // until a reload.
-  const [collapsed, setCollapsed] = useState(() => new Set(Object.keys(folders)))
-  // The folder whose name is being edited inline, or null.
-  const [editingFolder, setEditingFolder] = useState(null)
-  // Escape has to cancel an edit, but removing the focused input also blurs it,
-  // and blur is what commits. A ref (not state) so the blur handler firing in
-  // the same tick sees the flag.
-  const cancelEditRef = useRef(false)
-  // What the in-flight internal drag is carrying: filenames (one, or the whole
-  // selection), or a single folder with everything inside it. Never both. Either
-  // being set doubles as the "this is our drag, not an OS file drop" test — an
-  // internal drag carries no dataTransfer items, so there is nothing on the
-  // event to read.
-  const [dragFiles, setDragFiles] = useState([])
-  const [dragFolder, setDragFolder] = useState(null)
-  // Folder under the cursor mid-drag; null means the top level.
-  const [dropFolder, setDropFolder] = useState(null)
-  const dragging = dragFiles.length > 0 || dragFolder !== null
 
-  function endDrag() {
-    setDragFiles([])
-    setDragFolder(null)
-    setDropFolder(null)
-  }
+  // Everything folder-related — the persisted tree over input/, collapse state,
+  // inline rename, the drag in flight, and the row layout — lives in the hook the
+  // Export Bin shares. This panel keeps only its file rows and its own menu.
+  // `actingOn` is what makes a folder drag carry a whole multi-selection.
+  const bin = useBinFolders({
+    scope: 'input',
+    dirLabel: 'input/',
+    files, favorites, query, sortBy, sortDir, trackFilter, trackTags,
+    actingOn: name => actingOn(name),
+    onDragCollapse: name => { setSelection(new Set([name])); rangeAnchorRef.current = name },
+  })
+  const { rows, visibleFiles: visible } = bin
 
   useEffect(() => { setFavorites(loadFavorites('input')) }, [])
 
@@ -195,33 +139,6 @@ export default function MediaLibrary({ files, trackTags = {}, inUseNames = null,
     setFavorites(toggleFavorite('input', name, favorites))
   }
 
-  // One flat row list — folder rows and file rows interleaved in display order.
-  // All of the sorting and both filters still happen in fileList, applied within
-  // each folder as well as at the top level.
-  const rows = buildBinRows({ files, folders, favorites, query, trackFilter, trackTags, sortBy, sortDir, collapsed, pinnedFolder: editingFolder })
-  // The files the arrow keys can reach: rows only, in the order shown, so the
-  // walk skips folder rows and anything inside a collapsed folder.
-  const visible = rows.filter(r => r.type === 'file').map(r => r.file)
-  // Highlight the list as a drop target only when dropping there would actually
-  // move something — dragging a top-level file around the top level shouldn't
-  // light anything up.
-  const rootDropActive = dropFolder === null && (dragFolder !== null
-    ? (folders[dragFolder]?.parent ?? null) !== null
-    : dragFiles.some(n => folderOfFile(n, folders) !== null))
-  // Whether the drag in flight may land in `folder` (null = the top level). Only
-  // a folder drag can be refused: into itself, or into its own descendant, which
-  // would cut that branch off from the root.
-  function canDropInto(folder) {
-    if (!dragging) return false
-    if (dragFolder === null) return true
-    return folder !== dragFolder && !(folder !== null && isDescendantFolder(folder, dragFolder, folders))
-  }
-  // Mirrors buildBinRows' own `filtering` test. A filter forces every folder
-  // open — a match inside a shut folder would be unreachable — which means the
-  // collapse control genuinely can't act, so it's shown disabled rather than
-  // left as a button that does nothing.
-  const foldersForcedOpen = Boolean(query) || trackFilter !== 'all'
-
   // Move the selection up/down through the currently-visible (filtered +
   // sorted) list and preview the newly-selected file. Wraps at neither end;
   // if nothing is selected yet, ArrowDown picks the first, ArrowUp the last.
@@ -268,112 +185,17 @@ export default function MediaLibrary({ files, trackTags = {}, inUseNames = null,
   }
 
   // --- Folders ------------------------------------------------------------
+  // The mechanics are the hook's (shared with the Export Bin). These two wrappers
+  // exist only to shut the context menu first, since the menu is this panel's.
 
-  function setFolderOpen(name, open) {
-    setCollapsed(prev => {
-      if (open === !prev.has(name)) return prev
-      const next = new Set(prev)
-      if (open) next.delete(name)
-      else next.add(name)
-      return next
-    })
-  }
-
-  // `parent` nests the new folder inside an existing one ("New folder inside" on
-  // a folder's menu); null puts it at the top level.
   function handleNewFolder(parent = null) {
     setMenu(null)
-    const { folders: next, name } = createBinFolder(DEFAULT_FOLDER_NAME, folders, parent)
-    setFolders(next)
-    // Open (a folder of this name may have been collapsed, removed and remade)
-    // and go straight into rename mode, so the folder gets named in the same
-    // gesture that created it rather than needing a second click. The parent has
-    // to open too, or the row waiting to be named is inside something shut.
-    if (parent) setFolderOpen(parent, true)
-    setFolderOpen(name, true)
-    setEditingFolder(name)
-  }
-
-  function commitFolderName(oldName, value) {
-    setEditingFolder(null)
-    if (cancelEditRef.current) { cancelEditRef.current = false; return }
-    const { folders: next, name } = renameBinFolder(oldName, value, folders)
-    if (next === folders) return
-    setFolders(next)
-    // Carry the collapse state across so a renamed folder doesn't spring open.
-    setCollapsed(prev => {
-      if (!prev.has(oldName)) return prev
-      const s = new Set(prev)
-      s.delete(oldName)
-      s.add(name)
-      return s
-    })
+    bin.newFolder(parent)
   }
 
   function handleRemoveFolder(name) {
     setMenu(null)
-    // Counted against what's actually in input/, not against the stored
-    // assignments — a file deleted from the bin leaves its assignment behind,
-    // and the confirm must say the same number the folder row shows.
-    const count = (folders[name]?.files || []).filter(n => files.some(f => f.name === n)).length
-    // Direct children only: those are the ones that re-parent. What's deeper
-    // moves with them, still inside them.
-    const subs = Object.keys(folders).filter(k => (folders[k].parent ?? null) === name).length
-    const up = folders[name]?.parent ?? null
-    const where = up ? `"${up}"` : 'the top level'
-    const moving = [
-      count > 0 && `its ${count} file${count === 1 ? '' : 's'}`,
-      subs > 0 && `its ${subs} subfolder${subs === 1 ? '' : 's'}`,
-    ].filter(Boolean).join(' and ')
-    // Nothing leaves input/ — only the grouping goes — so this doesn't warrant
-    // the same warning file Delete gets, just a heads-up when something's inside.
-    // Subfolders keep their own contents; they just move up a level with it.
-    if (moving && !window.confirm(`Remove the folder "${name}"? ${moving[0].toUpperCase()}${moving.slice(1)} move to ${where}. Nothing is deleted from input/.`)) return
-    setFolders(deleteBinFolder(name, folders))
-  }
-
-  // --- Dragging files and folders between folders --------------------------
-  // HTML5 drag events, following the timeline's clip reorder (TimelineClip.jsx)
-  // rather than conventions.md's pointer-listener idiom: this is a drag between
-  // list rows, which is what the native API is for, and the two need to look
-  // and feel the same.
-
-  // Grabbing a row that's part of a multi-selection drags the whole selection;
-  // grabbing anything else drags that row alone, and collapses the selection to
-  // it so what moves is exactly what's highlighted.
-  function handleFileDragStart(e, name, folder) {
-    e.dataTransfer.effectAllowed = 'move'
-    const names = actingOn(name)
-    if (names.length === 1) {
-      setSelection(new Set([name]))
-      rangeAnchorRef.current = name
-    }
-    setDragFiles(names)
-    setDropFolder(folder)
-  }
-
-  // `dragging` gates every handler so an OS file drop passing over the list is
-  // left entirely to Dropzone — we never preventDefault on someone else's drag.
-  // Not preventDefault-ing is also how a refused folder target (itself, or its
-  // own descendant) simply won't accept the drop.
-  function handleRowDragOver(e, folder) {
-    if (!canDropInto(folder)) return
-    e.preventDefault()
-    e.stopPropagation()
-    e.dataTransfer.dropEffect = 'move'
-    if (folder !== dropFolder) setDropFolder(folder)
-  }
-
-  function handleRowDrop(e, folder) {
-    if (!canDropInto(folder)) return
-    e.preventDefault()
-    e.stopPropagation()
-    if (dragFolder !== null) setFolders(moveFolderToParent(dragFolder, folder, folders))
-    else setFolders(moveFilesToBinFolder(dragFiles, folder, folders))
-    // Dropping into a collapsed folder would swallow what arrived with no sign
-    // it landed anywhere.
-    if (folder) setFolderOpen(folder, true)
-    endDrag()
+    bin.removeFolder(name)
   }
 
   async function handleShowDestination(name) {
@@ -406,7 +228,7 @@ export default function MediaLibrary({ files, trackTags = {}, inUseNames = null,
     // ★ and the bin folder belong to this component, the track tag to App.jsx
     // (onRenamed, which also refreshes the list from disk).
     setFavorites(renameFavorite('input', name, result.name, favorites))
-    setFolders(renameBinFolderFile(name, result.name, folders))
+    bin.carryRenamedFile(name, result.name)
     // The selection is keyed by filename too — a stale name would highlight
     // nothing and would make Delete act on a file that no longer exists.
     setSelection(prev => {
@@ -533,69 +355,19 @@ export default function MediaLibrary({ files, trackTags = {}, inUseNames = null,
           tabIndex={0}
           onKeyDown={handleKeyDown}
           onContextMenu={e => { e.preventDefault(); setMenu({ kind: 'empty', name: null, x: e.clientX, y: e.clientY }) }}
-          onDragOver={e => handleRowDragOver(e, null)}
-          onDrop={e => handleRowDrop(e, null)}
+          onDragOver={e => bin.handleRowDragOver(e, null)}
+          onDrop={e => bin.handleRowDrop(e, null)}
           className={`flex-1 min-h-0 overflow-y-auto divide-y divide-neutral-800 outline-none ${
-            rootDropActive ? 'ring-1 ring-inset ring-indigo-400' : 'focus:ring-1 focus:ring-inset focus:ring-indigo-700/50'
+            bin.rootDropActive ? 'ring-1 ring-inset ring-indigo-400' : 'focus:ring-1 focus:ring-inset focus:ring-indigo-700/50'
           }`}
         >
           {rows.map(row => row.type === 'folder' ? (
-            <li
+            <BinFolderRow
               key={`folder:${row.name}`}
+              row={row}
+              bin={bin}
               onContextMenu={e => { e.preventDefault(); e.stopPropagation(); setMenu({ kind: 'folder', name: row.name, x: e.clientX, y: e.clientY }) }}
-              // A folder drags whole, contents and subfolders with it. Not while
-              // its name is being edited, or the drag would steal the caret.
-              draggable={editingFolder !== row.name}
-              onDragStart={e => { e.dataTransfer.effectAllowed = 'move'; setDragFolder(row.name); setDropFolder(row.parent) }}
-              onDragEnd={endDrag}
-              onDragOver={e => handleRowDragOver(e, row.name)}
-              onDrop={e => handleRowDrop(e, row.name)}
-              style={{ paddingLeft: rowPad(row.depth) }}
-              className={`flex items-center gap-1.5 pr-2 py-1 text-[11px] ${
-                dragFolder === row.name ? 'opacity-40' : ''
-              } ${
-                dropFolder === row.name && canDropInto(row.name)
-                  ? 'bg-indigo-900/40 ring-1 ring-inset ring-indigo-400'
-                  : 'hover:bg-neutral-800/70'
-              }`}
-            >
-              <button
-                onClick={() => setFolderOpen(row.name, !row.open)}
-                disabled={foldersForcedOpen}
-                title={foldersForcedOpen ? 'Folders stay open while a filter is active' : row.open ? 'Collapse' : 'Expand'}
-                className="shrink-0 w-3 h-4 flex items-center justify-center text-neutral-500 enabled:hover:text-neutral-300 disabled:opacity-40"
-              ><ChevronIcon open={row.open} /></button>
-              <span className="shrink-0 text-neutral-500"><FolderIcon /></span>
-              {editingFolder === row.name ? (
-                /* Mounted straight into edit mode by handleNewFolder, so a new
-                   folder is named in one gesture. Enter blurs (blur commits),
-                   Escape cancels via the ref, and keystrokes are stopped here so
-                   Backspace never reaches the list's own key handler. */
-                <input
-                  autoFocus
-                  defaultValue={row.name}
-                  onFocus={e => e.target.select()}
-                  onKeyDown={e => {
-                    e.stopPropagation()
-                    if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur() }
-                    else if (e.key === 'Escape') { e.preventDefault(); cancelEditRef.current = true; setEditingFolder(null) }
-                  }}
-                  onBlur={e => commitFolderName(row.name, e.target.value)}
-                  className="flex-1 min-w-0 px-1 py-0 text-[9px] rounded bg-neutral-950 border border-indigo-500 text-neutral-200 outline-none"
-                />
-              ) : (
-                <button
-                  onClick={() => { if (!foldersForcedOpen) setFolderOpen(row.name, !row.open) }}
-                  onDoubleClick={() => setEditingFolder(row.name)}
-                  title={foldersForcedOpen ? 'Double-click to rename' : 'Click to open or close, double-click to rename'}
-                  className="flex-1 min-w-0 text-left"
-                ><span className="block truncate text-[9px] text-neutral-300">{row.name}</span></button>
-              )}
-              <span
-                title={`${row.count} file${row.count === 1 ? '' : 's'} inside, including any in subfolders`}
-                className="shrink-0 text-[9px] text-neutral-600"
-              >{row.count}</span>
-            </li>
+            />
           ) : (
             <li
               key={`file:${row.folder ?? ''}/${row.file.name}`}
@@ -603,15 +375,15 @@ export default function MediaLibrary({ files, trackTags = {}, inUseNames = null,
               // Drag to file away; a file row reports its own container, so
               // dropping onto a file inside a folder means that folder.
               draggable
-              onDragStart={e => handleFileDragStart(e, row.file.name, row.folder)}
+              onDragStart={e => bin.handleFileDragStart(e, row.file.name, row.folder)}
               // Fires even on an abandoned drag (Esc, or a drop outside the
               // list), which is what clears the indicator.
-              onDragEnd={endDrag}
-              onDragOver={e => handleRowDragOver(e, row.folder)}
-              onDrop={e => handleRowDrop(e, row.folder)}
+              onDragEnd={bin.endDrag}
+              onDragOver={e => bin.handleRowDragOver(e, row.folder)}
+              onDrop={e => bin.handleRowDrop(e, row.folder)}
               style={{ paddingLeft: rowPad(row.depth) }}
               className={`flex items-center justify-between gap-1.5 pr-2 py-1 text-[11px] ${
-                dragFiles.includes(row.file.name) ? 'opacity-40' : ''
+                bin.dragFiles.includes(row.file.name) ? 'opacity-40' : ''
               } ${
                 // Selection membership alone drives the highlight — the anchor is
                 // in it except when a Cmd-click has just taken it out, and
@@ -677,9 +449,9 @@ export default function MediaLibrary({ files, trackTags = {}, inUseNames = null,
               {/* The keyboard-and-menu way out of a folder, so a mis-drop doesn't
                   need a second precise drag to undo. Acts on the whole selection
                   when the clicked row is part of it, exactly as a drag would. */}
-              {actingOn(menu.name).some(n => folderOfFile(n, folders)) && (
+              {actingOn(menu.name).some(n => bin.fileFolder(n)) && (
                 <button
-                  onClick={() => { setMenu(null); setFolders(moveFilesToBinFolder(actingOn(menu.name), null, folders)) }}
+                  onClick={() => { setMenu(null); bin.moveFiles(actingOn(menu.name), null) }}
                   title="Move back to the top level of the bin"
                   className="block w-full text-left px-3 py-1 text-neutral-200 hover:bg-neutral-800"
                 >{actingOn(menu.name).length > 1 ? `Move ${actingOn(menu.name).length} files out of folder` : 'Move out of folder'}</button>
@@ -689,7 +461,7 @@ export default function MediaLibrary({ files, trackTags = {}, inUseNames = null,
           {menu.kind === 'folder' && (
             <>
               <button
-                onClick={() => { setMenu(null); setEditingFolder(menu.name) }}
+                onClick={() => { setMenu(null); bin.setEditingFolder(menu.name) }}
                 title="Rename this folder"
                 className="block w-full text-left px-3 py-1 text-neutral-200 hover:bg-neutral-800"
               >Rename folder</button>
