@@ -96,6 +96,11 @@ export const saveProject = (name, project, overwrite = false) =>
   postJSON('/api/projects', { name, project, overwrite })
 export const loadProject = (name) => apiFetch(`/api/projects/${encodeURIComponent(name)}`)
 export const deleteProject = (name) => apiFetch(`/api/projects/${encodeURIComponent(name)}`, { method: 'DELETE' })
+// `newName` may be given with or without `.nara` — the server supplies the
+// extension, same as renameFile below. It refuses an existing target (409)
+// rather than replacing it, so the reply's `error` is the thing to surface.
+export const renameProject = (name, newName) =>
+  postJSON(`/api/projects/${encodeURIComponent(name)}/rename`, { newName })
 export const getExportSettings = () => apiFetch('/api/export_settings')
 export const setExportSettings = (settings) => postJSON('/api/export_settings', settings)
 export const browseDirectory = (initial) => postJSON('/api/browse_directory', { initial })

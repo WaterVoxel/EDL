@@ -82,9 +82,9 @@ export default function RenderDialog({ defaultName, showNoAudioOption = false, s
                 className="accent-indigo-500 mt-0.5"
               />
               <span>
-                <span className="text-neutral-300">V1 name</span> — name each file after the clip
-                it renders. The typed name then only supplies the extension, and cuts that share a
-                clip name are numbered in cut order.
+                <span className="text-neutral-300">V1 name</span> — name each file after the V1 clip
+                it was cut against, whichever track is being rendered. The typed name then only
+                supplies the extension, and cuts that share a V1 name are numbered in cut order.
               </span>
             </label>
             {/* `min-w-0` on the LABELS and `w-full` on the inputs are what keep

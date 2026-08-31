@@ -1,17 +1,19 @@
 import { useState, useEffect, useMemo } from 'react'
-import { listProjects, loadProject, deleteProject } from '../api'
+import { listProjects, loadProject, deleteProject, renameProject } from '../api'
 import { filterFiles, sortFiles } from '../fileList'
 import SortFilterBar from './SortFilterBar'
+import ContextMenu from './ContextMenu'
 
 // Projects can't be favorited, but sortFiles takes a favorites Set to float
 // them to the top. One frozen empty Set rather than a fresh `new Set()` per
 // render, so the memo below isn't invalidated on every keystroke.
 const NO_FAVORITES = new Set()
 
-export default function ProjectLibrary({ onOpen, onClose }) {
+export default function ProjectLibrary({ onOpen, onRenamed, onClose }) {
   const [projects, setProjects] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  const [contextMenu, setContextMenu] = useState(null)
   // Same defaults as the Export Bin: newest first, which is what this dialog
   // did unconditionally before the bar existed.
   const [query, setQuery] = useState('')
@@ -69,6 +71,26 @@ export default function ProjectLibrary({ onOpen, onClose }) {
     refresh()
   }
 
+  // Prompt seeded with the stem, not the whole filename — the server owns the
+  // `.nara` extension (typing over it is how you'd accidentally save a project
+  // the library can no longer see), and it's the same prompt the two media bins
+  // put up for their own Rename.
+  async function handleRename(name) {
+    const stem = name.replace(/\.nara$/i, '')
+    const input = window.prompt('Rename project to:', stem)
+    if (input == null) return
+    const trimmed = input.trim()
+    if (!trimmed || trimmed === stem) return
+    const result = await renameProject(name, trimmed)
+    if (result.error) { setError(result.error); return }
+    // The open project is tracked by filename upstream (it's what Save writes
+    // back to), so tell App or the next Save would recreate the old file
+    // alongside the renamed one.
+    onRenamed?.(name, result.name)
+    setError(null)
+    refresh()
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
       <div
@@ -111,7 +133,14 @@ export default function ProjectLibrary({ onOpen, onClose }) {
               </li>
             ) : (
               visible.map(p => (
-                <li key={p.name} className="flex items-center gap-2 px-3 py-1.5 hover:bg-neutral-800/70 group">
+                <li
+                  key={p.name}
+                  onContextMenu={e => {
+                    e.preventDefault()
+                    setContextMenu({ position: { x: e.clientX, y: e.clientY }, name: p.name })
+                  }}
+                  className="flex items-center gap-2 px-3 py-1.5 hover:bg-neutral-800/70 group"
+                >
                   <button
                     onClick={() => handleOpen(p.name)}
                     className="flex-1 min-w-0 text-left"
@@ -130,6 +159,20 @@ export default function ProjectLibrary({ onOpen, onClose }) {
             )}
           </ul>
         </div>
+
+        {/* Rendered inside the dialog (which stops click propagation) so that
+            clicking a menu item can't also reach the backdrop's onClose and
+            shut the library out from under the prompt. */}
+        {contextMenu && (
+          <ContextMenu
+            position={contextMenu.position}
+            onClose={() => setContextMenu(null)}
+            items={[
+              { label: 'Rename…', onClick: () => handleRename(contextMenu.name) },
+              { label: 'Delete', danger: true, separatorBefore: true, onClick: () => handleDelete(contextMenu.name) },
+            ]}
+          />
+        )}
       </div>
     </div>
   )

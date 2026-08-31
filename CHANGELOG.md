@@ -15,6 +15,134 @@ the day the version file appeared. There are no tags for them and never will be 
 `v0.25.0` is the first real tag. Treat the older entries as a history, not a
 download list.
 
+## 0.62.2 — 2026-08-31
+
+The preview stage is now a card like everything else in that column. Its left and
+right edges line up with the panel above it and the render bar below it instead of
+running out to the window edges, and its corners are rounded the same amount, with
+the same thin grey outline. Nothing about the picture itself changed — the video is
+still centred and still fills as much of the stage as it can, and the crop box and
+V2 overlays follow the stage's new edges on their own.
+
+## 0.62.1 — 2026-08-31
+
+**The panel dividers look like something you can grab.** The two draggable edges — left of
+the centre column, right of it — used to be flat grey strips that turned solid indigo under the
+pointer. They're now a thin hairline that reads as the seam between the two panels, with a short
+rounded pill centred on it saying *this* edge is the one that moves. Both are visible at rest;
+hovering brightens them a step, and while you're dragging the pill goes indigo so you can still
+see which edge you have when the pointer has wandered well off it.
+
+The grab area is twice as wide as before (12px) without pushing the panels apart, so the edge is
+easier to hit than it was even though it now looks lighter.
+
+## 0.62.0 — 2026-08-31
+
+**Merge — make two clips render as one file.** There is a new **Merge** button next to
+Split, and it is Split's opposite. Click a clip, hold **Shift** and click a neighbour — the
+second clip picks up a sky-blue outline while the first keeps its white one — then press
+Merge. Works the same on V1 and V2, and on more than two clips as long as they sit side by
+side. The only thing it asks is that the clips sit next to each other — a clip you slowed
+down, sped up, reversed or cropped merges with one you didn't, and each part keeps its own
+retime.
+
+What happens depends on the clips, not on a setting you pick:
+
+- If they're **one unbroken stretch of one file** — the two halves of a Split, most
+  obviously — they collapse into a single clip with a single trim, name and duration. This is
+  exact rather than approximate: rendering one clip over the joined range produces frames
+  byte-identical to rendering the two pieces, checked in both directions including reversed.
+- If they **aren't** — two different files, a gap between them, or a retime on one and not the
+  other — they stay separate clips but now draw as one box marked **⛓** and render as one file.
+  That's the case for gluing two different shots into one deliverable, so refusing it would have
+  missed the point. A box like that labels itself honestly: **⇄** if only some of it runs
+  backwards, and `· mixed` in place of a single speed, with the exact speeds in the tooltip. The
+  duration shown is still the real total, since a slowed part is counted at its slowed length.
+
+A run only collapses into one clip when it has one speed and one direction throughout — one clip
+can only hold one speed, so collapsing a 50% clip onto a 100% one would silently retime half the
+footage. Mixed speeds are a perfectly good merge; they just stay a group.
+
+Merge changes nothing about a normal single-file render, which was already one file. Where it
+counts is a **1+** render, which writes one file per cut: a merged run is one cut, so it's one
+file. That includes an A/B 1+ render, which takes its cuts from V1 — which is why V1 clips can
+now be merged even though a plain V1 render has always been a single file.
+
+Along the way: deleting a merged run deletes all of it (one × , one undo), the V1 and V2
+lanes now share one piece of code for drawing merged runs instead of V2 having its own, and
+projects save as version 9.
+
+
+## 0.61.0 — 2026-08-31
+
+**Speed can now speed a clip up, not just slow it down.** The dropdown gained
+**133% and 200%** above 100%, and reads as one ladder from fastest to slowest
+with the source rate shown beside each. On 24 fps footage that means 32 fps at
+133% and 48 fps at 200%, the mirror image of the 18 fps at 75% and 12 fps at 50%
+you already had.
+
+The speed-ups are the exact opposites of the slow-downs rather than a new set of
+round numbers, so each one lands on a whole multiple of the source rate and
+**200% undoes 50% frame for frame** — verified: a window rendered at 50% is each
+original frame exactly twice, and the same window at 200% is every second
+original frame, byte for byte. Nothing is interpolated or invented in either
+direction. Slowing down holds existing frames longer; speeding up reads the
+source faster and drops frames instead.
+
+The 12 fps floor still limits how far you can slow a clip down, and still depends
+on its source rate — so 24 fps footage stops at 50% while 60 fps footage goes to
+20%. It does not apply upward: speeding up raises the rate the source is read at,
+so the floor has nothing to protect and every speed-up is offered on every clip.
+The rendered file keeps its own frame rate whichever way you go, and as before a
+retimed clip renders silent, so use A1 Room Tone or the A1 track for sound over
+it.
+
+Only the two are offered. The deeper opposites — 250%, 400% and 500%, undoing
+40%, 25% and 20% — are not on the menu; Reconstruct still uses them under the
+hood, and a clip carrying one shows its real speed rather than the nearest entry.
+
+Slow-downs, existing projects, and Reconstruct's un-stretch all behave exactly as
+they did — Reconstruct was already using these same numbers internally, and two
+of them are simply on the menu now.
+
+## 0.60.0 — 2026-08-31
+
+**Right-click a project in the Project Library to rename or delete it.** The menu is the
+same one the Media Bin and Export Bin rows have. Rename asks for the new name with the
+`.nara` extension already taken care of, and refuses to go through if a project of that
+name is already there rather than quietly writing over it — a project file is the only
+record of the timeline inside it. If you rename the project you currently have open, the
+name in the top bar follows it, so the next Save writes to the renamed file instead of
+recreating the old one. Delete is the same confirm-then-remove that the row's `×` button
+already did.
+
+## 0.59.0 — 2026-08-31
+
+**V1 name now actually uses the V1 name.** On a **1+** V2 Render in **A** mode, ticking *V1 name*
+was supposed to call each file after the clip it renders — but the clips it was reading were V2's,
+and every V2 cut carries the round-tripped file's name plus an `Analyzed01`-style label. So a
+batch came out `Video01-analyzed_01`, `_02`, `_03`… instead of the shot codes sitting under them
+on V1. Now a shot cut against a V1 clip named `SPHE_002_0040_v001` renders as
+`SPHE_002_0040_v001.mov`, which is what the box has always said it does. **A/B** mode was already
+correct — it renders from V1 — and is unchanged.
+
+This works because the **V2 Analyzer, V2 Batch Analyzer and Reconstruct now record which V1 clip
+each cut was made against**, rather than the name being guessed from the cut's position in the
+lane. Position was never reliable: a clip past the end of V2's footage produces no cut at all, two
+boundaries landing on the same frame merge into one, and Reconstruct welds several V1 clips into a
+single range — so the third cut is not necessarily V1's third clip. Because the link is to the
+clip itself, **renaming or reordering V1 after the analyze is picked up too**, without re-running
+anything. Holds are attributed to the clip they belong to, and a welded Reconstruct range takes
+the name of the first V1 clip in it — the same one the fused box on the lane shows.
+
+Two things deliberately unchanged: a V2 clip that no analyzer produced — a file dragged straight
+onto the lane — has no V1 clip to be named after, so it still uses its own name; and cuts that
+end up sharing a V1 name are still the only ones numbered, in cut order. Projects saved before
+this release open normally and simply fall back to the old naming until you re-run an analyzer.
+
+The render dialog's checkbox text and the manual now say *the V1 clip it was cut against* rather
+than *the clip it renders*, which is the wording that made the old behavior look intentional.
+
 ## 0.58.0 — 2026-08-31
 
 **The Project Library can be searched and sorted.** It now has the same filter strip the Media

@@ -120,13 +120,15 @@ export default function AboutDialog({ onClose }) {
               <li><strong>Reverse</strong> — plays existing frames back to front.</li>
               <li><strong>Hold</strong> / <strong>Round Up</strong> — freezes on one existing frame.</li>
               <li>
-                <strong>Speed</strong> — stretches frame timing (
+                <strong>Speed</strong> — scales frame timing (
                 <span className="font-mono text-neutral-400">setpts</span>) with no interpolation or
-                generated frames; capped so the effective rate never drops below 12 fps. Reconstruct
-                can also run it the other way to undo a stretch, which drops the repeated frames
-                again and generates nothing either.
+                generated frames, in either direction. Slowing down holds existing frames longer
+                (capped so the source is never read below 12 fps); speeding up reads the source
+                faster and drops frames instead of holding them. The two speed-ups are the exact
+                reciprocals of the first two slow-downs — 200% undoes 50% frame for frame, which is
+                also how Reconstruct undoes a stretch V1 baked in.
               </li>
-              <li><strong>Split</strong> / <strong>Trim</strong> — cuts between existing frames, copies nothing new.</li>
+              <li><strong>Split</strong> / <strong>Merge</strong> / <strong>Trim</strong> — cuts and joins between existing frames, copies nothing new.</li>
             </ul>
             <p>
               Every claim above is enforced by the project's own test discipline, not just asserted:
@@ -292,6 +294,24 @@ export default function AboutDialog({ onClose }) {
               clicked last.
             </p>
             <p>
+              <strong>Merge</strong> is Split's opposite: click a clip, <strong>Shift-click</strong>{' '}
+              a neighbour (it picks up a sky outline; the first clip keeps the white one), then press
+              Merge, and the picked clips render as <em>one file</em> instead of two. It works the
+              same on V1 and V2, and on more than two clips as long as they sit side by side. Sitting side
+              by side is the only thing it asks: a clip you slowed down, sped up, reversed or cropped
+              merges with one you didn't, and each part keeps its own retime. When the clips are one
+              unbroken stretch of one file at one speed — two halves of a Split, say — they collapse
+              into a single clip with a single trim; that is exact, not an approximation, since the
+              joined frames are byte-identical to the two pieces. When they aren't (different files,
+              a gap between them, or a retime on one and not the other), they stay separate clips but
+              draw as one box marked <strong>⛓</strong> and render as one file, which is how you glue
+              two different shots into one deliverable. A box like that says so: <strong>⇄</strong> if
+              only part of it runs backwards, and <em>mixed</em> where a single speed would go, with
+              the exact speeds in the tooltip — the duration is still the real total, a slowed part
+              counted at its slowed length. Nothing changes for a plain one-file render — it was already one
+              file; Merge is what changes the count in a <strong>1+</strong> series.
+            </p>
+            <p>
               Clips have no position of their own — the render lays them end to end in list order —
               so <strong>moving</strong> a clip means changing where it sits in that order, and there
               are four ways to do it, all the same edit and all one undo step:{' '}
@@ -407,16 +427,24 @@ export default function AboutDialog({ onClose }) {
               click writes. <em>1</em> is one file, the whole track joined into a single clip.{' '}
               <em>1+</em> renders every cut on its own, one ffmpeg pass each, for handing individual
               shots to a tool that takes one clip at a time. The render dialog then names them:{' '}
-              <strong>V1 name</strong>, ticked by default, calls each file after the clip it renders
-              — the name you type there only supplies the extension, and cuts that share a clip name
-              are numbered in cut order. Untick it and every file goes back to the typed name plus an
+              <strong>V1 name</strong>, ticked by default, calls each file after the <em>V1</em> clip
+              it was cut against — so a shot under{' '}
+              <span className="font-mono text-neutral-400">SPHE_002_0040_v001</span> renders as{' '}
+              <span className="font-mono text-neutral-400">SPHE_002_0040_v001.mov</span>, not as the
+              V2 file's own name. That holds in A as well as A/B: the V2 Analyzer, Batch Analyzer and
+              Reconstruct each record which V1 clip a cut came from, so renaming or reordering V1
+              afterwards is picked up too. The name you type there only supplies the extension, and
+              cuts that share a V1 name are numbered in cut order. A V2 clip no analyzer produced —
+              a file dragged straight onto the lane — has no V1 clip to be named after and falls back
+              to its own name. Untick it and every file goes back to the typed name plus an
               index: <span className="font-mono text-neutral-400">&lt;name&gt;_01</span>,{' '}
               <span className="font-mono text-neutral-400">_02</span>… in track order. The{' '}
               <strong>Prefix</strong> and <strong>Suffix</strong> fields under the box wrap whichever
               name that is, inside the extension, and the dialog previews the whole series before you
               render it. The two switches are independent — A / A/B decides what a shot contains, 1 / 1+ decides
               how it's split — and the cuts belong to whichever track the render is built from:
-              V2's own clips in A, V1's in A/B. <em>1+</em> and <strong>②</strong> are the two halves
+              V2's own clips in A, V1's in A/B. (What the files are <em>named</em> after is V1 either
+              way — see <strong>V1 name</strong> above.) <em>1+</em> and <strong>②</strong> are the two halves
               of the same choice: send the shots out separately, or send one joined file out and cut
               it back into shots on the way in.
             </p>

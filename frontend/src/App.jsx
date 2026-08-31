@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { listFiles, listOutputs, probe, upload, renderTimeline, renderA1, saveProject, getExportSettings, setExportSettings, getVersion } from './api'
 import { useUndoableTracks } from './hooks/useUndoableTracks'
 import { MediaProvider, useMedia } from './context/MediaContext'
@@ -20,6 +20,8 @@ import CropOverlay from './components/CropOverlay'
 import OverlayPreview from './components/OverlayPreview'
 import RaiseButton from './components/RaiseButton'
 import SpliceButton from './components/SpliceButton'
+import PanelDivider from './components/PanelDivider'
+import MergeButton from './components/MergeButton'
 import DuplicateButton from './components/DuplicateButton'
 import MoveClipButtons from './components/MoveClipButtons'
 import ChatPanel from './components/ChatPanel'
@@ -377,6 +379,8 @@ function AppInner() {
   const [rightPanelWidth, setRightPanelWidth] = useState(() => window.innerWidth * 0.18)
   const [leftPanelWidth, setLeftPanelWidth] = useState(() => window.innerWidth * 0.18)
   const resizingRef = useRef(null)
+  // Which divider is being dragged, for its own styling only ('left'|'right'|null).
+  const [resizingSide, setResizingSide] = useState(null)
   const previewStageRef = useRef(null)
   const importInputRef = useRef(null)
   // The Timeline/AGENT/Actions dock's own wrapper (a single, stable DOM
@@ -448,6 +452,51 @@ function AppInner() {
   const setActiveClips = focusedTrack === 2 ? setTrack2Clips : setTimelineClips
   const activeSelectedClip = focusedTrack === 2 ? selectedClip2 : selectedClip
   const setActiveSelectedId = focusedTrack === 2 ? setSelectedId2 : setSelectedId
+
+  // ---------- Merge selection ----------
+  // Merge is the one tool that needs MORE than one clip, and the rest of the app
+  // is built on one selection per track (see selectedId/selectedId2). Rather than
+  // widen that everywhere, Shift-click keeps a side list of EXTRA picks here; the
+  // ordinary selection is still the primary one and everything else reads it
+  // unchanged, so no other tool notices.
+  //
+  // The track is stored WITH the ids instead of clearing on focusedTrack change:
+  // shift-clicking a V2 clip while V1 is focused both moves the focus and makes a
+  // pick, and an effect watching focusedTrack would run after that render and wipe
+  // the pick the click just made. Picks for the unfocused track are simply ignored.
+  const [mergePicks, setMergePicks] = useState({ track: 1, ids: [] })
+  const clearMergePicks = useCallback(() => {
+    setMergePicks(prev => (prev.ids.length ? { track: prev.track, ids: [] } : prev))
+  }, [])
+  // `additive` is the Shift key. A plain click clears — picking up a new clip
+  // normally is how you abandon a half-made merge, and leaving stale outlines
+  // behind would make the button act on clips the user thinks they deselected.
+  const pickForMerge = useCallback((id, additive, track) => {
+    setMergePicks(prev => {
+      if (!additive) return prev.ids.length ? { track, ids: [] } : prev
+      if (prev.track !== track) return { track, ids: [id] }
+      return prev.ids.includes(id)
+        ? { track, ids: prev.ids.filter(p => p !== id) }
+        : { track, ids: [...prev.ids, id] }
+    })
+  }, [])
+  // What Merge acts on: the primary selection first, then the extra picks that are
+  // still on this track. Filtered against the lane rather than pruned on every
+  // edit, so a delete or an undo can't leave the button pointing at a ghost.
+  const activeMergeIds = useMemo(() => {
+    if (!activeSelectedClip) return []
+    const present = new Set(activeClips.map(c => c.id))
+    const extras = mergePicks.track === focusedTrack
+      ? mergePicks.ids.filter(id => id !== activeSelectedClip.id && present.has(id))
+      : []
+    return [activeSelectedClip.id, ...extras]
+  }, [activeClips, activeSelectedClip, mergePicks, focusedTrack])
+  // Which ids draw the co-selected outline, for whichever lane is asking. The
+  // primary selection already has its own ring, so it is left out.
+  const mergeMarkIds = useMemo(
+    () => new Set(activeMergeIds.slice(1)),
+    [activeMergeIds],
+  )
 
   // ---------- V1 footage-loss warning ----------
   // A V1 trim or delete drops source footage from the sequence, and V2's
@@ -889,15 +938,38 @@ function AppInner() {
   // as a multi-clip payload that the server concatenates exactly as the joined
   // `1`-mode render would. V1 and an unfused V2 lane have no fused runs at all,
   // so every group is a single clip and this behaves precisely as it did.
-  // The name each shot of a 1+ series would take from the clip it renders — one
-  // stem per GROUP, in cut order, for the render dialog's V1 name box. The label
-  // the user reads off the clip box (`displayName || sourceName`), so a renamed
-  // duplicate exports under the name it shows, and the FIRST member of a fused
-  // run names the whole run, which is the only member the user sees a name for.
-  // One function for the dialog's preview and for the render, so the two can't
+
+  // The name each shot of a 1+ series takes, one stem per GROUP in cut order,
+  // for the render dialog's **V1 name** box. The FIRST member of a fused run
+  // names the whole run, which is the only member the user sees a name for. One
+  // function for the dialog's preview and for the render, so the two can't
   // disagree about which clip named which file.
+  //
+  // The box is called *V1 name* and now means it on both tracks. In A/B the
+  // clips passed in ARE V1's, so `displayName || sourceName` is already a V1
+  // name. In A they are V2's, whose own name is the round-tripped file plus an
+  // `Analyzed01`-style label — nothing the user recognises — so a V2 segment
+  // stamped with `v1Id`/`v1Name` by the analyzer (see analyzeMath.v1Provenance)
+  // is named after the V1 clip it was cut against instead.
+  //
+  // Resolution order, most authoritative first:
+  //   1. the LIVE V1 clip `v1Id` points at — so renaming or reordering V1 after
+  //      the analyze still exports under the current name;
+  //   2. `v1Name`, the snapshot taken when the cut was made — for when that clip
+  //      is gone (deleted, or a project reopened against a rebuilt V1);
+  //   3. the clip's own label, which is the pre-0.59.0 behaviour and the only
+  //      thing available for a V2 clip no analyzer produced (a file dragged
+  //      straight onto V2).
   function shotStemsFor(clips) {
-    return fuseGroups(clips).map(g => nameStem(g.clips[0]?.displayName || g.clips[0]?.sourceName || ''))
+    const byId = new Map(timelineClips.map(c => [c.id, c]))
+    return fuseGroups(clips).map(g => {
+      const c = g.clips[0]
+      const v1 = c?.v1Id ? byId.get(c.v1Id) : null
+      const name = (v1 && (v1.displayName || v1.sourceName))
+        || c?.v1Name
+        || c?.displayName || c?.sourceName || ''
+      return nameStem(name)
+    })
   }
 
   async function renderShots(sourceClips, overlays, baseName, noAudio, noise, settings, naming = {}) {
@@ -1100,6 +1172,11 @@ function AppInner() {
     return function (e) {
       e.preventDefault()
       resizingRef.current = side
+      // Mirrored into state purely so the divider can show it. The REF stays the
+      // authority for the drag itself — onMove reads it on every pointermove, and
+      // a state read there would be a stale closure. This costs one render at
+      // pointerdown and one at pointerup, not one per move.
+      setResizingSide(side)
       document.body.style.cursor = 'col-resize'
 
       function onMove(ev) {
@@ -1112,6 +1189,7 @@ function AppInner() {
       }
       function onUp() {
         resizingRef.current = null
+        setResizingSide(null)
         document.body.style.cursor = ''
         document.removeEventListener('pointermove', onMove)
         document.removeEventListener('pointerup', onUp)
@@ -1505,6 +1583,16 @@ function AppInner() {
     setAnalyzeLog(prev => [...notes, ...prev])
   }
 
+  // version 9 is V1 clips that can carry `fuseId` too, plus the `fuseMerged` flag
+  // that says a run was MERGED rather than reconstructed (and so may hold members
+  // with different speeds, directions or crops — see clipMath.fuseGroups). Merge
+  // puts one there when
+  // the picked clips can't collapse into a single clip (different sources, or a
+  // gap between their ranges), so V1 can now hold a fused run exactly as V2 has
+  // since version 8 — same field, same meaning, same free ride through the
+  // serializer, and absent still means "not fused". Bumped for the same reason 8
+  // was: it changes how many FILES an A/B 1+ render writes, which draws its shots
+  // from the V1 lane.
   // version 8 is V2 clips that can carry `fuseId`: several lane entries stamped
   // with one id are ONE clip to the user — drawn as a single seamless box and
   // rendered as a single file. It rides along for free (clips are serialized
@@ -1534,7 +1622,7 @@ function AppInner() {
 
   function buildProject() {
     return {
-      version: 8, clips: timelineClips, track2Clips, audioBeds, selectedId, exportPresets,
+      version: 9, clips: timelineClips, track2Clips, audioBeds, selectedId, exportPresets,
       noiseEnabled,
       noiseGainDb: noiseGainNumber(noiseGainDb),
     }
@@ -1852,6 +1940,14 @@ function AppInner() {
         selectedBed={selectedBed} selectedBedIndex={selectedBedIndex}
         setBeds={setAudioBeds} laneClockRef={laneClockRef}
       />
+      {/* Split's opposite, and next to it on purpose. The only tool that reads
+          more than one selection: activeMergeIds is the primary selection plus
+          whatever was Shift-clicked on the same lane. */}
+      <MergeButton
+        clips={activeClips} setClips={setActiveClips} ids={activeMergeIds}
+        onSelectId={setActiveSelectedId} onMerged={clearMergePicks}
+        selectedBed={selectedBed}
+      />
       <div className="w-px h-3.5 bg-neutral-700" />
       <RaiseButton clips={activeClips} setClips={setActiveClips} />
       <div className="w-px h-3.5 bg-neutral-700" />
@@ -2058,12 +2154,10 @@ function AppInner() {
           </div>
         </div>
 
-        {/* Drag handle to resize the left panel */}
-        <div
-          onPointerDown={startResize('left')}
-          className="w-1.5 shrink-0 cursor-col-resize bg-neutral-800 hover:bg-indigo-500 active:bg-indigo-500 transition-colors"
-          title="Drag to resize"
-        />
+        {/* Drag handle to resize the left panel. The hairline inside it IS the
+            edge between this column and the centre one — don't add a border on
+            either neighbour's facing side. */}
+        <PanelDivider onPointerDown={startResize('left')} dragging={resizingSide === 'left'} />
 
         {/* Center: Preview + toolbar + Timeline */}
         <div className="flex-1 flex flex-col min-w-0">
@@ -2091,7 +2185,15 @@ function AppInner() {
                   Timeline's action bar as "V1 Render", beside V2 Render. */}
             </div>
           </div>
-          <div ref={previewStageRef} data-tour="previewStage" className="relative flex-1 min-h-[50vh] flex items-center justify-center bg-black p-3">
+          {/* The stage is an ISLAND too, on the same 8px inset as the header
+              above and the render bar below, with the same `rounded-md border
+              border-neutral-800` chrome — so the column's left and right edges
+              are one straight line instead of the stage bleeding past the cards.
+              `overflow-hidden` is what makes the rounding visible: the black
+              fill and the <video> are square children and would paint over the
+              corners without it. The border also gives the corners something to
+              read against — black on neutral-950 is nearly the same tone. */}
+          <div ref={previewStageRef} data-tour="previewStage" className="relative flex-1 min-h-[50vh] mx-2 flex items-center justify-center overflow-hidden rounded-md border border-neutral-800 bg-black p-3">
             <PreviewPlayer />
             {/* Composited V2 regions, under the crop outline so the outline
                 stays visible while dragging the box that positions them.
@@ -2173,6 +2275,8 @@ function AppInner() {
                   selectedId2={selectedId2}
                   selectedPart2={selectedPart2}
                   onSelectItem2={selectItem2}
+                  onPickForMerge={pickForMerge}
+                  mergeMarkIds={mergeMarkIds}
                   focusedTrack={focusedTrack}
                   onFocusTrack={setFocusedTrack}
                   onAddToV2={handleAddToV2}
@@ -2233,12 +2337,8 @@ function AppInner() {
           </div>
         </div>
 
-        {/* Drag handle to resize the right panel */}
-        <div
-          onPointerDown={startResize('right')}
-          className="w-1.5 shrink-0 cursor-col-resize bg-neutral-800 hover:bg-indigo-500 active:bg-indigo-500 transition-colors"
-          title="Drag to resize"
-        />
+        {/* Drag handle to resize the right panel — same seam rule as the left. */}
+        <PanelDivider onPointerDown={startResize('right')} dragging={resizingSide === 'right'} />
 
         {/* Right: Rendered output + media info */}
         <div
@@ -2273,6 +2373,10 @@ function AppInner() {
       {showLibrary && (
         <ProjectLibrary
           onOpen={handleLibraryOpen}
+          // Renaming the project that's currently open has to follow it here:
+          // `projectName` is the file Save overwrites, so leaving it stale would
+          // re-create the old name on the next Save.
+          onRenamed={(from, to) => setProjectName(p => (p === from ? to : p))}
           onClose={() => setShowLibrary(false)}
         />
       )}

@@ -515,12 +515,21 @@ export function sanitizeHoldPlacement(clips) {
 //     across unrelated footage.
 //   - a run must be at least 2 clips. One clip carrying a `fuseId` is just a
 //     clip; there is no seam to hide.
-//   - members must AGREE on the fields one box can only state once: `reversed`,
-//     `speed` and whether a crop is set. A single ◀ badge or one duration label
-//     over members that disagree would be a lie, so a run splits where they do.
-//     Reconstruct can legitimately produce that (it never welds a reversed shot
-//     to a forward one), and so can editing one member — both come out as two
-//     boxes, which is the truth.
+//   - members of a RECONSTRUCTED run must AGREE on `reversed`, `speed` and
+//     whether a crop is set. Reconstruct can legitimately produce a run that
+//     doesn't (it never welds a reversed shot to a forward one), and so can
+//     editing one member — both come out as two boxes, which is the truth about
+//     what Reconstruct rebuilt.
+//
+// A MERGED run (`fuseMerged`, set only by mergeClips) is exempt from that last
+// rule, which is the whole difference between the two producers. The user picked
+// those clips knowing one was retimed or reversed, and the render already honours
+// each member's own speed/direction/crop — a group is posted as a multi-clip
+// payload, not as one clip. So agreement was never a render constraint; it was
+// only ever about the single ◀ badge and single speed label, and `ClipGroups`
+// answers that by labelling a mixed run "mixed" instead of quoting the lead's
+// numbers. Refusing to merge a retimed clip would have been the display tail
+// wagging the dog.
 //
 // Every clip is returned in exactly one group, in lane order, so a caller can
 // map over groups instead of clips and lose nothing. Unfused clips come back as
@@ -533,12 +542,17 @@ export function fuseGroups(clips) {
     const c = clips[i]
     let end = i + 1
     if (c.fuseId) {
+      // Read off the run's LEAD only: `fuseMerged` travels with `fuseId` through
+      // every `{...clip}` spread, so one id is never half-merged.
+      const strict = !c.fuseMerged
       while (
         end < clips.length
         && clips[end].fuseId === c.fuseId
-        && !!clips[end].reversed === !!c.reversed
-        && clipSpeed(clips[end]) === clipSpeed(c)
-        && !!clips[end].crop === !!c.crop
+        && (!strict || (
+          !!clips[end].reversed === !!c.reversed
+          && clipSpeed(clips[end]) === clipSpeed(c)
+          && !!clips[end].crop === !!c.crop
+        ))
       ) end++
     }
     // A lone member is not a group: fall through to the single-clip shape so the
@@ -560,6 +574,142 @@ export function fuseGroups(clips) {
 export function fuseGroupIds(clips, id) {
   const g = fuseGroups(clips).find(group => group.clips.some(c => c.id === id))
   return new Set(g ? g.clips.map(c => c.id) : [id])
+}
+
+// How close two ranges have to be to count as adjoining. Ranges that really do
+// adjoin came out of one Split, so they meet EXACTLY (`partA.outSec` and
+// `partB.inSec` are the same number); this tolerance only absorbs float drift
+// from the seconds↔frames round trips a trim goes through. It is well under one
+// frame at any rate this app handles (a frame at 240 fps is 4.2 ms), so it can
+// never weld two ranges that have real footage missing between them.
+const ADJOIN_EPSILON = 0.001
+
+function sameCrop(a, b) {
+  const x = a.crop, y = b.crop
+  if (!x && !y) return true
+  if (!x || !y) return false
+  return x.key === y.key && x.w === y.w && x.h === y.h && x.x === y.x && x.y === y.y
+}
+
+// Do these two neighbours, in lane order, cover one unbroken stretch of source?
+//
+// Direction matters and is easy to get backwards. A forward clip plays
+// `inSec → outSec`, so `a` ends where `b` starts: `a.outSec === b.inSec`. A
+// reversed clip plays `outSec → inSec`, so the seam is at the OTHER end of each
+// range — `a` ends at `a.inSec` and `b` begins at `b.outSec`. Comparing the same
+// pair of fields for both would call a reversed split non-adjoining and quietly
+// downgrade every reversed merge to a fused group.
+function adjoins(a, b) {
+  return Math.abs(a.reversed ? a.inSec - b.outSec : a.outSec - b.inSec) <= ADJOIN_EPSILON
+}
+
+// Can this run become literally one clip, rather than a group of clips drawn as
+// one? A clip holds exactly one source range and one set of transforms, so the
+// answer is only yes when nothing would have to be thrown away or averaged:
+//
+//   - one source file, and the ranges adjoin in play order (above);
+//   - identical crop, and no `cropKeyframes` on any member — keyframes are timed
+//     from the start of their own clip's main body, so a merge would move every
+//     one of them. A group keeps the members intact and keeps its keyframes.
+//   - no holds at an interior seam. `sanitizeHoldPlacement` means only the
+//     lane's first and last clip can carry them, so a mid-lane run has none, but
+//     a run that reaches an end does — those belong to the merged clip's outer
+//     edges and survive. Anything at a seam would be time we'd have to delete.
+//   - one speed and one direction. This is the only check here that a fused GROUP
+//     doesn't also need: a group keeps every member's own retime, but a single
+//     clip holds a single `speed`, so collapsing a 50% clip onto a 100% one would
+//     silently retime half the footage. Mixed speeds are a perfectly good merge —
+//     they just have to stay a group.
+function canCollapse(members) {
+  return members.every((c, i) => {
+    if (i > 0) {
+      const prev = members[i - 1]
+      if (c.sourceName !== prev.sourceName) return false
+      if ((c.sourceDir || 'input') !== (prev.sourceDir || 'input')) return false
+      if (!!c.reversed !== !!prev.reversed) return false
+      if (clipSpeed(c) !== clipSpeed(prev)) return false
+      if (!sameCrop(c, prev)) return false
+      if (!adjoins(prev, c)) return false
+      if ((c.headHoldSec || 0) > 0) return false
+      if ((prev.tailHoldSec || 0) > 0 || (prev.roundHoldSec || 0) > 0) return false
+    }
+    return !(c.cropKeyframes && c.cropKeyframes.length > 0)
+  })
+}
+
+// Merge a selection of clips into one thing that renders as one file.
+//
+// Two outcomes, and which one you get is a property of the clips, not a mode the
+// user picks. When the run is one continuous piece of one source file it
+// COLLAPSES: the members are replaced by a single clip spanning the whole range,
+// which is one clip everywhere afterwards — one trim, one speed, one entry in a
+// `.nara`. When it isn't (two different files, or a gap), the members are stamped
+// with a shared `fuseId` and become a FUSED GROUP: still two clips in the data,
+// but `fuseGroups` draws them as one box and `renderShots` posts them as one file
+// (which is the part the user actually asked for). Refusing the second case
+// outright would mean Merge did nothing for the commonest reason to want it —
+// gluing two different shots into one deliverable.
+//
+// Returns `{ error }` with a sentence fit to show, or `{ clips, selectId,
+// collapsed }`. One function answers both "may I?" and "do it", so the button's
+// tooltip can never disagree with what pressing it does.
+export function mergeClips(clips, ids) {
+  const idSet = new Set(ids)
+  const indices = []
+  clips.forEach((c, i) => { if (idSet.has(c.id)) indices.push(i) })
+  if (indices.length !== idSet.size) return { error: 'those clips are no longer on this track' }
+  if (indices.length < 2) return { error: 'select two clips to merge — click one, then Shift-click a neighbour' }
+  const from = indices[0]
+  const to = indices[indices.length - 1]
+  // Derived from adjacency, exactly as fuseGroups does: a run with something
+  // else between its ends is not a run, and merging it would either reorder the
+  // lane behind the user's back or leave a group fuseGroups won't draw.
+  if (to - from + 1 !== indices.length) {
+    return { error: 'only side-by-side clips can merge — there are other clips between the ones you picked' }
+  }
+  const members = clips.slice(from, to + 1)
+  const head = members[0]
+  const tail = members[members.length - 1]
+  // Adjacency is the ONLY requirement. A retime, a reverse or a crop on some
+  // members but not others used to be refused here, because fuseGroups would
+  // have split the run straight back apart and Merge would have looked like it
+  // did nothing — that is now handled at the other end (`fuseMerged`) instead of
+  // by telling the user to undo their retime first.
+
+  if (canCollapse(members)) {
+    // Keeps the first member's id, so the selection stays live, the lane colour
+    // doesn't change (clip colour is hashed from the id) and any V2 overlay
+    // pointing at this clip still matches. It reads as "these became one"
+    // instead of "a clip vanished and a stranger appeared".
+    const merged = {
+      ...head,
+      inSec: head.reversed ? tail.inSec : head.inSec,
+      outSec: head.reversed ? head.outSec : tail.outSec,
+      headHoldSec: head.headHoldSec || 0,
+      tailHoldSec: tail.tailHoldSec || 0,
+      roundHoldSec: tail.roundHoldSec || 0,
+      // Provenance from before the merge is not provenance of the merged clip,
+      // and a lone clip carrying a fuseId invites a stale box later.
+      fuseId: null,
+      fuseMerged: false,
+      dirty: true,
+    }
+    return {
+      clips: [...clips.slice(0, from), merged, ...clips.slice(to + 1)],
+      selectId: merged.id,
+      collapsed: true,
+    }
+  }
+
+  // `fuseMerged` marks the run as user-made rather than reconstructed, which is
+  // what exempts it from fuseGroups' agreement rule — so a run whose members were
+  // retimed, reversed or cropped differently still draws and renders as one.
+  const fuseId = crypto.randomUUID()
+  return {
+    clips: clips.map((c, i) => (i >= from && i <= to ? { ...c, fuseId, fuseMerged: true, dirty: true } : c)),
+    selectId: head.id,
+    collapsed: false,
+  }
 }
 
 function stripExt(name) {

@@ -18,6 +18,13 @@ const FUSE_BOX = {
 }
 const FUSE_FILL = { start: 'rounded-l', mid: '', end: 'rounded-r' }
 
+// Merge's co-selection outline. Sky, the Split/Merge family colour (conventions),
+// so the marked clips read as belonging to that button rather than as a second
+// primary selection — and no `brightness-110`, which is the primary ring's own
+// tell. Exported because V2's lane draws this ring itself, around a whole fused
+// run, and the two must not drift apart.
+export const CO_SELECT_RING = 'ring-2 ring-sky-400 ring-offset-1 ring-offset-neutral-950'
+
 export default function TimelineClip({
   clip, pps, selected, selectedPart, onSelect, onDeletePart, onTrim, onDelete, index,
   // Reorder drag: `dropSide` marks which edge of THIS clip the insertion line
@@ -32,6 +39,11 @@ export default function TimelineClip({
   // selection ring are drawn by the lane, over the whole run — a member must not
   // draw its own, or the seam comes back as doubled labels.
   fuse = null,
+  // Picked as Merge's second clip (App's mergeMarkIds). A separate outline from
+  // `selected` rather than a second white ring: the two mean different things —
+  // one clip is the one every other tool acts on, the others are only along for
+  // the merge — and Merge has to be able to show both at once.
+  coSelected = false,
 }) {
   const headPx = clipHeadPx(clip, pps)
   const mainPx = clipMainPx(clip, pps)
@@ -161,9 +173,12 @@ export default function TimelineClip({
         /* grab, not pointer: the body is the drag handle for reordering, and that
            cursor is the only standing hint that a clip can be moved at all. The
            edge trim strips below keep their own ew-resize. */
-        className={`absolute top-0 bottom-0 overflow-hidden cursor-grab active:cursor-grabbing ${fuse ? FUSE_BOX[fuse.pos] : 'rounded border-2'} ${borderClass} ${!fuse && selected && selectedPart === 'main' ? 'ring-2 ring-white ring-offset-1 ring-offset-neutral-950 brightness-110' : ''}`}
+        className={`absolute top-0 bottom-0 overflow-hidden cursor-grab active:cursor-grabbing ${fuse ? FUSE_BOX[fuse.pos] : 'rounded border-2'} ${borderClass} ${!fuse && selected && selectedPart === 'main' ? 'ring-2 ring-white ring-offset-1 ring-offset-neutral-950 brightness-110' : ''} ${!fuse && !selected && coSelected ? CO_SELECT_RING : ''}`}
         style={{ left: headPx, width: Math.max(mainPx, 24) }}
-        onClick={() => onSelect(clip, 'main')}
+        /* The event goes up because Shift-click means something here (Merge's
+           second pick). The hold segments below deliberately don't pass one —
+           there is nothing to merge about a frozen frame. */
+        onClick={e => onSelect(clip, 'main', e)}
       >
         <div className={`absolute inset-0 bg-gradient-to-b ${fuse ? FUSE_FILL[fuse.pos] : 'rounded'} ${color.grad}`} />
         {/* Trim handles only on the run's OUTER edges. An interior handle sits

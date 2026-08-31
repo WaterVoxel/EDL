@@ -381,6 +381,9 @@ export function reconstructFromV1(v1Clips, v2Clips) {
       dirty: true,
       fuseId,
       displayName: `Reconstructed${String(i + 1).padStart(2, '0')}`,
+      // A welded range can span several V1 clips; it is stamped with the FIRST,
+      // matching how a fused group takes its name from its first member.
+      ...v1Provenance(v1Clips[r.v1Indexes[0]]),
     })),
     ...v2Clips.slice(1),
   ]
@@ -603,6 +606,26 @@ export function sequenceCutOffsets(v1Clips) {
 // Which name a segment gets, by the kind of V1 piece that starts it.
 const PIECE_NAMES = { main: 'Shot', head: 'Head', tail: 'Tail', round: 'Round' }
 
+// V1 PROVENANCE stamped onto every V2 segment the three tools emit — which V1
+// clip this cut was made against. It exists for one reason: a 1+ V2 Render with
+// **V1 name** ticked has to name each file after the V1 clip under it, and a V2
+// segment otherwise knows nothing about V1 (its sourceName is the round-tripped
+// V2 file, and every path here overwrites displayName with Analyzed01/Shot01/
+// Reconstructed01). Positional index is NOT a usable substitute: analyzeAgainstV1
+// filters out clips past V2's end, batchCutAgainstV1 merges colliding cuts and
+// appends untouched extra V2 clips, and Reconstruct welds several V1 clips into
+// one range — so segment i is not V1 clip i in any of them.
+//
+// Both fields, because they answer different questions. `v1Id` is the live link:
+// rename or reorder V1 afterwards and the render still picks up the current name.
+// `v1Name` is the snapshot for when that lookup fails — the V1 clip was deleted,
+// or the project was saved and reopened against a rebuilt timeline. Resolution
+// order lives in App.shotStemsFor.
+function v1Provenance(clip) {
+  if (!clip) return { v1Id: null, v1Name: null }
+  return { v1Id: clip.id ?? null, v1Name: clip.displayName || clip.sourceName || null }
+}
+
 // Returns { segments, kinds, overflow, leftoverSec }:
 //   segments    — V2's FIRST clip replaced by one clip per V1 PIECE, in track
 //                 order; any further V2 clips are left exactly as they were
@@ -644,11 +667,14 @@ export function batchCutAgainstV1(v1Clips, v2Clips) {
   // is counted in `overflow` instead), and a cut landing on the previous
   // boundary — two pieces whose boundary snaps to the same frame of V2 — has no
   // footage between them. A dropped cut merges its piece into the one before it.
-  const edges = [{ at: 0, kind: pieces[0].kind }]
+  // `clipIndex` rides along from the piece so the segment can be stamped with
+  // the V1 clip it came from — a merged cut inherits the surviving edge's clip,
+  // which is the same clip whose footage the merged segment actually shows.
+  const edges = [{ at: 0, kind: pieces[0].kind, clipIndex: pieces[0].clipIndex }]
   for (let i = 0; i < pieces.length - 1; i++) {
     const at = offsets[i + 1]
     if (at > edges[edges.length - 1].at + CUT_EPSILON && at < span - CUT_EPSILON) {
-      edges.push({ at, kind: pieces[i + 1].kind })
+      edges.push({ at, kind: pieces[i + 1].kind, clipIndex: pieces[i + 1].clipIndex })
     }
   }
 
@@ -675,6 +701,9 @@ export function batchCutAgainstV1(v1Clips, v2Clips) {
       // the 2px gaps this lane needs to stay aligned with V1's.
       fuseId: null,
       displayName: `${PIECE_NAMES[edge.kind]}${String(counts[edge.kind]).padStart(2, '0')}`,
+      // Overwrites any v1Id/v1Name `...v2c` carried in from an earlier analyze —
+      // this cut's provenance is this run's V1 clip, not the previous run's.
+      ...v1Provenance(v1Clips[edge.clipIndex]),
     }
   })
 
@@ -711,6 +740,7 @@ export function analyzeAgainstV1(v1Clips, v2File) {
       reversed: false,
       dirty: true,
       displayName: `Analyzed${String(i + 1).padStart(2, '0')}`,
+      ...v1Provenance(c),
     }
   }).filter(seg => seg.outSec > seg.inSec) // V1's clip lies entirely beyond V2's footage — nothing to cut
 

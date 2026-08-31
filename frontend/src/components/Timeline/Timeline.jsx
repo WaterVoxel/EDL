@@ -1,6 +1,6 @@
 import { useRef, useEffect, useCallback, useState } from 'react'
 import { createPortal } from 'react-dom'
-import TimelineClip from './TimelineClip'
+import ClipGroups from './ClipGroups'
 import AudioBedBar from './AudioBedBar'
 import AudioBedPlayer from './AudioBedPlayer'
 import Playhead from './Playhead'
@@ -10,7 +10,7 @@ import TransportBar from './TransportBar'
 import { useMedia } from '../../context/MediaContext'
 import { probe } from '../../api'
 import { useTimelinePlayback } from '../../hooks/useTimelinePlayback'
-import { clipTotalSec, clipTotalPx, clipHeadPx, clipMainPx, clipTailPx, clipRoundPx, clipMainSec, clipSpeed, sanitizeHoldPlacement, timelinePosToPx, sequenceVideoStartSec, clipStartSec, moveClip, swapBeds, dropTargetIndex, fuseGroups, fuseGroupIds, trimLossSec, deleteLossSec } from '../../clipMath'
+import { clipTotalSec, clipTotalPx, clipHeadPx, clipMainPx, sanitizeHoldPlacement, timelinePosToPx, sequenceVideoStartSec, clipStartSec, moveClip, swapBeds, dropTargetIndex, fuseGroups, fuseGroupIds, trimLossSec, deleteLossSec } from '../../clipMath'
 import { addKeyframe, removeNearestKeyframe, sampleCropOrigin, clipTFromTimelinePos, retimeKeyframesForTrim } from '../../cropAnimation'
 
 const PPS = 60
@@ -40,6 +40,11 @@ function EyeIcon({ off, className }) {
 export default function Timeline({
   clips, setClips, onAddToV1, selectedId, selectedPart = 'main', onSelectId, onSelectItem, onUndo, canUndo,
   track2Clips = [], setTrack2Clips, selectedId2 = null, selectedPart2 = 'main', onSelectItem2,
+  // Merge's second selection. `onPickForMerge(id, additive, track)` is called on
+  // every clip-body click with the Shift state; `mergeMarkIds` is the set that
+  // draws the co-selected outline. Both default to inert, so the timeline still
+  // works standalone without Merge wired up.
+  onPickForMerge = null, mergeMarkIds = null,
   focusedTrack = 1, onFocusTrack, onAddToV2, onAnalyze, onBatchAnalyze, onReconstruct, onRenderV2,
   onRender, onRenderA1, rendering = false,
   timeDisplayMode, onToggleTimeDisplayMode, animateEnabled = false,
@@ -302,14 +307,39 @@ export default function Timeline({
 
   const activeFps = selectedClip?.fps || clips[0]?.fps || 24
 
-  function handleSelect(clip, part = 'main') {
+  // Shift-click adds a clip to Merge's pick list instead of selecting it: the
+  // primary selection and the playhead both stay where they are, which is what
+  // makes "click one, Shift-click its neighbour" leave two clips marked.
+  //
+  // It only counts on a clip BODY (`main`) of the already-focused track, and only
+  // when something is already selected there. Every other shift-click — a hold
+  // segment, the first click of all, a clip on the other lane — falls through to
+  // an ordinary select, so Shift can never leave the user with a pick list and no
+  // primary selection to merge it with. Note the hold handlers pass no event at
+  // all, so they take the ordinary path for free.
+  function isMergePick(clip, part, event, track, primaryId) {
+    return part === 'main' && !!event?.shiftKey && focusedTrack === track
+      && !!primaryId && primaryId !== clip.id
+  }
+
+  function handleSelect(clip, part = 'main', event = null) {
+    if (isMergePick(clip, part, event, 1, selectedId)) {
+      onPickForMerge?.(clip.id, true, 1)
+      return
+    }
     setFocusedTrack(1)
+    onPickForMerge?.(clip.id, false, 1)
     selectItem(clip.id, part)
     transport.seekTimeline(clipStartSec(clips, clip.id))
   }
 
-  function handleSelect2(clip, part = 'main') {
+  function handleSelect2(clip, part = 'main', event = null) {
+    if (isMergePick(clip, part, event, 2, selectedId2)) {
+      onPickForMerge?.(clip.id, true, 2)
+      return
+    }
     setFocusedTrack(2)
+    onPickForMerge?.(clip.id, false, 2)
     selectItem2(clip.id, part)
   }
 
@@ -449,16 +479,28 @@ export default function Timeline({
     // Delete/Backspace key (via handleDeleteSelected) all land here, so the
     // footage-loss report only needs writing once. No gesture: there is no drag
     // to wait out, so App shows the warning immediately.
+    //
+    // Takes the whole FUSED RUN, as V2's delete has always done: since Merge, V1
+    // can hold a run too, and a box drawn as one clip has to delete as one clip or
+    // one × leaves the rest of it in the lane. An unmerged clip is a group of
+    // itself, so nothing changes for those.
+    const doomed = fuseGroupIds(clips, id)
     if (onFootageLoss) {
-      const c = clips.find(x => x.id === id)
-      if (c) onFootageLoss({ deltaSec: deleteLossSec(c), gesture: null, sourceName: c.sourceName })
+      // Summed over the run and reported once: it is one delete of one clip as far
+      // as the user is concerned, so two dialogs (or half the footage) would both
+      // misdescribe it.
+      const victims = clips.filter(c => doomed.has(c.id))
+      const deltaSec = victims.reduce((n, c) => n + deleteLossSec(c), 0)
+      if (victims.length) {
+        onFootageLoss({ deltaSec, gesture: null, sourceName: victims[0].sourceName })
+      }
     }
     // Removing a clip changes the rendered sequence even though the
     // remaining clips themselves are unedited, so mark them dirty too.
     setClips(prev => sanitizeHoldPlacement(
-      prev.filter(c => c.id !== id).map(c => ({ ...c, dirty: true }))
+      prev.filter(c => !doomed.has(c.id)).map(c => ({ ...c, dirty: true }))
     ))
-    if (id === selectedId) onSelectId(null)
+    if (doomed.has(selectedId)) onSelectId(null)
   }
 
   // Deletes the whole FUSED RUN when the clip is one member of it — a box drawn
@@ -745,8 +787,12 @@ export default function Timeline({
   // Counted in GROUPS, not clips: a fused run of reconstructed ranges is one cut
   // and gets one file, which is also what App.renderShots does when it runs the
   // series. Counting clips here would promise two files for a lane drawing one.
+  const v1Groups = fuseGroups(clips)
   const v2Groups = fuseGroups(track2Clips)
-  const v2ShotCount = v2RenderMode === 'AB' ? clips.length : v2Groups.length
+  // A/B counts V1's groups, not V1's clips: an A/B `1+` render takes its shots
+  // from timelineClips (App.renderShots feeds fuseGroups the V1 lane), so a merged
+  // V1 run is one file there too.
+  const v2ShotCount = v2RenderMode === 'AB' ? v1Groups.length : v2Groups.length
   const actionsBar = (
     <div className="grid grid-cols-[1fr_auto_1fr] items-center">
       <div className="flex items-center gap-1.5 justify-self-start">
@@ -1018,98 +1064,30 @@ export default function Timeline({
                     >
                       {/* Grouped, not a flat map: V2 Reconstruct emits one clip
                           per range it keeps, and a run of them is ONE clip to the
-                          user (clipMath.fuseGroups). The run gets its own wrapper,
-                          which carries the things a single clip has exactly one of: the
-                          name, the duration, the badges, the delete × and the
-                          selection ring. An unfused clip comes back as a
-                          single-member group and renders exactly as before. */}
-                      {v2Groups.map(group => {
-                        const members = group.clips
-                        const fused = !!group.fuseId
-                        const runSelected = members.some(c => c.id === selectedId2)
-                        const runDirty = members.some(c => c.dirty)
-                        const lead = members[0]
-                        const boxes = members.map((clip, k) => (
-                          <TimelineClip
-                            key={clip.id}
-                            clip={clip}
-                            pps={PPS}
-                            index={group.start + k}
-                            selected={clip.id === selectedId2}
-                            selectedPart={clip.id === selectedId2 ? selectedPart2 : null}
-                            onSelect={handleSelect2}
-                            onDeletePart={(part) => {
-                              const field = part === 'head' ? 'headHoldSec' : part === 'tail' ? 'tailHoldSec' : 'roundHoldSec'
-                              setTrack2Clips?.(prev => prev.map(c => c.id === clip.id ? { ...c, [field]: 0, dirty: true } : c))
-                            }}
-                            onTrim={handleTrim2}
-                            onDelete={handleDelete2}
-                            onDragStart={handleDragStart2}
-                            onDragOver={handleDragOver2}
-                            onDrop={handleDrop2}
-                            onDragEnd={handleDragEnd}
-                            dragging={dragFromRef2.current === group.start + k && dropAt != null}
-                            dropSide={dropSideFor(2, group.start + k, track2Clips.length)}
-                            fuse={fused ? {
-                              pos: k === 0 ? 'start' : k === members.length - 1 ? 'end' : 'mid',
-                              colorId: group.fuseId,
-                              dirty: runDirty,
-                            } : null}
-                          />
-                        ))
-                        if (!fused) return boxes
-                        // The duration is the sum of the members' RENDERED lengths
-                        // — what the joined file will be — so the one label agrees
-                        // with the one box. Speed is uniform across a run by
-                        // construction (fuseGroups splits where it isn't), so the
-                        // lead clip's is the run's.
-                        const runSec = members.reduce((n, c) => n + clipMainSec(c), 0)
-                        const runSpeed = clipSpeed(lead)
-                        // The wrapper spans the run's HOLD segments too, but a
-                        // single clip draws its name and × inside the main body
-                        // only — so inset the overlay past the run's own holds,
-                        // or the name lands on top of the fuchsia block's own
-                        // "HOLD 1.0s" label. Holds can only sit on the run's
-                        // outer members (the hold placement invariant), so the
-                        // lead's head and the last member's tail/round are the
-                        // only ones there are.
-                        const last = members[members.length - 1]
-                        const padLeft = clipHeadPx(lead, PPS)
-                        const padRight = clipTailPx(last, PPS) + clipRoundPx(last, PPS)
-                        return (
-                          <div
-                            /* The lead clip's id, not the fuseId: one fuseId can
-                               yield two groups when members stop agreeing on
-                               reverse or speed, and two wrappers keyed the same
-                               would collide. */
-                            key={lead.id}
-                            className={`relative flex items-stretch group ${runSelected ? 'rounded ring-2 ring-white ring-offset-1 ring-offset-neutral-950 brightness-110' : ''}`}
-                          >
-                            {boxes}
-                            <div
-                              className="absolute top-0 bottom-0 flex flex-col items-start justify-between px-1.5 py-0.5 pointer-events-none"
-                              style={{ left: padLeft, right: padRight }}
-                            >
-                              <span className="text-[8px] text-neutral-100 truncate max-w-full font-medium">
-                                {lead.reversed && <span title="Reversed">◀ </span>}
-                                {lead.displayName || lead.sourceName}
-                                <span className="text-neutral-400" title={`One clip made of ${members.length} ranges of this file, in this order. V2 Render joins them into a single file.`}> ⛓ {members.length}</span>
-                              </span>
-                              <span className="text-[8px] text-neutral-200 font-mono">
-                                {runSec.toFixed(2)}s{runSpeed !== 1 ? ` · ${Math.round(runSpeed * 100)}%` : ''}
-                              </span>
-                            </div>
-                            <button
-                              onClick={e => { e.stopPropagation(); handleDelete2(lead.id) }}
-                              title={`Delete clip — all ${members.length} ranges`}
-                              className="absolute top-0 w-3.5 h-3.5 flex items-center justify-center bg-black/50 hover:bg-red-600 text-white text-[9px] leading-none opacity-0 group-hover:opacity-100 z-20"
-                              style={{ right: padRight }}
-                            >
-                              ×
-                            </button>
-                          </div>
-                        )
-                      })}
+                          user (clipMath.fuseGroups) — as is anything Merge joined.
+                          ClipGroups draws the run as one box with one name,
+                          duration, badge set, delete x and ring; V1's lane below
+                          uses the same component. */}
+                      <ClipGroups
+                        groups={v2Groups}
+                        pps={PPS}
+                        selectedId={selectedId2}
+                        selectedPart={selectedPart2}
+                        coSelectedIds={mergeMarkIds}
+                        onSelect={handleSelect2}
+                        onDeletePart={(id, part) => {
+                          const field = part === 'head' ? 'headHoldSec' : part === 'tail' ? 'tailHoldSec' : 'roundHoldSec'
+                          setTrack2Clips?.(prev => prev.map(c => c.id === id ? { ...c, [field]: 0, dirty: true } : c))
+                        }}
+                        onTrim={handleTrim2}
+                        onDelete={handleDelete2}
+                        onDragStart={handleDragStart2}
+                        onDragOver={handleDragOver2}
+                        onDrop={handleDrop2}
+                        onDragEnd={handleDragEnd}
+                        draggingIndex={dropAt != null ? dragFromRef2.current : null}
+                        dropSideFor={i => dropSideFor(2, i, track2Clips.length)}
+                      />
                     </div>
                   )}
                 </div>
@@ -1163,33 +1141,31 @@ export default function Timeline({
                      this row's height and V2's line 1015 needs the same edit. */
                   className={`flex-1 flex items-stretch px-2 py-1 h-12 cursor-pointer transition-all ${v1DragOver ? 'bg-indigo-950/40' : 'bg-neutral-950'} ${!v1Visible ? 'opacity-35 grayscale' : ''}`}
                 >
-                  {clips.map((clip, i) => (
-                    <TimelineClip
-                      key={clip.id}
-                      clip={clip}
-                      pps={PPS}
-                      index={i}
-                      selected={clip.id === selectedId}
-                      selectedPart={clip.id === selectedId ? selectedPart : null}
-                      onSelect={handleSelect}
-                      onDeletePart={(part) => {
-                        const field = part === 'head' ? 'headHoldSec' : part === 'tail' ? 'tailHoldSec' : 'roundHoldSec'
-                        setClips(prev => prev.map(c => c.id === clip.id ? { ...c, [field]: 0, dirty: true } : c))
-                      }}
-                      onTrim={handleTrim}
-                      onDelete={handleDelete}
-                      onDragStart={handleDragStart}
-                      onDragOver={handleDragOver}
-                      onDrop={handleDrop}
-                      onDragEnd={handleDragEnd}
-                      // dragFromRef is a ref, so reading it during render only
-                      // works because `dropAt` state lands on the first dragover
-                      // and re-renders the lane — which is also exactly when
-                      // there is something to dim.
-                      dragging={dragFromRef.current === i && dropAt != null}
-                      dropSide={dropSideFor(1, i, clips.length)}
-                    />
-                  ))}
+                  {/* Grouped like V2's lane above (same component): a Merge
+                      that could not collapse leaves a fused RUN on V1, and it has
+                      to draw as the one clip it now renders as. With no merges
+                      every group is a single clip, which is the plain flat lane
+                      this replaced. */}
+                  <ClipGroups
+                    groups={v1Groups}
+                    pps={PPS}
+                    selectedId={selectedId}
+                    selectedPart={selectedPart}
+                    coSelectedIds={mergeMarkIds}
+                    onSelect={handleSelect}
+                    onDeletePart={(id, part) => {
+                      const field = part === 'head' ? 'headHoldSec' : part === 'tail' ? 'tailHoldSec' : 'roundHoldSec'
+                      setClips(prev => prev.map(c => c.id === id ? { ...c, [field]: 0, dirty: true } : c))
+                    }}
+                    onTrim={handleTrim}
+                    onDelete={handleDelete}
+                    onDragStart={handleDragStart}
+                    onDragOver={handleDragOver}
+                    onDrop={handleDrop}
+                    onDragEnd={handleDragEnd}
+                    draggingIndex={dropAt != null ? dragFromRef.current : null}
+                    dropSideFor={i => dropSideFor(1, i, clips.length)}
+                  />
                 </div>
               )}
             </div>

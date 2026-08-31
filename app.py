@@ -476,6 +476,43 @@ def load_project(name):
         return jsonify({"error": f"could not read project: {e}"}), 500
 
 
+@app.route("/api/projects/<name>/rename", methods=["POST"])
+def rename_project(name):
+    """Rename a saved project, keeping its `.nara` extension.
+
+    A separate route rather than a PUT on /api/projects/<name>, so it can't be
+    confused with save_project's replace-in-place semantics: this one moves a
+    file and never touches its contents.
+
+    The new name goes through _project_filename, NOT secure_filename — the same
+    reason save_project does: secure_filename rewrites a name instead of judging
+    it, and `Batch 1 V002` collapsing onto an existing `Batch_1_V002.nara` would
+    destroy a timeline. An existing target is refused with 409 rather than
+    replaced, because a .nara is the only record of the edit it holds.
+    """
+    data = request.get_json(force=True)
+    try:
+        old_path = fu.safe_path(name, PROJECTS_DIR)
+        new_name = _project_filename(data.get("newName"))
+    except fu.PathError as e:
+        return jsonify({"error": str(e)}), 400
+    if not os.path.isfile(old_path):
+        return jsonify({"error": "project not found"}), 404
+    new_path = os.path.join(PROJECTS_DIR, new_name)
+    # os.path.basename, not the raw name: the caller may have addressed the
+    # project without its extension, and comparing the typed string would call a
+    # no-op rename a collision.
+    if os.path.basename(old_path) == new_name:
+        return jsonify({"ok": True, "name": new_name})
+    if os.path.exists(new_path):
+        return jsonify({"error": f"a project named \"{new_name}\" already exists"}), 409
+    try:
+        os.rename(old_path, new_path)
+    except OSError as e:
+        return jsonify({"error": f"could not rename project: {e}"}), 500
+    return jsonify({"ok": True, "name": new_name})
+
+
 @app.route("/api/projects/<name>", methods=["DELETE"])
 def delete_project(name):
     try:
@@ -556,18 +593,23 @@ def get_export_quality():
 MAX_EXPORT_PRESETS = 200
 
 # Speed above 1x compresses a clip: setpts drops frames instead of holding them.
-# It exists for ONE reason — V2 Reconstruct emits the reciprocal of a V1
-# slow-down so a shot that was stretched from 24 frames to 48 comes back at 24
-# again — and it is exact, not an approximation: every slow-down preset was
-# rendered out and back and came home frame-for-frame byte-identical (a stretch
-# only duplicates frames, so the compression drops only duplicates).
+# Two producers now. V2 Reconstruct emits the reciprocal of a V1 slow-down so a
+# shot that was stretched from 24 frames to 48 comes back at 24 again; and since
+# 0.61.0 the Speed control offers the first two of those reciprocals (1.333x and
+# 2x) as ordinary speed-up presets, so a user can ask for one directly — the
+# deeper ones (2.5x/4x/5x) stay Reconstruct-only, which is a menu decision and
+# not a limit here. Either way it is exact, not an
+# approximation: every slow-down preset was rendered out and back and came home
+# frame-for-frame byte-identical (a stretch only duplicates frames, so the
+# compression drops only duplicates).
 #
 # The ceiling is derived, not picked. A slow-down is already bounded by the
 # 12 fps effective-rate floor below, so the slowest a clip can legally be is
 # 12/clip_fps, and the fastest un-stretch anyone can need is its reciprocal,
 # clip_fps/12 — which is 10x for a 120 fps source and less for everything
-# slower. Beyond that is nothing this app can produce, so it is refused rather
-# than silently rendered.
+# slower. Reconstruct reaches 5x (undoing a 0.2x stretch) and the Speed menu
+# only 2x, so both stay well inside this. Beyond the cap is nothing this app can
+# produce, so it is refused rather than silently rendered.
 MAX_SPEED = 10.0
 
 
@@ -1641,8 +1683,7 @@ def render_timeline():
         # effective frame rate, and it only bites on the SLOW side: refuse a
         # slow-down that would fall below 12 fps (frames held so long the motion
         # visibly stutters). A speed-up raises the effective rate, so the floor
-        # cannot apply to it; its ceiling is MAX_SPEED (see there for why
-        # speed > 1 exists at all).
+        # cannot apply to it; its ceiling is MAX_SPEED.
         try:
             # `or` would coerce a literal 0 to the default and skip the
             # range check below — only substitute the default for absent/null.
@@ -1653,8 +1694,7 @@ def render_timeline():
         clip_fps = info["fps"] or 30.0
         if not (0 < speed <= MAX_SPEED):
             return jsonify({"error": f"clip {i}: speed must be in (0, {MAX_SPEED:g}] — "
-                                     f"below 1 slows down, above 1 speeds up (which exists to "
-                                     f"un-stretch a slow-down; see MAX_SPEED)"}), 400
+                                     f"below 1 slows down, above 1 speeds up"}), 400
         if speed < 1.0 and clip_fps * speed < 12 - 1e-9:
             return jsonify({
                 "error": f"clip {i}: speed {speed} would drop the effective rate to "
