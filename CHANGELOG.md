@@ -15,6 +15,72 @@ the day the version file appeared. There are no tags for them and never will be 
 `v0.25.0` is the first real tag. Treat the older entries as a history, not a
 download list.
 
+## 0.63.1 — 2026-09-01
+
+Round Up now reads as a round number everywhere. It always did land the render on a
+whole second, but the readouts didn't say so: a sequence rounded up to exactly 14
+seconds showed a total of 00:00:13:21, then 00:00:13:23 after the round-up — a frame
+short of the second it had actually reached — while the Round Up button sat beside it
+still saying "whole (13.9s)" and the log kept warning that four separate clips
+weren't rounded. Nothing about the length changed; what changed is that the numbers
+on screen now come from the same measurement the render uses.
+
+- The transport's total is the length of the file V1 Render will write, counted in
+  whole frames at the sequence's own output frame rate. It reads 00:00:14:00 / 336
+  frames for a 14 second render. It no longer shifts when you merely click a
+  different clip in a mixed-frame-rate sequence.
+- The position and the total are now derived from one frame number, so timecode (TC)
+  and frame count (FR) can never name two different instants. Going to the last frame
+  reads 00:00:13:23 against a total of 00:00:14:00, the ordinary editing convention:
+  a position is a frame, a total is a length.
+- **The status text beside the Round Up button is gone** — the "whole (13.9s)" /
+  "+0.08s → 14s" caption. The transport now states the sequence's rendered length, so
+  that caption was the same fact a second time from a second measurement, and the two
+  could disagree: it was the thing on screen still saying "whole (13.9s)" next to a
+  total already reading 00:00:14:00. The button carries the state on its own, and its
+  tooltip still explains the rare case where the whole second isn't exactly reachable.
+- **Round Up greys out once the sequence is whole**, which is the feedback the caption
+  used to give: press it, and it goes dim. It used to stay lit afterwards and pressing
+  it again rewrote the identical hold — no visible change, but it cost an undo step and
+  marked the project unsaved. Of the 25 projects in `projects/` here, 22 render to an
+  exact whole second already and every one of them was showing a lit Round Up button.
+  It also stays dim in the one state Round Up genuinely can't fix — a stale hold that
+  has pushed the render past the second — instead of offering a fix that wouldn't work.
+- The log's round-up warning is now one message about the sequence, gated on what the
+  sequence currently renders to, and it goes away once the sequence is whole. It used
+  to warn once per clip and pointed at Round Up to fix a single clip, which Round Up
+  cannot do — it rounds the program, by holding the last frame of the last clip. It is
+  now the one place a not-whole render is called out in words.
+- Nothing on screen calls a long render whole any more. If a round-up hold is left on
+  the last clip and a later edit lengthens the rest of the sequence, the render can run
+  past the whole second while Round Up has nothing left to add — the transport shows the
+  real length, the log still warns, and the greyed-out button no longer claims the
+  sequence is whole. Select the amber ROUND segment on the last clip and press Delete to
+  clear the stale hold, then Round Up again.
+
+Playback is untouched: the playhead, the ruler, the clip lane and the audio bed bar
+are still drawn and driven in exact timeline seconds, and every seek is still clamped
+to that. The EDL panel's REC IN/OUT columns still read in timeline seconds too, so the
+last row can still show 00:00:13:23 for a 14 second render.
+
+## 0.63.0 — 2026-09-01
+
+The Project Library can hold folders now, so a long list of saved projects can be
+filed by job, cut or client instead of scrolling as one flat list. The folder
+button next to the library's close button makes one and drops straight into naming
+it; drag a project onto a folder to file it, drag a folder onto another to nest it,
+and drag anything onto the empty space below the list to bring it back out. Right
+click a project or a folder for the same menu the Media Bin and Export Bin have —
+rename, move out of folder, new folder inside, remove folder. Folders open closed,
+click one to open it, and a search opens every folder that has a match inside.
+
+The folders are a way of looking at the library, not directories on disk: nothing
+moves in `projects/`, so a project's filename — which is what Save writes back to —
+is never touched by filing it. Removing a folder removes only the grouping and its
+contents reappear one level up; nothing is deleted. Sorting, searching and the rest
+of the library work exactly as before, and a library with no folders looks and
+behaves identically to the old one.
+
 ## 0.62.2 — 2026-08-31
 
 The preview stage is now a card like everything else in that column. Its left and

@@ -8,16 +8,17 @@ import {
 
 // Every piece of bin-folder behaviour that isn't a panel's own row markup: the
 // persisted tree, the view state around it (collapse, inline rename, the drag in
-// flight) and the handlers. Both bins mount this — the Media Bin over input/, the
-// Export Bin over output/ — so a fix to a folder rule lands in both at once.
+// flight) and the handlers. Three panels mount this — the Media Bin over input/,
+// the Export Bin over output/, the Project Library over projects/ — so a fix to a
+// folder rule lands in all of them at once.
 //
-// `scope` ('input' | 'output') is the only difference between the two
+// `scope` ('input' | 'output' | 'projects') is the only difference between the
 // instances. It picks the localStorage key (see fileList.foldersKey) and the
 // directory named in the remove-folder confirm; nothing else here knows or cares
-// which bin it is running in.
+// which list it is running over.
 //
-// What stays with the PANEL rather than moving in here: the context menu (the two
-// bins render menus differently), row markup, and selection. Selection reaches us
+// What stays with the PANEL rather than moving in here: the context menu (the
+// panels render menus differently), row markup, and selection. Selection reaches us
 // only through `actingOn`, which answers "which files does a gesture on this row
 // apply to" — the Media Bin's multi-select version, or the default single row for
 // a bin that has no multi-select.

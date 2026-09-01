@@ -33,7 +33,7 @@ import AboutDialog from './components/AboutDialog'
 import FootageLossDialog from './components/FootageLossDialog'
 import FfmpegCustomSettings from './components/FfmpegCustomSettings'
 import Timeline from './components/Timeline/Timeline'
-import { sequenceTargetFps, clipRenderFrames, roundUpAmount, clampNoiseGainDb, normalizeBeds, bedLaneEndSec, bedInSec, fuseGroups } from './clipMath'
+import { sequenceTargetFps, sequenceRenderFrames, sequenceRaise, roundUpAmount, clampNoiseGainDb, normalizeBeds, bedLaneEndSec, bedInSec, fuseGroups } from './clipMath'
 import { loadTrackTags, tagTrack, renameTrackTag, isAudioFile, loadHideFootageLossWarning, saveHideFootageLossWarning } from './fileList'
 import { analyzeAgainstV1, batchCutAgainstV1, reconstructFromV1, sequencePieces } from './analyzeMath'
 import { mergeExportPresets } from './exportPresets'
@@ -619,24 +619,20 @@ function AppInner() {
 
   const logMessages = (() => {
     const msgs = []
-    // The clip's contribution to the RENDER, measured the way the render
-    // measures it: whole frames on the output grid, with the first/last hold
-    // rule applied. Measured raw — or with a mid-sequence hold counted that the
-    // render discards — this warns about clips the render already lands whole.
-    const logTargetFps = sequenceTargetFps(timelineClips)
-    timelineClips.forEach((c, i) => {
-      if (c.roundHoldSec > 0) return
-      const { totalFrames } = clipRenderFrames(c, {
-        isFirst: i === 0,
-        isLast: i === timelineClips.length - 1,
-        targetFps: logTargetFps,
-      })
-      const base = totalFrames / logTargetFps
-      const amount = roundUpAmount(base)
-      if (amount > 0) {
-        msgs.push({ kind: 'warn', text: `⚠ "${c.displayName || c.sourceName}" duration is not rounded up (${base.toFixed(1)}s) — use Raise to round to ${(base + amount).toFixed(0)}s` })
-      }
-    })
+    // Round Up rounds the SEQUENCE, so this warns about the sequence. Per-clip
+    // it warned about clips whose own rendered length isn't whole — four
+    // warnings on a four-clip sequence that renders to an exact 14s, telling the
+    // user to "use Raise" on a single clip, which Raise cannot do. And it is
+    // gated on the length the sequence renders to RIGHT NOW, round-up hold
+    // included: sequenceRaise measures the base with the hold stripped, so it
+    // still reports an amount after a successful Round Up and gating on that
+    // would leave the warning on screen for a whole render.
+    const raiseFps = sequenceTargetFps(timelineClips)
+    const renderedSec = sequenceRenderFrames(timelineClips, raiseFps) / raiseFps
+    if (timelineClips.length > 0 && roundUpAmount(renderedSec) > 0) {
+      const raise = sequenceRaise(timelineClips)
+      msgs.push({ kind: 'warn', text: `⚠ Sequence renders to ${renderedSec.toFixed(2)}s — not a whole second${raise.amountSec > 0 ? `. Round Up adds ${raise.amountSec.toFixed(2)}s to reach ${raise.exact ? '' : '≈'}${raise.wholeSec.toFixed(0)}s` : ''}` })
+    }
     // Overlay near-misses (a size that doesn't match the crop box, a missing
     // crop box) are surfaced here rather than as an alert: they're derived
     // continuously, so an alert would fire on every keystroke of a resize.

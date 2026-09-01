@@ -10,7 +10,7 @@ import TransportBar from './TransportBar'
 import { useMedia } from '../../context/MediaContext'
 import { probe } from '../../api'
 import { useTimelinePlayback } from '../../hooks/useTimelinePlayback'
-import { clipTotalSec, clipTotalPx, clipHeadPx, clipMainPx, sanitizeHoldPlacement, timelinePosToPx, sequenceVideoStartSec, clipStartSec, moveClip, swapBeds, dropTargetIndex, fuseGroups, fuseGroupIds, trimLossSec, deleteLossSec } from '../../clipMath'
+import { clipTotalSec, clipTotalPx, clipHeadPx, clipMainPx, sanitizeHoldPlacement, timelinePosToPx, sequenceVideoStartSec, clipStartSec, moveClip, swapBeds, dropTargetIndex, fuseGroups, fuseGroupIds, trimLossSec, deleteLossSec, sequenceTargetFps, sequenceRenderFrames } from '../../clipMath'
 import { addKeyframe, removeNearestKeyframe, sampleCropOrigin, clipTFromTimelinePos, retimeKeyframesForTrim } from '../../cropAnimation'
 
 const PPS = 60
@@ -215,8 +215,6 @@ export default function Timeline({
     await addFilesInOrder(files, onAddToA1, 'A1')
   }
 
-  const selectedClip = clips.find(c => c.id === selectedId)
-
   // The playhead/ruler/transport clock is ALWAYS driven by V1's own clip
   // list — V1 is the timeline of record. What the video element actually
   // decodes and shows at that position is separate: V2 sits "on top" of
@@ -305,7 +303,29 @@ export default function Timeline({
     positionPlayhead(transport.timelinePos)
   }, [positionPlayhead, transport.timelinePos, clips])
 
-  const activeFps = selectedClip?.fps || clips[0]?.fps || 24
+  // The transport reads the RENDER, not the drawn lane — the program length it
+  // advertises is the length of the file V1 Render writes. Two numbers, both
+  // load-bearing for Round Up:
+  //
+  //   • `renderFps` is the sequence's OUTPUT rate (app.py's target_fps = max
+  //     input fps), NOT the selected clip's. The old `selectedClip?.fps` named
+  //     frames on a grid the render never uses and made the advertised total
+  //     change when the user merely clicked a different clip in a mixed-fps
+  //     sequence.
+  //   • `renderFrames` is a sum of per-clip WHOLE frames (sequenceRenderFrames),
+  //     not the raw clipTotalSec sum. They differ by up to half a frame per clip
+  //     and the difference accumulates, which is why a Round Up that lands the
+  //     render on exactly 14.000s used to read 00:00:13:23 here — a frame short
+  //     of the whole second the round-up had actually produced.
+  //
+  // `transport.totalDuration` stays RAW on purpose and is still what every seek
+  // is clamped to: the lane, the Ruler, the playhead and buildSegments are all
+  // drawn and driven in raw seconds (clipMainSec — see gotchas.md), so
+  // quantizing the playback domain would put the transport's end past the end of
+  // the segments, where handleAfter can never reach it and playback would spin
+  // instead of stopping.
+  const renderFps = sequenceTargetFps(clips)
+  const renderFrames = sequenceRenderFrames(clips, renderFps)
 
   // Shift-click adds a clip to Merge's pick list instead of selecting it: the
   // primary selection and the playhead both stay where they are, which is what
@@ -843,7 +863,8 @@ export default function Timeline({
           looping={transport.looping}
           timelinePos={transport.timelinePos}
           totalDuration={transport.totalDuration}
-          fps={activeFps}
+          totalFrames={renderFrames}
+          fps={renderFps}
           onPlay={transport.play}
           onStop={transport.stop}
           onGoToStart={transport.goToStart}

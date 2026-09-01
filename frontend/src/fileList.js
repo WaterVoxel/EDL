@@ -188,10 +188,11 @@ export function filterByTrack(files, track, tags) {
 // loadBinFolders still reads it and treats those folders as top-level, so an
 // existing bin keeps its folders across the upgrade with nothing to migrate.
 //
-// `scope` is which bin's folders these are — 'input' for the Media Bin, 'output'
-// for the Export Bin — and it only ever picks the storage key. The two bins hold
-// completely separate trees for the same reason favorites do (storageKey above):
-// the same filename can exist in both directories and means a different file in
+// `scope` is which list's folders these are — 'input' for the Media Bin,
+// 'output' for the Export Bin, 'projects' for the Project Library — and it only
+// ever picks the storage key. Each holds a completely separate tree for the same
+// reason favorites do (storageKey above): the same filename can exist in more
+// than one directory and means a different file in
 // each. It defaults to 'input' throughout, and 'input' keeps the original
 // un-namespaced key, so an existing bin's folders survive with nothing to
 // migrate. Every function below is otherwise scope-blind: it takes the tree it

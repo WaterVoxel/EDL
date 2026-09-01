@@ -1,19 +1,39 @@
 import { useState, useEffect } from 'react'
 import { formatTimecode, parseTimecode } from '../../timecode'
+import { roundFrames } from '../../clipMath'
 
+// This bar is the app's headline program length, so both halves of it are
+// measured on the RENDER's frame grid (Timeline.jsx hands down `fps` =
+// sequenceTargetFps and `totalFrames` = sequenceRenderFrames). `totalDuration`
+// is the raw playback domain and is used for nothing but clamping a seek — the
+// two are deliberately different, see the comment on renderFps in Timeline.jsx.
 export default function TransportBar({
-  playing, looping, timelinePos, totalDuration, fps,
+  playing, looping, timelinePos, totalDuration, totalFrames, fps,
   onPlay, onStop, onGoToStart, onGoToEnd, onStepFrames, onToggleLoop, onSeekTimeline,
   displayMode, onToggleDisplayMode,
 }) {
   const [editing, setEditing] = useState(false)
   const [editValue, setEditValue] = useState('')
 
-  const currentFrame = Math.round(timelinePos * fps)
-  const totalFrames = Math.round(totalDuration * fps)
+  // Frames are numbered 0..totalFrames-1, so the LAST frame is one less than the
+  // length: on a 14.000s / 336-frame render, "go to last frame" reads
+  // 00:00:13:23 against a total of 00:00:14:00 — a position against a duration,
+  // the ordinary NLE reading, not two answers to one question.
+  //
+  // The clamp is what enforces that. The playhead lives in the raw domain, which
+  // runs a fraction of a frame either side of the render's own length and
+  // accumulates per clip, so without it the end of a long mixed-fps sequence
+  // could name a frame past the end of the file (337 of 336). roundFrames, not
+  // Math.round, for the reason the whole frame mirror uses it (clipMath).
+  const lastFrame = Math.max(totalFrames - 1, 0)
+  const currentFrame = Math.min(roundFrames(timelinePos * fps), lastFrame)
+  const totalSec = totalFrames / fps
 
+  // Both display modes are derived from the SAME frame number, so TC and FR can
+  // never name two different instants — and feeding formatTimecode an exact
+  // frame multiple means its own internal Math.round has no tie to get wrong.
   const displayValue = displayMode === 'timecode'
-    ? formatTimecode(timelinePos, fps)
+    ? formatTimecode(currentFrame / fps, fps)
     : `${currentFrame}`
 
   useEffect(() => {
@@ -154,7 +174,7 @@ export default function TransportBar({
 
       {/* Total duration / frames */}
       <span className="text-[9px] text-neutral-600 font-mono ml-0.5">
-        / {displayMode === 'timecode' ? formatTimecode(totalDuration, fps) : totalFrames}
+        / {displayMode === 'timecode' ? formatTimecode(totalSec, fps) : totalFrames}
       </span>
     </div>
   )
