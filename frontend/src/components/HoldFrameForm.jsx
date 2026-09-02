@@ -1,18 +1,51 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import NumericStepper from './NumericStepper'
+import { holdFrames, sequenceTargetFps } from '../clipMath'
 
 // Head/tail holds always attach to the sequence's outer edges — the first
 // clip's head, the last clip's tail — never to a boundary between clips,
 // so which clip is "selected" doesn't matter here.
-export default function HoldFrameForm({ clips, setClips }) {
+//
+// `displayMode` is the shared timecode/frames toggle in the transport bar, the
+// same one Trim follows: in 'frames' the field counts frames instead of seconds,
+// so a hold can be asked for in the same unit the clock is showing.
+export default function HoldFrameForm({ clips, setClips, displayMode = 'timecode' }) {
   const [duration, setDuration] = useState('1')
 
   const firstClip = clips[0] || null
   const lastClip = clips[clips.length - 1] || null
 
+  // The hold is ALWAYS stored in seconds (headHoldSec/tailHoldSec); fps here is
+  // only the unit the field is read and written in. It's the sequence's render
+  // grid — what the transport clock and Round Up count on — rather than the
+  // first/last clip's own rate, so a frame typed here means a frame of the
+  // finished render, the only frame count shown anywhere else. (Identical on a
+  // single-fps sequence, which is all of them so far; the render still
+  // re-quantizes the hold on its clip's own fps, per clipRenderFrames.)
+  const fps = sequenceTargetFps(clips)
+
+  // Unlike Trim's fields this value isn't derived from a clip — it's the user's
+  // own standing entry, kept across a toggle — so flipping TC/FR has to convert
+  // it in place. Left alone, "1" second would silently become "1" frame and the
+  // next Head press would apply a 42ms hold instead of a 1s one.
+  const modeRef = useRef(displayMode)
+  useEffect(() => {
+    if (modeRef.current === displayMode) return
+    const from = modeRef.current
+    modeRef.current = displayMode
+    setDuration(prev => {
+      const n = parseFloat(prev)
+      if (Number.isNaN(n) || n < 0) return prev
+      // holdFrames is the render's own hold quantization (round half-to-even),
+      // not Math.round — see clipMath's note on why that difference is real.
+      return from === 'frames' ? String(parseFloat((n / fps).toFixed(4))) : String(holdFrames(n, fps))
+    })
+  }, [displayMode, fps])
+
   function apply(which) {
-    const dur = parseFloat(duration)
-    if (Number.isNaN(dur) || dur < 0) return
+    const typed = parseFloat(duration)
+    if (Number.isNaN(typed) || typed < 0) return
+    const dur = displayMode === 'frames' ? typed / fps : typed
     const target = which === 'head' ? firstClip : lastClip
     if (!target) return
     const field = which === 'head' ? 'headHoldSec' : 'tailHoldSec'
@@ -31,10 +64,12 @@ export default function HoldFrameForm({ clips, setClips }) {
       <NumericStepper
         value={duration}
         onChange={setDuration}
-        step={0.1}
+        step={displayMode === 'frames' ? 1 : 0.1}
         min={0}
         disabled={disabled}
       />
+      {/* Unit tell, same as Trim's — without it "12" reads as twelve seconds. */}
+      <span className="text-[8px] text-neutral-600">{displayMode === 'frames' ? 'fr' : 's'}</span>
       <button
         onClick={() => apply('head')}
         disabled={disabled}

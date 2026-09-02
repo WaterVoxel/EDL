@@ -15,6 +15,24 @@ the day the version file appeared. There are no tags for them and never will be 
 `v0.25.0` is the first real tag. Treat the older entries as a history, not a
 download list.
 
+## 0.64.1 — 2026-09-02
+
+The top bar has no grey fill and no dividing line any more. The title, version, pane
+switch and the row of icon buttons sit straight on the app background, so the bar
+reads as controls on the page rather than a banded strip above it. Every one of those
+buttons already had its own outline, so nothing lost contrast.
+
+## 0.64.0 — 2026-09-02
+
+The Hold field now follows the TC/FR switch, like Trim already did. Flip the
+transport clock to frames and Hold counts frames — type `12`, press Head, and you
+get a twelve-frame freeze; flip back and it reads seconds again. The number in the
+box is converted when you flip, so a 1s hold becomes 24 (or whatever the sequence
+renders at) rather than quietly turning into one frame, and a small `s`/`fr` label
+next to the box says which unit you're in. Frames are counted on the same grid the
+total duration and Round Up use, so a hold asked for in frames is that many frames
+of the finished render.
+
 ## 0.63.1 — 2026-09-01
 
 Round Up now reads as a round number everywhere. It always did land the render on a

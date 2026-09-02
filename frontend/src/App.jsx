@@ -1906,7 +1906,7 @@ function AppInner() {
         className="w-5 h-5 flex items-center justify-center rounded text-[9px] text-neutral-400 hover:text-white hover:bg-neutral-700 disabled:opacity-40"
       >↩</button>
       <div className="w-px h-3.5 bg-neutral-700" />
-      <HoldFrameForm clips={activeClips} setClips={setActiveClips} />
+      <HoldFrameForm clips={activeClips} setClips={setActiveClips} displayMode={timeDisplayMode} />
       <div className="w-px h-3.5 bg-neutral-700" />
       {/* onFootageLoss gated on V1: this form writes through setActiveClips, so
           it edits whichever lane is focused, and only V1's losses cost anything. */}
@@ -1960,8 +1960,17 @@ function AppInner() {
 
   return (
     <div className="flex flex-col h-screen bg-neutral-950 text-neutral-200">
-      {/* Top toolbar */}
-      <div className="flex items-center justify-between px-3 py-1.5 border-b border-neutral-800 bg-neutral-900 shrink-0">
+      {/* Top toolbar. NO fill and NO bottom rule of its own (it had
+          bg-neutral-900 + border-b border-neutral-800): the bar sits straight on
+          the app canvas so the title, version, pane switch and the glyph buttons
+          read as controls on the page rather than as a banded chrome strip above
+          it — the same island-on-canvas logic the stage and the side columns
+          already follow. Every control up here carries its own border and no
+          fill, so they stay legible without a bar behind them; the only filled
+          ones are the two deliberate ACTIVE states (custom encode, tour
+          running), which stand out more for it. What separates the bar from the
+          work area is now the columns' own 8px padding, not a line. */}
+      <div className="flex items-center justify-between px-3 py-1.5 shrink-0">
         {/* Plain label, not a button: it used to open the About dialog, but a
             title with no affordance is a hidden control — the document-icon
             button on the right is now the only way in, and it looks like one. */}
