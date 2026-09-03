@@ -15,6 +15,38 @@ the day the version file appeared. There are no tags for them and never will be 
 `v0.25.0` is the first real tag. Treat the older entries as a history, not a
 download list.
 
+## 0.66.0 — 2026-09-03
+
+**The top bar's four occasional buttons are now one ⋯ drop-down, and New moved up beside
+Save As.** The project row was ten icons wide with no grouping; the ones you actually
+touch mid-edit are now the only ones taking up space.
+
+- **Library, Save, Save As, New** stay as buttons, in that order — New used to sit past
+  the export icons, away from the other three things you do to the project you're in.
+- **Export project, Import project, Export EDL and FFmpeg Custom Settings** are inside the
+  ⋯ menu after them. Same actions, same icons, same rules about when they're available.
+- **The ⋯ button still glows green while custom encode settings are the ones Render will
+  use** — that was the gear button's whole job and it shouldn't need a menu opened to see
+  it. The menu item says ACTIVE too, since the button is behind the menu once it's open.
+- Click the ⋯ again, click anywhere else, or press Escape to close it.
+
+## 0.65.0 — 2026-09-03
+
+**Drag files straight from the Media Bin onto V1 or V2.** Grab a row in the Media Bin
+and drop it on a track instead of hunting for the `+` button. The lane highlights while
+you're over it, same as dropping a file in from Finder.
+
+- **V1** takes as many files as you have selected and adds them to the end of the lane,
+  in the order they're listed. Drop an audio file there and it still becomes the A1 bed
+  underneath, exactly like the `+` button does.
+- **V2** takes one file (it only ever holds one), and only while it's empty — so a stray
+  drag can't wipe out a Reverse or Reconstruct result. Clear V2 first to swap files.
+- **Video only on V2.** Dropping audio there used to be possible via other routes and
+  would fail the render much later with a confusing ffmpeg error; V2 now says so up front
+  in the log and points you at V1 instead.
+- Export Bin and Project Library rows are not droppable on the timeline — the timeline
+  works from `input/` files only, so those lanes don't light up for them at all.
+
 ## 0.64.1 — 2026-09-02
 
 The top bar has no grey fill and no dividing line any more. The title, version, pane

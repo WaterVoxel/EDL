@@ -3,7 +3,7 @@ import {
   loadBinFolders, createBinFolder, renameBinFolder, deleteBinFolder,
   moveFilesToBinFolder, moveFolderToParent, isDescendantFolder,
   folderOfFile, renameBinFolderFile, buildBinRows,
-  DEFAULT_FOLDER_NAME,
+  DEFAULT_FOLDER_NAME, writeBinDragPayload,
 } from '../fileList'
 
 // Every piece of bin-folder behaviour that isn't a panel's own row markup: the
@@ -172,10 +172,25 @@ export default function useBinFolders({
   // Grabbing a row that's part of a multi-selection drags the whole selection;
   // grabbing anything else drags that row alone, and `onDragCollapse` lets the
   // panel narrow its selection to it so what moves is exactly what's highlighted.
+  // 'copyMove', not 'move': the same drag can end on a bin folder (a move — the
+  // file leaves one folder for another) or on a timeline lane (a copy — the file
+  // stays in the bin and a clip referencing it is added). A drop target whose
+  // dropEffect isn't permitted by effectAllowed is refused outright, so naming
+  // only 'move' here would make the lanes reject the drop.
   function handleFileDragStart(e, name, folder) {
-    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.effectAllowed = 'copyMove'
     const names = actingOn(name)
     if (names.length === 1) onDragCollapse?.(name)
+    // The names also go ON the event, which is the only channel the Timeline
+    // (a sibling of this panel, so blind to the state below) can read. Harmless
+    // to the folder-filing path: every handler in this hook gates on `dragging`
+    // rather than inspecting dataTransfer.
+    //
+    // Media Bin only. The Export Bin lists output/ and the Project Library lists
+    // .nara files, while every clip the timeline builds hardcodes sourceDir
+    // 'input' — so those two never advertise the payload, and their rows don't
+    // light a lane up only to be refused on drop.
+    if (scope === 'input') writeBinDragPayload(e.dataTransfer, scope, names)
     setDragFiles(names)
     setDropFolder(folder)
   }

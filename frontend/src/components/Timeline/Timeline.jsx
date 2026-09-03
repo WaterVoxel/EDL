@@ -9,6 +9,7 @@ import EdlTable from './EdlTable'
 import TransportBar from './TransportBar'
 import { useMedia } from '../../context/MediaContext'
 import { probe } from '../../api'
+import { BIN_DRAG_MIME, readBinDragPayload } from '../../fileList'
 import { useTimelinePlayback } from '../../hooks/useTimelinePlayback'
 import { clipTotalSec, clipTotalPx, clipHeadPx, clipMainPx, sanitizeHoldPlacement, timelinePosToPx, sequenceVideoStartSec, clipStartSec, moveClip, swapBeds, dropTargetIndex, fuseGroups, fuseGroupIds, trimLossSec, deleteLossSec, sequenceTargetFps, sequenceRenderFrames } from '../../clipMath'
 import { addKeyframe, removeNearestKeyframe, sampleCropOrigin, clipTFromTimelinePos, retimeKeyframesForTrim } from '../../cropAnimation'
@@ -39,6 +40,10 @@ function EyeIcon({ off, className }) {
 
 export default function Timeline({
   clips, setClips, onAddToV1, selectedId, selectedPart = 'main', onSelectId, onSelectItem, onUndo, canUndo,
+  // The Media Bin drag drops files that are ALREADY in input/, so these take a
+  // filename where onAddToV1/onAddToV2 take a File to upload first. Both default
+  // to inert: without them the lanes simply don't accept a bin drag.
+  onAddToV1ByName = null, onAddToV2ByName = null,
   track2Clips = [], setTrack2Clips, selectedId2 = null, selectedPart2 = 'main', onSelectItem2,
   // Merge's second selection. `onPickForMerge(id, additive, track)` is called on
   // every clip-body click with the Shift state; `mergeMarkIds` is the set that
@@ -111,14 +116,17 @@ export default function Timeline({
   // main.jsx's global handler naming the error but not the files it cost.
   // Failures are collected and reported once, at the end, so a three-file drop
   // where the middle one dies still lands the third and says which one didn't.
-  async function addFilesInOrder(files, add, lane) {
+  // `labelOf` is how the same loop serves both kinds of item this takes: File
+  // objects from an OS drop (name on the object) and bare filenames from a
+  // Media Bin drag (the item IS the name).
+  async function addFilesInOrder(files, add, lane, labelOf = f => f.name) {
     const list = Array.from(files)
     const failed = []
     for (const file of list) {
       try {
         await add(file)
       } catch (err) {
-        failed.push(`${file.name} — ${err?.message || err}`)
+        failed.push(`${labelOf(file)} — ${err?.message || err}`)
       }
     }
     // Swallowing the errors above is also what keeps the global handler quiet:
@@ -141,11 +149,31 @@ export default function Timeline({
     await addFilesInOrder(files, onAddToV1, 'V1')
   }
 
+  // A drag out of the Media Bin. The files are already in input/, so this skips
+  // the upload but keeps the sequential await for the same reason handleV1Files
+  // has it: each name is probed before it's appended, and racing those would
+  // append them in whatever order the network finished in.
+  //
+  // The scope check is belt-and-braces: only the Media Bin (input/) writes the
+  // payload at all, precisely so a lane never lights up for an Export Bin or
+  // Project Library row it would then have to refuse. Kept here so that if
+  // another panel ever starts advertising the payload, the clips built below —
+  // which all hardcode sourceDir 'input' — don't silently point at the wrong dir.
+  async function handleV1BinDrop({ scope, names }) {
+    if (!onAddToV1ByName || scope !== 'input') return
+    await addFilesInOrder(names, onAddToV1ByName, 'V1', n => n)
+  }
+
   // V1's lane is BOTH a file drop target and the clip-reorder drop target, so
   // every handler on it has to tell the two apart. A reorder drag carries no
   // files, which `types` reports during dragover (where `files` is always
   // empty by design) and `files.length` reports on drop itself.
   const isFileDrag = e => Array.from(e.dataTransfer?.types || []).includes('Files')
+
+  // ...and a bin drag is a third kind, which carries neither files nor a clip
+  // index — only its own private MIME type (fileList.BIN_DRAG_MIME). During
+  // dragover `types` is the only thing readable, which is all this needs.
+  const isBinDrag = e => Array.from(e.dataTransfer?.types || []).includes(BIN_DRAG_MIME)
 
   // A reorder drag that is over the lane but not over any clip — i.e. the empty
   // stretch past the last one. `data-clip` is how that's told apart: clip drags
@@ -155,6 +183,15 @@ export default function Timeline({
 
   const v1FileDragProps = {
     onDragOver: e => {
+      if (isBinDrag(e)) {
+        e.preventDefault()
+        // A bin drop is a COPY — the file stays in the bin and V1 gains a clip
+        // that references it. Saying so is what stops the browser showing the
+        // move cursor the same drag uses when it lands on a bin folder.
+        e.dataTransfer.dropEffect = 'copy'
+        setV1DragOver(true)
+        return
+      }
       if (!isFileDrag(e)) {
         // Dropping past the end means "put it last", so that move doesn't require
         // hitting the right half of a 24px clip. preventDefault is what makes the
@@ -168,7 +205,7 @@ export default function Timeline({
       e.preventDefault()
       setV1DragOver(true)
     },
-    onDragEnter: e => { if (!isFileDrag(e)) return; e.preventDefault(); setV1DragOver(true) },
+    onDragEnter: e => { if (!isFileDrag(e) && !isBinDrag(e)) return; e.preventDefault(); setV1DragOver(true) },
     // Crossing from the lane onto one of its own clips fires dragleave on the
     // lane too (the event bubbles), which would strobe the highlight on every
     // clip boundary the pointer passes over. Only a leave that actually exits
@@ -181,6 +218,15 @@ export default function Timeline({
       setDropAt(null)
     },
     onDrop: e => {
+      // Tested FIRST: a bin drag carries no files either, so the reorder branch
+      // below would otherwise swallow it and drop it on the floor.
+      const bin = readBinDragPayload(e.dataTransfer)
+      if (bin) {
+        e.preventDefault()
+        setV1DragOver(false)
+        handleV1BinDrop(bin)
+        return
+      }
       if (!e.dataTransfer.files.length) {
         // A clip reorder. If it landed ON a clip, that clip's own drop handler has
         // already run (this is just the event bubbling through) and cleared
@@ -204,6 +250,15 @@ export default function Timeline({
   function handleV2Files(files) {
     const file = files[0]
     if (file && onAddToV2) onAddToV2(file)
+  }
+
+  // One name only, matching handleV2Files above: V2 is a scratch track holding
+  // exactly one clip, so a multi-selection dropped there means the first of them
+  // rather than a lane full. Non-video names are refused by the handler on the
+  // App side, which is where the warning log lives.
+  function handleV2BinDrop({ scope, names }) {
+    if (!onAddToV2ByName || scope !== 'input') return
+    onAddToV2ByName(names[0])
   }
 
   // A1 is a lane, so a multi-file drop lands as several clips end to end.
@@ -1064,10 +1119,24 @@ export default function Timeline({
                 <div className="flex-1 relative">
                   {track2Clips.length === 0 ? (
                     <label
-                      onDragOver={e => { e.preventDefault(); setV2DragOver(true) }}
+                      onDragOver={e => {
+                        e.preventDefault()
+                        // Same as V1's lane: a bin drop copies (the file stays in
+                        // the bin), and the drag's effectAllowed has to be told so.
+                        if (isBinDrag(e)) e.dataTransfer.dropEffect = 'copy'
+                        setV2DragOver(true)
+                      }}
                       onDragEnter={e => { e.preventDefault(); setV2DragOver(true) }}
                       onDragLeave={() => setV2DragOver(false)}
-                      onDrop={e => { e.preventDefault(); setV2DragOver(false); handleV2Files(e.dataTransfer.files) }}
+                      onDrop={e => {
+                        e.preventDefault()
+                        setV2DragOver(false)
+                        // A bin drag carries names, not files — check it first or
+                        // handleV2Files would get an empty FileList and no-op.
+                        const bin = readBinDragPayload(e.dataTransfer)
+                        if (bin) handleV2BinDrop(bin)
+                        else handleV2Files(e.dataTransfer.files)
+                      }}
                       className={`flex w-full items-center justify-center gap-1.5 px-3 h-10 text-[10px] cursor-pointer transition-colors ${v2DragOver ? 'bg-teal-950/40 text-teal-300' : 'bg-neutral-950/50 text-neutral-600 hover:text-neutral-400'}`}
                     >
                       <span>Drop file or Choose file to reverse</span>

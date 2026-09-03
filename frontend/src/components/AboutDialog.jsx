@@ -98,8 +98,8 @@ export default function AboutDialog({ onClose }) {
             <p>
               <strong>Custom</strong> is the same machinery with every knob exposed — target size,
               safety headroom, codec, speed preset, profile, pixel format, rate-control multipliers
-              and raw ffmpeg flags — in <strong>FFmpeg Custom Settings</strong> (the gear button in
-              the top bar). Settings there can be saved as named presets, exported and imported as
+              and raw ffmpeg flags — in <strong>FFmpeg Custom Settings</strong>, in the ⋯ menu in
+              the top bar. Settings there can be saved as named presets, exported and imported as
               files, and travel inside the project file, so a delivery spec is set up once and
               reused. HEVC output isn't browser-playable, so previewing it in-app transcodes on the
               fly; it's a delivery format, not a working one.

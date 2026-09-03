@@ -71,6 +71,50 @@ export function isAudioFile(name) {
   return AUDIO_EXTENSIONS.some(ext => lower.endsWith(ext))
 }
 
+// --- The bin → timeline drag payload ---------------------------------------
+// A bin row's drag normally carries NOTHING on dataTransfer: useBinFolders
+// keeps the dragged names in React state, and "no dataTransfer items" is how
+// the bin tells its own drag apart from an OS file drop. That works inside one
+// panel, but the Timeline is a SIBLING of the Media Bin and can't see that
+// state, so a bin → V1/V2 drag needs a marker on the event itself. This
+// private MIME type is it: a lane reads `types` during dragover (the only thing
+// readable then) to decide whether to light up, and getData on drop for the
+// names. A custom type does NOT add 'Files' to `types`, so Timeline's
+// isFileDrag still cleanly distinguishes an OS drop from this one.
+export const BIN_DRAG_MIME = 'application/x-nara-bin-files'
+
+export function writeBinDragPayload(dataTransfer, scope, names) {
+  try {
+    dataTransfer.setData(BIN_DRAG_MIME, JSON.stringify({ scope, names }))
+  } catch {
+    // setData can throw outside a real drag event; the drop just won't be
+    // offered, which is the same as today's behaviour rather than a crash.
+  }
+}
+
+// Returns { scope, names } or null — null meaning "not one of our drags", which
+// is what every caller branches on. Anything malformed reads as null rather
+// than throwing: this parses data that left our process, so a half-written or
+// spoofed payload must not take the drop handler down with it.
+export function readBinDragPayload(dataTransfer) {
+  let raw
+  try {
+    raw = dataTransfer?.getData?.(BIN_DRAG_MIME)
+  } catch {
+    return null
+  }
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw)
+    if (!parsed || !Array.isArray(parsed.names)) return null
+    const names = parsed.names.filter(n => typeof n === 'string' && n)
+    if (!names.length) return null
+    return { scope: parsed.scope, names }
+  } catch {
+    return null
+  }
+}
+
 // Track tags mark which timeline track(s) a source file has been placed on.
 // A file in input/ is not inherently V1 or V2 — the tag is STAMPED the first
 // time the file enters a track (V1 via the bin's +/drag → handleAddToTimeline;

@@ -32,6 +32,7 @@ import ProjectLibrary from './components/ProjectLibrary'
 import AboutDialog from './components/AboutDialog'
 import FootageLossDialog from './components/FootageLossDialog'
 import FfmpegCustomSettings from './components/FfmpegCustomSettings'
+import ContextMenu from './components/ContextMenu'
 import Timeline from './components/Timeline/Timeline'
 import { sequenceTargetFps, sequenceRenderFrames, sequenceRaise, roundUpAmount, clampNoiseGainDb, normalizeBeds, bedLaneEndSec, bedInSec, fuseGroups } from './clipMath'
 import { loadTrackTags, tagTrack, renameTrackTag, isAudioFile, loadHideFootageLossWarning, saveHideFootageLossWarning } from './fileList'
@@ -106,9 +107,11 @@ function GearIcon() {
   )
 }
 
-// The project group's seven icons — Library / Save / Save As / Export / Import /
-// Export EDL / New. Same 24-grid stroked idiom as the three above, so the whole
-// top-right row reads as one set of ten square buttons rather than a row of
+// The project group's icons — Library / Save / Save As / New always visible, and
+// Export / Import / Export EDL now living inside the ⋯ drop-down beside them
+// (with FFmpeg Custom Settings) since they are the ones reached occasionally
+// rather than mid-edit. Same 24-grid stroked idiom as the three above, so the
+// whole top-right row reads as one set of square buttons rather than a row of
 // words followed by a row of glyphs.
 //
 // Two choices worth knowing, both about telling a pair apart at 13px:
@@ -189,6 +192,22 @@ function NewIcon() {
     <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <rect x="5.2" y="3.5" width="13.6" height="17" rx="1.8" />
       <path d="M12 9v6M9 12h6" />
+    </svg>
+  )
+}
+
+// The drop-down's trigger: three dots for "more of these" plus a chevron, the
+// two halves of the one glyph in this row that opens a menu instead of doing
+// something. Deliberately NOT one of the four icons it now hides — borrowing
+// Export's arrow to stand for a group containing Import as well would be a lie
+// about what the button does.
+function MoreMenuIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="5.5" cy="9" r="1.15" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="9" r="1.15" fill="currentColor" stroke="none" />
+      <circle cx="18.5" cy="9" r="1.15" fill="currentColor" stroke="none" />
+      <path d="M8.5 14.5 12 18l3.5-3.5" />
     </svg>
   )
 }
@@ -383,6 +402,13 @@ function AppInner() {
   const [resizingSide, setResizingSide] = useState(null)
   const previewStageRef = useRef(null)
   const importInputRef = useRef(null)
+  // The top bar's ⋯ drop-down (Export / Import / Export EDL / FFmpeg Custom
+  // Settings). `null` = closed; otherwise the viewport point ContextMenu opens
+  // at, taken off the trigger's own rect. Held as state rather than a boolean so
+  // ContextMenu's existing {x, y} contract is reused unchanged; the ref is what
+  // lets it tell "clicked the trigger again" from "clicked away".
+  const [projectMenuAt, setProjectMenuAt] = useState(null)
+  const projectMenuBtnRef = useRef(null)
   // The Timeline/AGENT/Actions dock's own wrapper (a single, stable DOM
   // node — only its children swap on tab change, per centerTab). Its
   // rendered height while showing Timeline becomes the fixed height
@@ -1256,14 +1282,36 @@ function AppInner() {
   async function handleAddToV2(file) {
     const result = await upload(file)
     if (result.error) { alert('Upload failed: ' + result.error); return }
-    const info = await probe(result.name, 'input')
+    await addToV2ByName(result.name)
+    refresh()
+  }
+
+  // Shared tail of both routes onto V2 — a freshly uploaded file (above) and one
+  // already sitting in input/ (dragged out of the Media Bin) — split apart for
+  // the same reason addBedByName is: the drop from the bin has nothing to upload.
+  //
+  // V2 REPLACES rather than appends: it's a scratch track that means "this is the
+  // clip to reverse/reconstruct against", so there is only ever one thing on it.
+  async function addToV2ByName(name) {
+    // V2 is a video track with no bed semantics to fall back on — an audio file
+    // here has no video stream and would fail the render with a filtergraph
+    // error long after the user forgot what they dropped. Extension-based to
+    // match the lane's own `accept` list and the V1/A1 route, no probe needed.
+    if (isAudioFile(name)) {
+      setAnalyzeLog(prev => [
+        { kind: 'warn', text: `⚠ "${name}" is audio — V2 takes video only. Drop it on V1 to run it underneath as the A1 bed instead` },
+        ...prev,
+      ])
+      return
+    }
+    const info = await probe(name, 'input')
     if (info.error) { alert('Could not probe file: ' + info.error); return }
     // Sticky-tag this source as a V2 file for the Media Bin filter.
-    setTrackTags(prev => tagTrack(result.name, 'v2', prev))
+    setTrackTags(prev => tagTrack(name, 'v2', prev))
     const videoDur = info.video_duration || info.duration
     setTrack2Clips([{
       id: crypto.randomUUID(),
-      sourceName: result.name,
+      sourceName: name,
       sourceDir: 'input',
       sourceDurationSec: videoDur,
       sourceWidth: info.width || null,
@@ -1280,7 +1328,9 @@ function AppInner() {
       cropKeyframes: [],
       dirty: true,
     }])
-    refresh()
+    // No refresh() here — nothing changed on disk. The upload route above owns
+    // that, and the bin-drop route is adding a file the listing already shows
+    // (the new v2 tag comes off trackTags state, not the listing).
   }
 
   // A1 APPENDS: a new file starts where the last one on the lane ends, exactly
@@ -1868,6 +1918,47 @@ function AppInner() {
     URL.revokeObjectURL(link.href)
   }
 
+  // The top bar's ⋯ drop-down. Every item is one of the four buttons that used to
+  // sit in the row, with the same handler and the same disabled rule (nothing to
+  // export with an empty V1) — Import and the settings window stay enabled
+  // because both are how you GET something to work on. useCallback because
+  // ContextMenu subscribes its document-level listeners keyed on `onClose`, so a
+  // new identity each render would tear them down and re-add them ~every render.
+  const closeProjectMenu = useCallback(() => setProjectMenuAt(null), [])
+  //
+  // Each item keeps its OWN glyph rather than becoming plain text: those four
+  // icons are a designed set (see the comment above LibraryIcon) and anyone who
+  // learned them in the toolbar should still recognise the row they moved to.
+  const projectMenuItems = [
+    {
+      label: <span className="flex items-center gap-2"><ExportIcon />Export project (.nara)</span>,
+      onClick: handleExportProject,
+      disabled: timelineClips.length === 0,
+    },
+    {
+      label: <span className="flex items-center gap-2"><ImportIcon />Import project…</span>,
+      onClick: () => importInputRef.current?.click(),
+    },
+    {
+      label: <span className="flex items-center gap-2"><ExportEdlIcon />Export EDL</span>,
+      onClick: handleExportEdl,
+      disabled: timelineClips.length === 0,
+    },
+    {
+      separatorBefore: true,
+      // Encoder settings, not project settings — hence the rule above it. The
+      // ACTIVE marker repeats what the trigger's emerald says, because from
+      // inside the menu the trigger is hidden behind it.
+      label: (
+        <span className="flex items-center gap-2">
+          <GearIcon />FFmpeg Custom Settings…
+          {exportQuality === 'custom' && <span className="ml-auto text-[9px] text-emerald-400">ACTIVE</span>}
+        </span>
+      ),
+      onClick: () => setShowFfmpegSettings(true),
+    },
+  ]
+
   const displayInfo = (() => {
     if (!binSelection?.info) return null
     const info = { ...binSelection.info, _name: binSelection.name }
@@ -2056,20 +2147,18 @@ function AppInner() {
           >
             <SaveAsIcon />
           </button>
+          {/* New sits with Save/Save As rather than off past the file actions:
+              all four are things done TO the project you are in, and New is the
+              one people reach for by muscle memory beside them.
+              Gained a tooltip when it lost its label: it reloads the page, so an
+              unsaved timeline goes with it, and that is worth knowing BEFORE the
+              click now that the button is a glyph. */}
           <button
-            onClick={handleExportProject}
-            disabled={timelineClips.length === 0}
-            title="Export — download the project as a .nara file"
-            className="w-6 h-6 flex items-center justify-center rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 hover:border-neutral-500 disabled:opacity-40"
-          >
-            <ExportIcon />
-          </button>
-          <button
-            onClick={() => importInputRef.current?.click()}
-            title="Import — load a project from a .nara file"
+            onClick={() => location.reload()}
+            title="New — start a fresh session (reloads the app; unsaved timeline edits are lost)"
             className="w-6 h-6 flex items-center justify-center rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 hover:border-neutral-500"
           >
-            <ImportIcon />
+            <NewIcon />
           </button>
           <input
             ref={importInputRef}
@@ -2082,38 +2171,47 @@ function AppInner() {
               e.target.value = ''
             }}
           />
-          <button
-            onClick={handleExportEdl}
-            disabled={timelineClips.length === 0}
-            title="Export EDL — write the edit decision list as a file"
-            className="w-6 h-6 flex items-center justify-center rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 hover:border-neutral-500 disabled:opacity-40"
-          >
-            <ExportEdlIcon />
-          </button>
           <div className="w-px h-4 bg-neutral-700" />
-          {/* Gained a tooltip when it lost its label: it reloads the page, so an
-              unsaved timeline goes with it, and that is worth knowing BEFORE the
-              click now that the button is a glyph. */}
+          {/* One drop-down for the four occasional ones — Export, Import, Export
+              EDL and FFmpeg Custom Settings. They were four more icon buttons in
+              a row of ten, none of them reached mid-edit, and the encoder gear
+              belongs with the exports it decides the contents of rather than
+              beside New.
+              It keeps the gear's emerald ACTIVE tint on the TRIGGER, not just on
+              the menu item: "a custom two-pass encode is what Render will use" is
+              a state that has to be visible without opening anything, which is
+              the whole reason that button glowed. */}
           <button
-            onClick={() => location.reload()}
-            title="New — start a fresh session (reloads the app; unsaved timeline edits are lost)"
-            className="w-6 h-6 flex items-center justify-center rounded border border-neutral-700 text-neutral-400 hover:text-neutral-200 hover:border-neutral-500"
-          >
-            <NewIcon />
-          </button>
-          {/* Encoder settings, not project settings — but it sits with the
-              icon buttons because it's icon-only, and beside Export/Import
-              because it decides what those exports are made of. Lit while the
-              custom mode is the one Render will use. */}
-          <button
-            onClick={() => setShowFfmpegSettings(true)}
+            ref={projectMenuBtnRef}
+            onClick={() => setProjectMenuAt(prev => {
+              if (prev) return null
+              const r = projectMenuBtnRef.current.getBoundingClientRect()
+              // ContextMenu clamps itself back inside the viewport, so hanging it
+              // off the left edge here is safe even though this button is inches
+              // from the right edge of the window.
+              return { x: r.left, y: r.bottom + 4 }
+            })}
             title={exportQuality === 'custom'
-              ? 'FFmpeg Custom Settings — custom two-pass encode is ACTIVE for exports'
-              : 'FFmpeg Custom Settings — size-capped two-pass HEVC/H.264 encode, with saved presets'}
-            className={`w-6 h-6 flex items-center justify-center rounded border ${exportQuality === 'custom' ? 'bg-emerald-600/20 text-emerald-400 border-emerald-500' : 'border-neutral-700 text-neutral-400 hover:text-emerald-300 hover:border-emerald-500'}`}
+              ? 'Project files & encoder — Export, Import, Export EDL, FFmpeg Custom Settings (custom encode is ACTIVE)'
+              : 'Project files & encoder — Export, Import, Export EDL, FFmpeg Custom Settings'}
+            className={`w-6 h-6 flex items-center justify-center rounded border ${
+              exportQuality === 'custom'
+                ? 'bg-emerald-600/20 text-emerald-400 border-emerald-500'
+                : projectMenuAt
+                  // Open, but nothing is active: a plain held-down look, not the
+                  // emerald, which means one specific thing in this bar.
+                  ? 'bg-neutral-800 text-neutral-200 border-neutral-500'
+                  : 'border-neutral-700 text-neutral-400 hover:text-neutral-200 hover:border-neutral-500'
+            }`}
           >
-            <GearIcon />
+            <MoreMenuIcon />
           </button>
+          <ContextMenu
+            position={projectMenuAt}
+            ignoreRef={projectMenuBtnRef}
+            onClose={closeProjectMenu}
+            items={projectMenuItems}
+          />
           <button
             onClick={startTour}
             disabled={tourActive}
@@ -2268,6 +2366,10 @@ function AppInner() {
                   clips={timelineClips}
                   setClips={setTimelineClips}
                   onAddToV1={handleAddToV1}
+                  // The *ByName pair is the Media Bin drag route: those files are
+                  // already in input/, so there is nothing to upload and only the
+                  // by-name half of the matching handler runs.
+                  onAddToV1ByName={handleAddToTimeline}
                   selectedId={selectedId}
                   selectedPart={selectedPart}
                   onSelectId={setSelectedId}
@@ -2285,6 +2387,7 @@ function AppInner() {
                   focusedTrack={focusedTrack}
                   onFocusTrack={setFocusedTrack}
                   onAddToV2={handleAddToV2}
+                  onAddToV2ByName={addToV2ByName}
                   onAnalyze={handleAnalyze}
                   onBatchAnalyze={handleBatchAnalyze}
                   onReconstruct={handleReconstruct}
