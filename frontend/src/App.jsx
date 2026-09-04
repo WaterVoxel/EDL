@@ -34,8 +34,8 @@ import FootageLossDialog from './components/FootageLossDialog'
 import FfmpegCustomSettings from './components/FfmpegCustomSettings'
 import ContextMenu from './components/ContextMenu'
 import Timeline from './components/Timeline/Timeline'
-import { sequenceTargetFps, sequenceRenderFrames, sequenceRaise, roundUpAmount, clampNoiseGainDb, normalizeBeds, bedLaneEndSec, bedInSec, fuseGroups } from './clipMath'
-import { loadTrackTags, tagTrack, renameTrackTag, isAudioFile, loadHideFootageLossWarning, saveHideFootageLossWarning } from './fileList'
+import { sequenceTargetFps, sequenceRenderFrames, sequenceRaise, roundUpAmount, clampNoiseGainDb, normalizeBeds, bedLaneEndSec, bedInSec, fuseGroups, clipPalette, CLIP_THEME_NAMES, DEFAULT_CLIP_THEME } from './clipMath'
+import { loadTrackTags, tagTrack, renameTrackTag, isAudioFile, loadHideFootageLossWarning, saveHideFootageLossWarning, loadClipTheme, saveClipTheme } from './fileList'
 import { analyzeAgainstV1, batchCutAgainstV1, reconstructFromV1, sequencePieces } from './analyzeMath'
 import { mergeExportPresets } from './exportPresets'
 import { workFingerprint } from './projectWork'
@@ -219,6 +219,17 @@ function AppInner() {
   // stamped the first time a file is placed on a track, drives the Media
   // Bin's V1/V2 filter. See fileList.tagTrack / filterByTrack.
   const [trackTags, setTrackTags] = useState(() => loadTrackTags())
+  // Which clip-colour palette the tracks draw with (⋯ menu → Theme). Held here
+  // rather than inside Timeline because it is a persisted preference, and Timeline
+  // is remounted by enough of this file's state changes that it would be a poor
+  // owner. `|| DEFAULT_CLIP_THEME` covers the never-chosen case; an unrecognised
+  // stored name is handled downstream by clipMath.clipPalette, so a value that got
+  // hand-edited in devtools still paints.
+  const [clipTheme, setClipTheme] = useState(() => loadClipTheme() || DEFAULT_CLIP_THEME)
+  function chooseClipTheme(name) {
+    setClipTheme(name)
+    saveClipTheme(name)
+  }
   // All three tracks share ONE undo history (see useUndoableTracks): Undo and
   // Cmd/Ctrl+Z step back the last edit on any lane — a V1 trim, a V2 Analyze,
   // an A1 clip removal, an ANIM keyframe — rather than only V1's. The slices are
@@ -1957,6 +1968,32 @@ function AppInner() {
       ),
       onClick: () => setShowFfmpegSettings(true),
     },
+    // Theme — the clip colours on the tracks. A display preference, so it sits
+    // below the rule with the encoder settings rather than among the project
+    // actions, and it persists to localStorage instead of into the .nara.
+    { separatorBefore: true, heading: true, label: 'Theme' },
+    ...CLIP_THEME_NAMES.map(name => ({
+      // The swatches ARE the palette — mapped from clipPalette rather than
+      // hand-copied, so a palette edit can't leave the menu advertising colours the
+      // timeline no longer uses. They sit on a bg-neutral-950 strip because the
+      // fills are translucent and the menu's own bg-neutral-800 would render every
+      // one of them lighter than it will actually appear on a lane.
+      label: (
+        <span className="flex items-center gap-2">
+          <span className="flex gap-px p-px rounded-sm bg-neutral-950">
+            {clipPalette(name).map((entry, k) => (
+              <span key={k} className={`w-1.5 h-2.5 ${entry.fill}`} />
+            ))}
+          </span>
+          <span className="capitalize">{name}</span>
+          {clipTheme === name && <span className="ml-auto text-[9px] text-emerald-400">✓</span>}
+        </span>
+      ),
+      onClick: () => chooseClipTheme(name),
+      // Stays open: the tracks repaint behind the menu, so this is the one item
+      // where you want to click through all four and compare.
+      keepOpen: true,
+    })),
   ]
 
   const displayInfo = (() => {
@@ -2365,6 +2402,7 @@ function AppInner() {
                 <Timeline
                   clips={timelineClips}
                   setClips={setTimelineClips}
+                  clipTheme={clipTheme}
                   onAddToV1={handleAddToV1}
                   // The *ByName pair is the Media Bin drag route: those files are
                   // already in input/, so there is nothing to upload and only the

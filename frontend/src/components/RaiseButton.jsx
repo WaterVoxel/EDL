@@ -60,7 +60,7 @@ export default function RaiseButton({ clips, setClips }) {
         : `Holds the last frame to reach ${wholeSec}s. The whole second isn't exactly reachable here — `
           + `the hold is quantized on the last clip's own frame rate, so the render lands a frame or two `
           + `past ${wholeSec}s rather than on it (never short of it).`}
-      className="px-1.5 py-0.5 text-[8px] rounded bg-amber-600 text-white hover:bg-amber-500 disabled:bg-neutral-700 disabled:text-neutral-500"
+      className="px-1.5 py-0.5 text-[8px] rounded bg-amber-300/15 border border-amber-300/50 text-amber-200 hover:bg-amber-300/25 disabled:bg-transparent disabled:border-neutral-700 disabled:text-neutral-600"
     >
       Round Up
     </button>

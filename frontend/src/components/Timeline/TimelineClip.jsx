@@ -11,10 +11,13 @@ const MIN_CLIP_SEC = 0.1
 // Spelled out per position as LITERAL class strings. Tailwind v4's scanner reads
 // source text, so `rounded-${side}` would be purged and the seam would silently
 // reopen in a production build only (see CLIP_PALETTE's note in clipMath).
+// 1px to match the unfused box below. All four widths have to move together: if
+// start/end thin and `mid` doesn't, a run's top rail steps in thickness at every
+// seam, which is exactly the visible seam these constants exist to hide.
 const FUSE_BOX = {
-  start: 'rounded-l border-y-2 border-l-2',
-  mid: 'border-y-2',
-  end: 'rounded-r border-y-2 border-r-2',
+  start: 'rounded-l border-y border-l',
+  mid: 'border-y',
+  end: 'rounded-r border-y border-r',
 }
 const FUSE_FILL = { start: 'rounded-l', mid: '', end: 'rounded-r' }
 
@@ -23,7 +26,10 @@ const FUSE_FILL = { start: 'rounded-l', mid: '', end: 'rounded-r' }
 // primary selection — and no `brightness-110`, which is the primary ring's own
 // tell. Exported because V2's lane draws this ring itself, around a whole fused
 // run, and the two must not drift apart.
-export const CO_SELECT_RING = 'ring-2 ring-sky-400 ring-offset-1 ring-offset-neutral-950'
+// 1px like every other outline on a clip. `ring-offset-1 ring-offset-neutral-950`
+// stays: the offset colour IS the lane background, so it reads as a hairline of
+// breathing room, and that gap is most of what makes a 1px ring legible.
+export const CO_SELECT_RING = 'ring-1 ring-sky-400 ring-offset-1 ring-offset-neutral-950'
 
 export default function TimelineClip({
   clip, pps, selected, selectedPart, onSelect, onDeletePart, onTrim, onDelete, index,
@@ -44,16 +50,31 @@ export default function TimelineClip({
   // one clip is the one every other tool acts on, the others are only along for
   // the merge — and Merge has to be able to show both at once.
   coSelected = false,
+  // Map<colorKey, paletteEntry> from clipMath.assignClipColors, so every clip on a
+  // lane gets a DISTINCT colour — a promise clipColor can't make on its own, since
+  // uniqueness is a property of the set and it only sees one id. Optional: without
+  // it this falls back to the per-id hash, which is still stable and still correct,
+  // just not collision-free. That fallback is what a clip rendered outside a lane
+  // gets, and it is why adding a new call site can't crash on a missing prop.
+  //
+  // The map is also how the chosen THEME reaches this component — it holds real
+  // palette entries, so there is no theme prop to thread here. The one consequence:
+  // the fallback below draws from the DEFAULT palette, since it has no theme to ask.
+  // That is invisible today (both lanes always pass a map) but it is the thing to
+  // fix, by passing the theme, if a clip is ever drawn outside a lane.
+  colorMap = null,
 }) {
   const headPx = clipHeadPx(clip, pps)
   const mainPx = clipMainPx(clip, pps)
   const tailPx = clipTailPx(clip, pps)
   const roundPx = clipRoundPx(clip, pps)
   const totalPx = clipTotalPx(clip, pps)
-  // One gradient across the run instead of one per member: clipColor hashes the
-  // id, and every reconstructed range gets its own fresh UUID, so untouched this
-  // would paint a colour change exactly where the seam is supposed to disappear.
-  const color = clipColor(fuse ? fuse.colorId : clip.id)
+  // One fill across the run instead of one per member: the key is the run's shared
+  // fuseId, and every reconstructed range gets its own fresh UUID, so keying off
+  // clip.id would paint a colour change exactly where the seam is supposed to
+  // disappear. Same key the lane's colorMap is built from, by construction.
+  const colorKey = fuse ? fuse.colorId : clip.id
+  const color = colorMap?.get(colorKey) || clipColor(colorKey)
   const speed = clipSpeed(clip)
 
   // Label shows the duration as played on the timeline (stretched by any
@@ -98,10 +119,25 @@ export default function TimelineClip({
 
   // A fused run reports the RUN's dirty state, so trimming one member can't leave
   // a box that is amber-dashed down one half and palette-bordered down the other.
-  const borderClass = (fuse ? fuse.dirty : clip.dirty) ? 'border-dashed border-amber-500' : color.border
+  //
+  // amber-200 — the palest amber, and the brightest border anywhere on the track.
+  // This string owns no width, so thinning the box to 1px halved the stroke AND
+  // the dash length (CSS scales dash length with border width), leaving roughly a
+  // quarter of the amber area it used to have. Dirty is a render-correctness
+  // signal — and on V2 the dashes are the ONLY place it is shown, since EdlTable's
+  // pending/rendered column reads V1 — so it has to win every comparison it can.
+  //
+  // It used to win on brightness alone against the saturated 500 palette. Against
+  // the pastel 300s it can't: amber-200 and lime-300 sit within 1.05:1 of each
+  // other in luminance, so a dirty clip that hashes to lime is separated from a
+  // clean neighbour by DASHED-VS-SOLID and hue, not by being lighter. That is why
+  // 200 and not 300 — 300 is now ROUND's border, and dirty must not share a class
+  // with a segment it can sit directly beside. No alpha here, for the original
+  // reason: a translucent dash over a translucent fill vanishes.
+  const borderClass = (fuse ? fuse.dirty : clip.dirty) ? 'border-dashed border-amber-200' : color.border
 
   function segmentRing(part) {
-    return selected && selectedPart === part ? 'ring-2 ring-white ring-offset-1 ring-offset-neutral-950' : ''
+    return selected && selectedPart === part ? 'ring-1 ring-white ring-offset-1 ring-offset-neutral-950' : ''
   }
 
   return (
@@ -147,7 +183,7 @@ export default function TimelineClip({
       {/* Head hold segment — only ever present on the sequence's first clip */}
       {headPx > 0 && (
         <div
-          className={`absolute top-0 bottom-0 left-0 rounded-l border border-fuchsia-500 bg-gradient-to-b from-fuchsia-700 to-fuchsia-900 flex flex-col items-center justify-center overflow-hidden cursor-pointer ${segmentRing('head')}`}
+          className={`absolute top-0 bottom-0 left-0 rounded-l border border-fuchsia-300 bg-fuchsia-300/45 flex flex-col items-center justify-center overflow-hidden cursor-pointer ${segmentRing('head')}`}
           style={{ width: headPx }}
           onClick={e => { e.stopPropagation(); onSelect(clip, 'head') }}
         >
@@ -162,25 +198,28 @@ export default function TimelineClip({
       )}
 
       {/* Main body — the trimmed source clip, color-coded per clip id.
-          The gradient fill lives on an inset inner layer, not the bordered
-          box itself: a dashed border (dirty state) paints gaps in its own
-          background, so a fill on the SAME element as the border shows
+          The flat translucent fill lives on an inset inner layer, not the
+          bordered box itself: a dashed border (dirty state) paints gaps in its
+          own background, so a fill on the SAME element as the border shows
           through those gaps as a mismatched second color that reads as an
           offset outline. Keeping the outer box border-only and the fill on
           a child inset inside it means the dashes reveal nothing (the dark
-          track behind), not the clip's own color. */}
+          track behind), not the clip's own color. `inset-0` resolves inside the
+          border, so this still holds now that the border is 1px — and it is why
+          the hold/round segments below can put their fill straight on the
+          bordered box: their borders are solid, never dashed. */}
       <div
         /* grab, not pointer: the body is the drag handle for reordering, and that
            cursor is the only standing hint that a clip can be moved at all. The
            edge trim strips below keep their own ew-resize. */
-        className={`absolute top-0 bottom-0 overflow-hidden cursor-grab active:cursor-grabbing ${fuse ? FUSE_BOX[fuse.pos] : 'rounded border-2'} ${borderClass} ${!fuse && selected && selectedPart === 'main' ? 'ring-2 ring-white ring-offset-1 ring-offset-neutral-950 brightness-110' : ''} ${!fuse && !selected && coSelected ? CO_SELECT_RING : ''}`}
+        className={`absolute top-0 bottom-0 overflow-hidden cursor-grab active:cursor-grabbing ${fuse ? FUSE_BOX[fuse.pos] : 'rounded border'} ${borderClass} ${!fuse && selected && selectedPart === 'main' ? 'ring-1 ring-white ring-offset-1 ring-offset-neutral-950 brightness-110' : ''} ${!fuse && !selected && coSelected ? CO_SELECT_RING : ''}`}
         style={{ left: headPx, width: Math.max(mainPx, 24) }}
         /* The event goes up because Shift-click means something here (Merge's
            second pick). The hold segments below deliberately don't pass one —
            there is nothing to merge about a frozen frame. */
         onClick={e => onSelect(clip, 'main', e)}
       >
-        <div className={`absolute inset-0 bg-gradient-to-b ${fuse ? FUSE_FILL[fuse.pos] : 'rounded'} ${color.grad}`} />
+        <div className={`absolute inset-0 ${fuse ? FUSE_FILL[fuse.pos] : 'rounded'} ${color.fill}`} />
         {/* Trim handles only on the run's OUTER edges. An interior handle sits
             exactly on the invisible seam, and dragging it would cut a hole out of
             the middle of what the user is being shown as one continuous clip —
@@ -201,13 +240,26 @@ export default function TimelineClip({
             the lane draws them once across the whole box. */}
         {!fuse && (
           <>
-            <div className="absolute inset-0 flex flex-col items-start justify-between px-1.5 py-0.5 pointer-events-none">
-              <span className="text-[8px] text-neutral-100 truncate max-w-full font-medium">
+            {/* The name rides a TITLE STRIPE: a full-width darker band, not a
+                highlight fitted to the text. `bg-black/40` rather than a per-palette
+                dark class so it darkens whatever colour the clip already is (staying
+                in its hue instead of introducing a ninth colour), and so it needs no
+                new literal in CLIP_PALETTE. It earns its keep twice — it names the
+                clip against a fill the track now shows through, and it gives the top
+                edge a horizon line.
+                The padding lives on the CHILDREN, not this wrapper: the stripe has to
+                reach both borders, so the title span is `w-full` and pads itself,
+                which also means the band's height is exactly the padded text's and
+                can't drift out of step with the font size. `inset-0` resolves inside
+                the 1px border and the parent clips overflow, so the stripe never
+                paints over the border or squares off the rounded corners. */}
+            <div className="absolute inset-0 flex flex-col items-start justify-between pointer-events-none">
+              <span className="w-full bg-black/40 px-1.5 py-0.5 text-[8px] text-neutral-100 truncate font-medium">
                 {clip.isDuplicate && <span title="Duplicate of another clip on this track">⧉ </span>}
                 {clip.reversed && <span title="Reversed">◀ </span>}
                 {clip.displayName || clip.sourceName}
               </span>
-              <span className="text-[8px] text-neutral-200 font-mono">{mainDurationLabel}</span>
+              <span className="px-1.5 pb-0.5 text-[8px] text-neutral-200 font-mono">{mainDurationLabel}</span>
             </div>
             <button
               onClick={e => { e.stopPropagation(); onDelete(clip.id) }}
@@ -223,7 +275,7 @@ export default function TimelineClip({
       {/* Tail hold segment — only ever present on the sequence's last clip */}
       {tailPx > 0 && (
         <div
-          className={`absolute top-0 bottom-0 border border-fuchsia-500 bg-gradient-to-b from-fuchsia-700 to-fuchsia-900 flex flex-col items-center justify-center overflow-hidden cursor-pointer ${segmentRing('tail')}`}
+          className={`absolute top-0 bottom-0 border border-fuchsia-300 bg-fuchsia-300/45 flex flex-col items-center justify-center overflow-hidden cursor-pointer ${segmentRing('tail')}`}
           style={{ left: headPx + mainPx, width: tailPx }}
           onClick={e => { e.stopPropagation(); onSelect(clip, 'tail') }}
         >
@@ -240,7 +292,7 @@ export default function TimelineClip({
       {/* Round segment — Raise's auto round-up extension, always trails the sequence's last clip */}
       {roundPx > 0 && (
         <div
-          className={`absolute top-0 bottom-0 rounded-r border border-amber-400 bg-gradient-to-b from-amber-600 to-amber-800 flex flex-col items-center justify-center overflow-hidden cursor-pointer ${segmentRing('round')}`}
+          className={`absolute top-0 bottom-0 rounded-r border border-amber-300 bg-amber-300/45 flex flex-col items-center justify-center overflow-hidden cursor-pointer ${segmentRing('round')}`}
           style={{ left: headPx + mainPx + tailPx, width: roundPx }}
           onClick={e => { e.stopPropagation(); onSelect(clip, 'round') }}
         >

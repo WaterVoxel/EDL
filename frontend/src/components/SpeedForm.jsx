@@ -118,7 +118,14 @@ export default function SpeedForm({
           video frame (verified bit-identical). Amber matches the other
           render-affecting toggle (ANIM) rather than a clip-editing color. On
           state is carried by color alone — the label stays "A1 Room Tone"
-          either way so the button never changes size. */}
+          either way so the button never changes size.
+
+          Styled with the flat tint + hairline recipe the rest of this toolbar row
+          uses (see conventions.md), which it missed when the row was flattened in
+          0.68.0: it was the last solid `bg-amber-500` fill left among eleven
+          outlined buttons, so ON read as a different KIND of control rather than as
+          the same control switched on. Both states keep amber — the tint carries
+          the on state now, and OFF is the row's standard neutral. */}
       <button
         onClick={onToggleNoise}
         title={noiseEnabled
@@ -126,8 +133,8 @@ export default function SpeedForm({
           : 'Fill the silent stretches with room tone: holds, round-ups, slow-downs, clips whose source has no audio, gaps left by a removed A1 clip, and the tail past the end of a short A1 track. Set how loud with the dB arrows beside this button. Never plays over sound that is already there — clip audio and the A1 track come out untouched, at the same level, and no video frame changes. Applies at render time; the preview will not play it'}
         className={`px-1.5 py-0.5 text-[8px] rounded border transition-colors ${
           noiseEnabled
-            ? 'bg-amber-500 text-neutral-950 border-amber-500'
-            : 'bg-neutral-800 text-neutral-400 border-neutral-700 hover:text-neutral-200'
+            ? 'bg-amber-300/15 border-amber-300/50 text-amber-200 hover:bg-amber-300/25'
+            : 'bg-transparent border-neutral-700 text-neutral-400 hover:text-neutral-200'
         }`}
       >
         A1 Room Tone

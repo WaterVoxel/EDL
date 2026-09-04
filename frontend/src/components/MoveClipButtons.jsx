@@ -70,7 +70,7 @@ export default function MoveClipButtons({
           title={bedIndex !== -1
             ? 'Swap the selected A1 clip with the audio clip before it (⌥←)'
             : 'Move the selected clip one slot earlier (⌥←)'}
-          className="px-1.5 py-0.5 text-[8px] rounded bg-teal-600 text-white hover:bg-teal-500 disabled:bg-neutral-700 disabled:text-neutral-500"
+          className="px-1.5 py-0.5 text-[8px] rounded bg-teal-300/15 border border-teal-300/50 text-teal-200 hover:bg-teal-300/25 disabled:bg-transparent disabled:border-neutral-700 disabled:text-neutral-600"
         >
           ◀
         </button>
@@ -80,7 +80,7 @@ export default function MoveClipButtons({
           title={bedIndex !== -1
             ? 'Swap the selected A1 clip with the audio clip after it (⌥→)'
             : 'Move the selected clip one slot later (⌥→)'}
-          className="px-1.5 py-0.5 text-[8px] rounded bg-teal-600 text-white hover:bg-teal-500 disabled:bg-neutral-700 disabled:text-neutral-500"
+          className="px-1.5 py-0.5 text-[8px] rounded bg-teal-300/15 border border-teal-300/50 text-teal-200 hover:bg-teal-300/25 disabled:bg-transparent disabled:border-neutral-700 disabled:text-neutral-600"
         >
           ▶
         </button>

@@ -11,7 +11,7 @@ import { useMedia } from '../../context/MediaContext'
 import { probe } from '../../api'
 import { BIN_DRAG_MIME, readBinDragPayload } from '../../fileList'
 import { useTimelinePlayback } from '../../hooks/useTimelinePlayback'
-import { clipTotalSec, clipTotalPx, clipHeadPx, clipMainPx, sanitizeHoldPlacement, timelinePosToPx, sequenceVideoStartSec, clipStartSec, moveClip, swapBeds, dropTargetIndex, fuseGroups, fuseGroupIds, trimLossSec, deleteLossSec, sequenceTargetFps, sequenceRenderFrames } from '../../clipMath'
+import { clipTotalSec, clipTotalPx, clipHeadPx, clipMainPx, sanitizeHoldPlacement, timelinePosToPx, sequenceVideoStartSec, clipStartSec, moveClip, swapBeds, dropTargetIndex, fuseGroups, fuseGroupIds, assignClipColors, DEFAULT_CLIP_THEME, trimLossSec, deleteLossSec, sequenceTargetFps, sequenceRenderFrames } from '../../clipMath'
 import { addKeyframe, removeNearestKeyframe, sampleCropOrigin, clipTFromTimelinePos, retimeKeyframesForTrim } from '../../cropAnimation'
 
 const PPS = 60
@@ -40,6 +40,9 @@ function EyeIcon({ off, className }) {
 
 export default function Timeline({
   clips, setClips, onAddToV1, selectedId, selectedPart = 'main', onSelectId, onSelectItem, onUndo, canUndo,
+  // Which clipMath palette the clips are drawn from (⋯ menu → Theme). Defaults to
+  // the shipped one, so the timeline still paints correctly if mounted without it.
+  clipTheme = DEFAULT_CLIP_THEME,
   // The Media Bin drag drops files that are ALREADY in input/, so these take a
   // filename where onAddToV1/onAddToV2 take a File to upload first. Both default
   // to inert: without them the lanes simply don't accept a bin drag.
@@ -864,6 +867,17 @@ export default function Timeline({
   // series. Counting clips here would promise two files for a lane drawing one.
   const v1Groups = fuseGroups(clips)
   const v2Groups = fuseGroups(track2Clips)
+  // Colours assigned PER LANE, so each lane's clips are all different from each
+  // other and the two lanes stay independent — an edit on V2 must not repaint V1.
+  // Built from the groups (not the clips) because a fused run is one clip to the
+  // user, so it takes one colour and one palette slot. See assignClipColors for
+  // why uniqueness has to be decided for the whole set at once.
+  // `clipTheme` picks which of clipMath's four palettes those colours come from, so
+  // changing it repaints both lanes on the next render and nothing else — no clip
+  // state carries a colour, which is what makes the theme switch free and undoable
+  // by simply picking another one.
+  const v1Colors = assignClipColors(v1Groups, clipTheme)
+  const v2Colors = assignClipColors(v2Groups, clipTheme)
   // A/B counts V1's groups, not V1's clips: an A/B `1+` render takes its shots
   // from timelineClips (App.renderShots feeds fuseGroups the V1 lane), so a merged
   // V1 run is one file there too.
@@ -1160,6 +1174,7 @@ export default function Timeline({
                           uses the same component. */}
                       <ClipGroups
                         groups={v2Groups}
+                        colorMap={v2Colors}
                         pps={PPS}
                         selectedId={selectedId2}
                         selectedPart={selectedPart2}
@@ -1238,6 +1253,7 @@ export default function Timeline({
                       this replaced. */}
                   <ClipGroups
                     groups={v1Groups}
+                    colorMap={v1Colors}
                     pps={PPS}
                     selectedId={selectedId}
                     selectedPart={selectedPart}

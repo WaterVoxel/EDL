@@ -15,6 +15,137 @@ the day the version file appeared. There are no tags for them and never will be 
 `v0.25.0` is the first real tag. Treat the older entries as a history, not a
 download list.
 
+## 0.69.0 — 2026-09-04
+
+**Pick a colour theme for the timeline.** The ⋯ menu has a new **Theme** section with
+four palettes — **Pastel** (what the app has been using), **Neutral**, **Solid** and
+**Vivid**, the three swatch sheets from `frontend/assets/`. Whichever you pick decides
+the colours of the clips on V1 and V2. Each row in the menu shows that palette's actual
+swatches, on a dark strip so they look the way they will look on a track rather than
+lighter against the menu.
+
+Picking a theme **leaves the menu open**, so you can click through all four and watch the
+timeline repaint behind it instead of reopening the menu each time. Your choice is
+remembered on this machine and is deliberately *not* saved into the `.nara` project file:
+it's a preference about your display, not a decision about the edit, so opening someone
+else's project won't repaint your timeline.
+
+Nothing about the edit changes — no clip stores a colour, so switching theme is free,
+instant, and undone by simply picking another one. Renders are unaffected.
+
+**The sheets were re-tuned to work on a near-black track, not just dropped in.** The hues
+are the designer's and were not changed. What was solved for, per swatch, is transparency:
+
+- These sheets run from near-black (`#4C6170`) to near-white (`#EBE0DD`), so a single
+  shared transparency can't work — the dark end stops reading as a block at all
+  (`#8A3161` sat at 1.37:1 against its own lane) while the light end washes out the
+  duration label sitting on top of it. So **transparency is set per colour**, which is
+  what makes the clips look like they carry equal weight. Two floors from the existing
+  pastel palette were held everywhere: at least 2.5:1 for the clip against its lane, and
+  at least 4.2:1 for the label on the clip.
+- Colours also had to stay clear of the two that mean something structural: **HOLD stays
+  fuchsia and ROUND stays amber in every theme**, because those are structure, not clip
+  identity. That constraint did real work — Vivid's `#F2B544` sat 8.7 away from ROUND's
+  amber at the transparency that flattered it most, i.e. a clip you could not tell from a
+  round-up block, and only clears it properly at 40%.
+- Result: the closest two clip colours are 13.5 apart in Neutral, 26.6 in Solid and 38.2
+  in Vivid — all at or above the pastel palette's 13.8 — and nothing in any theme comes
+  closer than 27 to a reserved colour.
+
+**One honest trade-off in the smaller sheets.** Every clip on a lane gets its own colour
+only up to the number of colours the theme has: Pastel has 10, Neutral 7, Solid and Vivid
+6. Past that, colours start repeating, exactly as Pastel already did past ten. Choosing
+Solid or Vivid on a busy lane therefore trades some of that uniqueness for the look. The
+sheets were not padded with invented hues to hide this.
+
+**A1 Room Tone now matches the rest of its toolbar.** When the clip tools were flattened
+to outlines in 0.68.0 this one button was missed, leaving it the last solid amber fill in
+a row of eleven outlined buttons — so switched *on* it read as a different kind of
+control rather than as the same control turned on. It keeps amber and keeps its exact
+label (so it still never changes width), just in the row's style.
+
+Internal: the four palettes live in `clipMath.js` as `CLIP_THEMES`, and `clipColor` /
+`assignClipColors` now take a theme instead of closing over one palette constant. The
+unused `ring` field was dropped from palette entries rather than copied into 19 more
+colours that nothing reads.
+
+## 0.68.0 — 2026-09-04
+
+**Every clip on a track now gets its own colour, and the clip tools are flat instead of
+solid blocks.** Two clips could previously come out the same colour by chance — the colour
+was picked from the clip's own identity with nothing checking what the rest of the track
+was already using — which quietly undid the reason clips are coloured at all.
+
+- **No two clips on a track share a colour**, up to ten of them. The colour is now decided
+  for the track as a whole rather than clip by clip, so a clash gets resolved instead of
+  landing. Each track is worked out separately, so editing V2 never repaints V1, and a
+  merged run still counts as one clip with one colour.
+- **Ten colours instead of eight, and no harder to tell apart.** The two new ones were
+  picked by measuring: of the colours left after setting aside the ones already spoken for
+  (amber is ROUND, fuchsia is HOLD, red is the playhead), ten is the largest set that keeps
+  exactly the same separation the previous eight had. Yellow and purple were ruled out
+  because at these pale shades they're not distinguishable from ROUND and HOLD — a clip in
+  either would have read as a segment. Eleven would have started to blur, so it stopped at
+  ten.
+- **Colours still follow a clip when you reorder or split** — track position isn't part of
+  the decision, so moving clips around repaints nothing. The trade-off, and it's
+  unavoidable: because being unique depends on what else is on the track, *adding* or
+  *removing* a clip can change another clip's colour. It's kept to a minimum (a clip only
+  moves if the one it wanted was taken), but it can't be zero.
+- **Past ten clips on one track**, colours start repeating again, exactly as they did
+  before. Nothing breaks; there just aren't more colours that stay tellable apart.
+- **The clip tools — Head, Tail, Trim, Duplicate, Move, Reverse, Split, Merge, Raise —
+  are no longer solid blocks of colour.** Each is a soft tint with a thin outline and a
+  pale label in its own colour, matching the clips on the track below. Same colours, same
+  meanings, same positions. Two of the buttons on that row were already drawn this way, so
+  the row now agrees with itself. The labels are actually easier to read than before, not
+  harder — white text on those strong fills was the weakest text in the app.
+
+**On "remove the gradient" from the buttons:** there were no gradients on them. They were
+flat solid fills already; what read as heavy was the strength of the colour, so that's what
+changed. The only gradients left anywhere are the two diagonal hatch textures on the audio
+track (room tone, and the mark for audio running past the end), which are textures rather
+than fills.
+
+## 0.67.0 — 2026-09-04
+
+**Clips on the timeline are flatter, thinner and see-through.** The heavy look is gone:
+every outline on a clip is a hairline now, the fills are one flat colour you can see the
+track through, and nothing is a gradient any more.
+
+- **Thin outlines everywhere.** Clip boxes, merged runs, the selection outline, the Merge
+  co-selection outline and the outline on a selected HOLD or ROUND block were all 2px;
+  they're all 1px now, so they read as a line around a clip rather than a frame.
+- **Semi-transparent, flat fills.** A clip is a single wash of its colour instead of a
+  top-to-bottom gradient, and the lane shows through it. The eight clip colours, the
+  fuchsia HOLD blocks, the amber ROUND block and the green A1 audio clips all changed
+  together, so nothing is left looking like the old style next to something in the new one.
+- **The clip name now sits on a darker stripe.** A horizontal band runs the full width of
+  the clip behind its name, a shade darker than the clip itself. It keeps the name readable
+  now that the track shows through the fill, and gives the clip a defined top edge. It's a
+  darkening rather than a fixed colour, so the band is always a darker version of that
+  clip's own colour instead of a ninth colour in the set — and a merged run gets exactly the
+  same band, so it still reads as one clip.
+- **The track's colours are all pastel now.** The eight clip colours, the fuchsia HOLD
+  blocks, the amber ROUND block, the green A1 clips and A1's faint hold marks all moved to
+  the pale end of their hue. It reads softer, and it also happens to be measurably clearer
+  than what it replaced: a clip stands out from its empty lane better than it did with the
+  old strong colours *or* with the gradients before those, and the two closest colours in
+  the set — the blue and the cyan — are further apart than before, not closer. Pale colours
+  sound like they should blur together, but the lane is nearly black, and it was the
+  darkness dragging every colour toward the same near-black, not the lack of vividness.
+  Lighter colours sit further from that floor. Dragging a clip and hiding a track both dim
+  what you see, and both got clearer for the same reason.
+- **The "not rendered yet" dashes are brighter.** Halving the border thickness also halves
+  the length of each dash, so an edited clip was about to lose most of its amber. The
+  dashes are now the palest amber in the set — brighter than every other outline on the
+  track, and a different shade from the ROUND block they can sit right next to.
+- **What deliberately did not change:** the outlines keep their full colour with no
+  transparency (clips sit flush, so a see-through border would stop one clip from visibly
+  ending where the next begins); the red marker for A1 running past the end of the sequence
+  stays 2px because it's a warning, not a clip edge; and the crop-keyframe lane keeps its
+  grey boxes and amber handles, since those are controls to grab rather than clips.
+
 ## 0.66.0 — 2026-09-03
 
 **The top bar's four occasional buttons are now one ⋯ drop-down, and New moved up beside

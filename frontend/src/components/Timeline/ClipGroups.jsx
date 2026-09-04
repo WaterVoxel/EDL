@@ -19,6 +19,10 @@ export default function ClipGroups({
   onSelect, onDeletePart, onTrim, onDelete,
   onDragStart, onDragOver, onDrop, onDragEnd,
   draggingIndex = null, dropSideFor,
+  // Built per LANE (clipMath.assignClipColors), so uniqueness is promised within a
+  // lane and the two lanes are independent — editing V2 can't repaint V1. Passed
+  // straight through to every member; the wrapper below draws no colour of its own.
+  colorMap = null,
 }) {
   return groups.map(group => {
     const members = group.clips
@@ -38,6 +42,7 @@ export default function ClipGroups({
         selected={clip.id === selectedId}
         selectedPart={clip.id === selectedId ? selectedPart : null}
         coSelected={!!coSelectedIds?.has(clip.id)}
+        colorMap={colorMap}
         onSelect={onSelect}
         onDeletePart={part => onDeletePart(clip.id, part)}
         onTrim={onTrim}
@@ -97,14 +102,24 @@ export default function ClipGroups({
            members stop agreeing on reverse or speed, and two wrappers keyed the
            same would collide. */
         key={lead.id}
-        className={`relative flex items-stretch group ${runSelected ? 'rounded ring-2 ring-white ring-offset-1 ring-offset-neutral-950 brightness-110' : ''} ${runCoSelected ? `rounded ${CO_SELECT_RING}` : ''}`}
+        /* ring-1 to match TimelineClip's own rings — this is the hand-duplicated
+           copy in the other file, so a miss here would give a selected RUN a 2px
+           outline while a selected single clip got 1px. */
+        className={`relative flex items-stretch group ${runSelected ? 'rounded ring-1 ring-white ring-offset-1 ring-offset-neutral-950 brightness-110' : ''} ${runCoSelected ? `rounded ${CO_SELECT_RING}` : ''}`}
       >
         {boxes}
+        {/* Same title stripe as a single clip (TimelineClip's own copy documents
+            why it is `bg-black/40` and why the padding sits on the children). It
+            has to match exactly: a run is meant to read as ONE clip, so a striped
+            single clip beside an unstriped run would put the seam back in the one
+            place all of this exists to hide it. Note the stripe spans the run's
+            main bodies only — `left`/`right` already inset past the run's own hold
+            segments, which draw their own centred HOLD label. */}
         <div
-          className="absolute top-0 bottom-0 flex flex-col items-start justify-between px-1.5 py-0.5 pointer-events-none"
+          className="absolute top-0 bottom-0 flex flex-col items-start justify-between pointer-events-none"
           style={{ left: padLeft, right: padRight }}
         >
-          <span className="text-[8px] text-neutral-100 truncate max-w-full font-medium">
+          <span className="w-full bg-black/40 px-1.5 py-0.5 text-[8px] text-neutral-100 truncate font-medium">
             {allReversed && <span title="Reversed">◀ </span>}
             {someReversed && !allReversed && (
               <span title="Some parts of this clip play in reverse and some forward">⇄ </span>
@@ -113,7 +128,7 @@ export default function ClipGroups({
             <span className="text-neutral-400" title={runTitle}> ⛓ {members.length}</span>
           </span>
           <span
-            className="text-[8px] text-neutral-200 font-mono"
+            className="px-1.5 pb-0.5 text-[8px] text-neutral-200 font-mono"
             title={uniformSpeed ? undefined : `Parts of this clip play at different speeds (${members.map(c => `${Math.round(clipSpeed(c) * 100)}%`).join(', ')}). The duration is the total as it will render.`}
           >
             {runSec.toFixed(2)}s{uniformSpeed

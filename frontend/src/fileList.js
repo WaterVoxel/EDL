@@ -168,6 +168,34 @@ export function saveHideFootageLossWarning(hide) {
   }
 }
 
+// Which clip-colour palette the timeline draws with — one of clipMath's
+// CLIP_THEME_NAMES. Persisted here for the same reason as the pref above: this file
+// is where localStorage is spoken. Deliberately NOT stored in the .nara project
+// file — it's a preference about this machine's display, not a decision about the
+// edit, so opening someone else's project must not repaint your timeline.
+//
+// The name is NOT validated on the way out; clipMath.clipPalette already falls back
+// to the default for anything it doesn't recognise, so one guard in one place beats
+// two that can disagree.
+const CLIP_THEME_KEY = 'nara-clip-theme'
+
+export function loadClipTheme() {
+  try {
+    return localStorage.getItem(CLIP_THEME_KEY) || null
+  } catch {
+    // localStorage unavailable — null, so the caller uses the shipped default.
+    return null
+  }
+}
+
+export function saveClipTheme(theme) {
+  try {
+    localStorage.setItem(CLIP_THEME_KEY, theme)
+  } catch {
+    // localStorage unavailable — the choice just won't outlive this session.
+  }
+}
+
 // Stamp `name` with `track` ('v1' | 'v2') if not already tagged, persisting
 // the result. Returns a new tags object, or the same object unchanged (and
 // no write) when the tag was already present — so callers can skip a

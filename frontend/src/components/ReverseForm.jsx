@@ -19,8 +19,8 @@ export default function ReverseForm({ selectedClip, setClips }) {
         onClick={toggle}
         disabled={!selectedClip}
         title="Play this clip backwards (applied on Render)"
-        className={`px-1.5 py-0.5 text-[8px] rounded disabled:bg-neutral-700 disabled:text-neutral-500 ${
-          isReversed ? 'bg-orange-600 text-white hover:bg-orange-500' : 'bg-indigo-600 text-white hover:bg-indigo-500'
+        className={`px-1.5 py-0.5 text-[8px] rounded disabled:bg-transparent disabled:border-neutral-700 disabled:text-neutral-600 ${
+          isReversed ? 'bg-orange-300/15 border border-orange-300/50 text-orange-200 hover:bg-orange-300/25' : 'bg-indigo-300/15 border border-indigo-300/50 text-indigo-200 hover:bg-indigo-300/25'
         }`}
       >
         {isReversed ? '◀ Reversed' : 'Reverse'}

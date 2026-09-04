@@ -45,7 +45,7 @@ export default function DuplicateButton({ selectedClip, clips, setClips, onSelec
         onClick={apply}
         disabled={!selectedClip}
         title="Duplicate the selected clip and place the copy right after it"
-        className="px-1.5 py-0.5 text-[8px] rounded bg-violet-600 text-white hover:bg-violet-500 disabled:bg-neutral-700 disabled:text-neutral-500"
+        className="px-1.5 py-0.5 text-[8px] rounded bg-violet-300/15 border border-violet-300/50 text-violet-200 hover:bg-violet-300/25 disabled:bg-transparent disabled:border-neutral-700 disabled:text-neutral-600"
       >
         Duplicate
       </button>

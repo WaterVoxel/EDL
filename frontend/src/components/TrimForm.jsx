@@ -114,7 +114,7 @@ export default function TrimForm({ selectedClip, setClips, displayMode = 'timeco
       <button
         onClick={apply}
         disabled={disabled}
-        className="px-1.5 py-0.5 text-[8px] rounded bg-indigo-600 text-white hover:bg-indigo-500 disabled:bg-neutral-700 disabled:text-neutral-500"
+        className="px-1.5 py-0.5 text-[8px] rounded bg-indigo-300/15 border border-indigo-300/50 text-indigo-200 hover:bg-indigo-300/25 disabled:bg-transparent disabled:border-neutral-700 disabled:text-neutral-600"
       >
         Apply
       </button>

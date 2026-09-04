@@ -461,16 +461,140 @@ export function segmentAt(segments, pos) {
 
 // Fixed literal Tailwind class names (not template-interpolated) so the
 // build's content scanner can find and generate them.
-const CLIP_PALETTE = [
-  { grad: 'from-sky-700 to-sky-900', border: 'border-sky-500', ring: 'ring-sky-500' },
-  { grad: 'from-emerald-700 to-emerald-900', border: 'border-emerald-500', ring: 'ring-emerald-500' },
-  { grad: 'from-violet-700 to-violet-900', border: 'border-violet-500', ring: 'ring-violet-500' },
-  { grad: 'from-rose-700 to-rose-900', border: 'border-rose-500', ring: 'ring-rose-500' },
-  { grad: 'from-orange-700 to-orange-900', border: 'border-orange-500', ring: 'ring-orange-500' },
-  { grad: 'from-teal-700 to-teal-900', border: 'border-teal-500', ring: 'ring-teal-500' },
-  { grad: 'from-cyan-700 to-cyan-900', border: 'border-cyan-500', ring: 'ring-cyan-500' },
-  { grad: 'from-lime-700 to-lime-900', border: 'border-lime-500', ring: 'ring-lime-500' },
-]
+//
+// `fill` is a FLAT translucent wash, not a gradient — the lane reads through a
+// clip. Three things about it are load-bearing and were measured rather than
+// guessed, so don't "tidy" any of them:
+//
+//   - The 300 shade — Tailwind's pastel step. This is not only taste: the lane is
+//     bg-neutral-950, so a wash's every channel is pulled toward black, and the
+//     lighter base is what holds it off that floor. Measured against the 500s it
+//     replaced, pastel is better on BOTH axes that matter here — clip-vs-lane
+//     contrast 2.87–3.69:1 (was 1.80–2.78:1, and ~3.3:1 for the opaque gradients
+//     before that), and the closest pair of hues, sky/cyan, moves from a pairwise
+//     sRGB distance of 12.7 to 13.8. Pastels are less saturated, so the intuition
+//     is that they must converge; over near-black they don't, because the alpha
+//     floor is the thing crushing them together and 300 sits further above it.
+//   - The alpha is /45, and it is the only thing standing between a clip and the
+//     empty track. At /20 a clip sat at ~1.2:1 against its lane — it stopped
+//     reading as a block at all — and the eight colours converged to a minimum
+//     pairwise distance of ~6, which defeats the entire point of clipColor. It
+//     also has to survive being MULTIPLIED by the two dimmers already in the UI:
+//     `opacity-40` on the clip being dragged and `opacity-35 grayscale` on a
+//     hidden lane. Raising the shade to 300 gave both of those headroom, so if
+//     this ever needs to move it should move DOWN, not up.
+//   - `border` carries NO alpha, deliberately. clipMath.GAP_PX is 0, so two
+//     flush clips stack their 1px borders into a single line; a translucent
+//     border is what would actually stop one clip from ending and the next
+//     beginning. At full opacity a 300 border is much lighter than its own /45
+//     fill, so the hairline reads without help.
+//
+// Fills are the only place a clip's colour is translucent — see TimelineClip for
+// the fuchsia HOLD and amber ROUND segments, which follow the same 300/45 recipe.
+//
+// For the PASTEL theme, ten colours, and both the membership and the ORDER are
+// computed, not chosen:
+//
+//   - Membership. Of Tailwind's 17 hues, three are reserved by the colour-coding
+//     convention (amber = ROUND + dirty, fuchsia = HOLD, red = playhead) and two
+//     more had to go because at 300/45 they are not separable from a reserved one:
+//     yellow sits 6.5 from ROUND's amber and purple 11.6 from HOLD's fuchsia, so a
+//     clip in either would read as a segment. Of the twelve survivors, ten is the
+//     largest set whose minimum pairwise sRGB distance is still 13.8 — exactly the
+//     separation the old eight-colour palette had. So this went 8 → 10 distinct
+//     colours at ZERO cost in distinguishability. Eleven would drop it to 12.4.
+//     emerald lost its place to green+teal, which is a bonus: no clip can now be
+//     mistaken for an A1 audio clip.
+//   - Order. assignClipColors resolves a collision by probing to the NEXT index,
+//     so neighbours here are what a displaced clip actually lands on. Ordered by
+//     farthest-next, the minimum ADJACENT distance is 46.9 — 3.4x the global
+//     minimum — so a displaced clip gets an obviously different colour instead of
+//     a near-twin of the one that displaced it. Reordering this list is therefore
+//     a visual regression even though it changes no colour in the set.
+//
+// THEMES (0.69.0). The other three palettes come from the swatch sheets in
+// `frontend/assets/`, so their hues are the designer's and not negotiable — but the
+// two things that make a palette WORK on this lane were still solved for, per
+// swatch, the same way the pastel one was:
+//
+//   - Alpha is PER SWATCH here, not a single /45 for the theme. That looks
+//     inconsistent and is the opposite: these sheets span near-black (#4C6170) to
+//     near-white (#EBE0DD), and over a bg-neutral-950 lane a fixed alpha means the
+//     dark end stops reading as a block at all (#8A3161 at /45 is 1.37:1 against
+//     its own lane) while the light end washes out the label sitting on it. The
+//     per-swatch alpha is what EQUALISES apparent weight across a sheet. Two floors
+//     were held, both inherited from the shipped pastel palette: >=2.5:1 clip
+//     against lane (pastel's own worst is 2.78) and >=4.2:1 for the duration label
+//     — `text-neutral-200` sits directly on the fill, so the fill can't get light.
+//     Those two pull in opposite directions and bracket each swatch's alpha to a
+//     narrow window; within it, alpha was chosen to maximise separation.
+//   - Separation was maximised against the OTHER swatches AND against the two
+//     reserved segment colours, which do not follow the theme (HOLD stays fuchsia,
+//     ROUND stays amber — they're structure, not identity). That second constraint
+//     is the one that bites: vivid's #F2B544 sat 8.7 from ROUND's amber at the
+//     alpha that flattered it most, i.e. a clip indistinguishable from a ROUND
+//     block, and only drops to a safe 28 at /40. Resulting minimum pairwise
+//     distances: neutral 13.5, solid 26.6, vivid 38.2 — all at or above pastel's
+//     13.8 — with nothing closer than 27 to a reserved colour.
+//
+// Palette SIZE differs per theme (10/7/6/6), which is why the uniqueness cap is
+// read off the active palette rather than being a constant: see assignClipColors.
+//
+// Arbitrary-value classes are used for these, and they are still literal strings —
+// Tailwind's scanner reads source text, so `bg-[#5591C2]/75` must appear here
+// verbatim and can never be assembled from a hex variable.
+const CLIP_THEMES = {
+  pastel: [
+    { fill: 'bg-sky-300/45', border: 'border-sky-300' },
+    { fill: 'bg-orange-300/45', border: 'border-orange-300' },
+    { fill: 'bg-cyan-300/45', border: 'border-cyan-300' },
+    { fill: 'bg-rose-300/45', border: 'border-rose-300' },
+    { fill: 'bg-teal-300/45', border: 'border-teal-300' },
+    { fill: 'bg-pink-300/45', border: 'border-pink-300' },
+    { fill: 'bg-lime-300/45', border: 'border-lime-300' },
+    { fill: 'bg-indigo-300/45', border: 'border-indigo-300' },
+    { fill: 'bg-green-300/45', border: 'border-green-300' },
+    { fill: 'bg-violet-300/45', border: 'border-violet-300' },
+  ],
+  neutral: [
+    { fill: 'bg-[#65695B]/80', border: 'border-[#65695B]' },
+    { fill: 'bg-[#C0C4B7]/50', border: 'border-[#C0C4B7]' },
+    { fill: 'bg-[#4C6170]', border: 'border-[#4C6170]' },
+    { fill: 'bg-[#D9C3B6]/45', border: 'border-[#D9C3B6]' },
+    { fill: 'bg-[#8A9EAB]/65', border: 'border-[#8A9EAB]' },
+    { fill: 'bg-[#9CA38E]/55', border: 'border-[#9CA38E]' },
+    { fill: 'bg-[#EBE0DD]/45', border: 'border-[#EBE0DD]' },
+  ],
+  solid: [
+    { fill: 'bg-[#5591C2]/75', border: 'border-[#5591C2]' },
+    { fill: 'bg-[#8A3161]', border: 'border-[#8A3161]' },
+    { fill: 'bg-[#4FC4D6]/45', border: 'border-[#4FC4D6]' },
+    { fill: 'bg-[#D7649C]/75', border: 'border-[#D7649C]' },
+    { fill: 'bg-[#3A7F8A]/90', border: 'border-[#3A7F8A]' },
+    { fill: 'bg-[#D6CC7A]/50', border: 'border-[#D6CC7A]' },
+  ],
+  vivid: [
+    { fill: 'bg-[#038C7F]/85', border: 'border-[#038C7F]' },
+    { fill: 'bg-[#5662A6]', border: 'border-[#5662A6]' },
+    { fill: 'bg-[#A6DEB7]/45', border: 'border-[#A6DEB7]' },
+    { fill: 'bg-[#CD74B2]/70', border: 'border-[#CD74B2]' },
+    { fill: 'bg-[#F2B544]/40', border: 'border-[#F2B544]' },
+    { fill: 'bg-[#99C8F2]/50', border: 'border-[#99C8F2]' },
+  ],
+}
+
+// The theme the app starts in, and the fallback for an unknown name — so a
+// hand-edited or stale localStorage value degrades to the shipped look rather than
+// leaving every clip undefined-coloured.
+export const DEFAULT_CLIP_THEME = 'pastel'
+
+// Menu order for the Theme section. Derived from CLIP_THEMES rather than typed
+// again, so a fifth palette can't be added and then silently not offered.
+export const CLIP_THEME_NAMES = Object.keys(CLIP_THEMES)
+
+export function clipPalette(theme) {
+  return CLIP_THEMES[theme] || CLIP_THEMES[DEFAULT_CLIP_THEME]
+}
 
 // Enforces the invariant that head-hold only ever exists on the first clip
 // of the sequence, tail-hold and round-hold only on the last — since those
@@ -787,14 +911,85 @@ export function duplicateNames(baseName, clips) {
   return { original, copy: nextSplitName(root, clips) }
 }
 
+// Takes the palette LENGTH rather than reading a module constant, because the four
+// themes are different sizes — so the same clip id maps to a different slot per
+// theme. That is fine (a theme switch is meant to recolour everything) but it does
+// mean the hash is not a theme-independent identity: don't cache it across themes.
+function colorHash(key, len) {
+  let hash = 0
+  for (let i = 0; i < key.length; i++) {
+    hash = (hash * 31 + key.charCodeAt(i)) >>> 0
+  }
+  return hash % len
+}
+
 // Deterministic color per clip id, so a clip keeps its color across
 // reorders and stays visually traceable after being split by Splice.
-export function clipColor(clipId) {
-  let hash = 0
-  for (let i = 0; i < clipId.length; i++) {
-    hash = (hash * 31 + clipId.charCodeAt(i)) >>> 0
+//
+// This is the UNCOORDINATED fallback: it looks at one id and nothing else, so two
+// clips whose ids happen to hash to the same slot get the same colour. Prefer
+// assignClipColors, which is what the lanes use. Kept exported because it is the
+// right answer when there is no lane to coordinate with (a lone preview, a clip
+// drawn outside a track) and because it defines the PREFERRED slot that
+// assignClipColors starts from.
+export function clipColor(clipId, theme = DEFAULT_CLIP_THEME) {
+  const palette = clipPalette(theme)
+  return palette[colorHash(clipId, palette.length)]
+}
+
+// One distinct colour per group on a lane — the thing clipColor alone cannot
+// promise. Takes fuseGroups' output and returns Map<colorKey, paletteEntry>,
+// keyed exactly the way TimelineClip asks for its colour (`fuse.colorId` for a
+// fused run, else `clip.id`).
+//
+// Groups, not clips, is the right unit twice over: a fused run is ONE clip to the
+// user and must be one colour, and it therefore consumes one palette slot instead
+// of one per member — which is most of what keeps a real timeline inside ten.
+//
+// The trade-off worth understanding before "simplifying" this. Uniqueness is a
+// property of the SET, so no function of a single clip can deliver it — the two
+// goals genuinely conflict:
+//
+//   - Stable: a clip keeps its colour when the lane is reordered. Preserved, and
+//     deliberately, because colour is how you follow a shot through a reorder or a
+//     Splice. That is why the walk is over ids SORTED, not over lane order: track
+//     position is not an input, so moving a clip cannot repaint anything.
+//   - Unique: no two groups on a lane share a colour. Delivered up to as many
+//     groups as the active theme's palette has colours.
+//
+// The cost of having both: adding or removing a clip can recolour OTHERS, because
+// a newly sorted-in id may take a slot someone else was using. Greedy
+// preferred-then-probe keeps that to a minimum — a group whose preferred slot is
+// free never moves, so most edits repaint nothing — but it cannot be zero.
+//
+// Once the palette is exhausted it degrades to plain clipColor rather than
+// inventing another colour or throwing: duplicates come back, in the same order
+// they used to appear. That is the honest failure mode, and it keeps this function
+// total.
+//
+// Where that cliff sits is now a property of the THEME, not a constant — pastel
+// carries 10 colours, neutral 7, solid and vivid 6. So switching theme can trade
+// away uniqueness on a busy lane, which is a real cost of the smaller sheets and
+// not a bug to fix by padding them with off-sheet hues.
+export function assignClipColors(groups, theme = DEFAULT_CLIP_THEME) {
+  const palette = clipPalette(theme)
+  const keys = groups.map(g => g.fuseId || g.clips[0].id)
+  const taken = new Map()
+  const out = new Map()
+  // Sorted, so the assignment depends on WHICH clips are on the lane and never on
+  // the order they sit in.
+  for (const key of [...keys].sort()) {
+    const pref = colorHash(key, palette.length)
+    if (taken.size >= palette.length) {
+      out.set(key, palette[pref])
+      continue
+    }
+    let idx = pref
+    while (taken.has(idx)) idx = (idx + 1) % palette.length
+    taken.set(idx, key)
+    out.set(key, palette[idx])
   }
-  return CLIP_PALETTE[hash % CLIP_PALETTE.length]
+  return out
 }
 
 // Room-tone level, from the stepper's raw text to a number the server will

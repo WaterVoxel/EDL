@@ -260,7 +260,7 @@ export default function AudioBedBar({
           onPointerDown={e => handleMoveDrag(seg, e)}
           /* grab, like V1's clip body: the only standing hint that a clip on this
              lane can be moved at all. */
-          className={`group absolute top-0 bottom-0 rounded border border-emerald-500 bg-gradient-to-b from-emerald-700 to-emerald-900 overflow-hidden select-none ${onMoveBed ? 'cursor-grab active:cursor-grabbing' : ''} ${muted ? 'opacity-40' : ''} ${seg.index === selectedIndex ? 'ring-2 ring-sky-400 brightness-110' : ''}`}
+          className={`group absolute top-0 bottom-0 rounded border border-emerald-300 bg-emerald-300/45 overflow-hidden select-none ${onMoveBed ? 'cursor-grab active:cursor-grabbing' : ''} ${muted ? 'opacity-40' : ''} ${seg.index === selectedIndex ? 'ring-1 ring-sky-400 brightness-110' : ''}`}
           style={{ left: seg.left, width: seg.width, zIndex: seg.index === selectedIndex ? 12 : 10 }}
           title={
             `${segs.length > 1 ? `A1 clip ${seg.index + 1} — ` : ''}${seg.bed.name} — ${seg.durSec.toFixed(2)}s`
@@ -331,7 +331,7 @@ export default function AudioBedBar({
           toggle itself uses. */}
       {startPx > 0 && (
         <div
-          className="absolute top-0 bottom-0 left-0 rounded-l border border-r-0 border-fuchsia-500/40 bg-fuchsia-500/10 overflow-hidden flex items-center justify-center"
+          className="absolute top-0 bottom-0 left-0 rounded-l border border-r-0 border-fuchsia-300/40 bg-fuchsia-300/10 overflow-hidden flex items-center justify-center"
           style={{ width: startPx }}
           title={noiseEnabled
             ? `Room tone — A1 waits out V1's ${startSec.toFixed(2)}s head hold and starts with the picture, so the hold has no sound of its own and room tone fills it`
@@ -352,7 +352,7 @@ export default function AudioBedBar({
           <div key={b.id}>
             {b.tailPx > 0 && (
               <div
-                className="absolute top-0 bottom-0 bg-fuchsia-500/15 border-l border-fuchsia-500/30"
+                className="absolute top-0 bottom-0 bg-fuchsia-300/15 border-l border-fuchsia-300/30"
                 style={{ left: b.left + b.width - b.tailPx, width: b.tailPx }}
               />
             )}

@@ -3,11 +3,21 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 // A minimal menu, used two ways: as a right-click context menu (`position` from
 // the triggering MouseEvent) and as a button's drop-down (`position` from the
 // trigger's own getBoundingClientRect, plus `ignoreRef`). `items` is
-// [{label, onClick, disabled?, danger?, separatorBefore?}] — `label` may be a
-// node, not just a string, which is how an item carries a status marker;
-// `danger` draws the item in red and `separatorBefore` rules a line above it,
-// the two things an irreversible action (Delete) needs to not sit flush with the
-// harmless ones. Closes on outside click, Escape, or scroll.
+// [{label, onClick, disabled?, danger?, separatorBefore?, heading?, keepOpen?}] —
+// `label` may be a node, not just a string, which is how an item carries a status
+// marker or a row of colour swatches; `danger` draws the item in red and
+// `separatorBefore` rules a line above it, the two things an irreversible action
+// (Delete) needs to not sit flush with the harmless ones. Closes on outside click,
+// Escape, or scroll.
+//
+// Two variants exist for the Theme section and are worth knowing about:
+//   - `heading: true` makes the entry an inert caption instead of a button, so a
+//     group of related choices can be titled. It takes no onClick and cannot be
+//     focused or clicked — a disabled <button> would still be a tab stop.
+//   - `keepOpen: true` suppresses the close-on-activate. Only right when the item's
+//     effect is VISIBLE BEHIND the menu, which is exactly the theme picker: the
+//     timeline repaints underneath, so staying open is what lets you compare
+//     palettes instead of reopening the menu four times.
 //
 // `ignoreRef` is the element whose click OPENED the menu, and it exists because
 // that element is by definition outside the menu: without it the trigger's own
@@ -62,8 +72,13 @@ export default function ContextMenu({ position, items, onClose, ignoreRef = null
       {items.map((item, i) => (
         <div key={i}>
           {item.separatorBefore && <div className="my-1 border-t border-neutral-700" />}
+          {item.heading ? (
+            <div className="px-3 pt-1 pb-0.5 text-[9px] uppercase tracking-wide text-neutral-500 select-none">
+              {item.label}
+            </div>
+          ) : (
           <button
-            onClick={() => { item.onClick(); onClose() }}
+            onClick={() => { item.onClick(); if (!item.keepOpen) onClose() }}
             disabled={item.disabled}
             className={`block w-full text-left px-3 py-1.5 text-[11px] disabled:opacity-40 disabled:hover:bg-transparent ${
               item.danger
@@ -73,6 +88,7 @@ export default function ContextMenu({ position, items, onClose, ignoreRef = null
           >
             {item.label}
           </button>
+          )}
         </div>
       ))}
     </div>

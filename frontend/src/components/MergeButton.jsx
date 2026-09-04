@@ -44,7 +44,7 @@ export default function MergeButton({ clips, setClips, ids, onSelectId, onMerged
         : (probe.collapsed
           ? 'Merge the selected clips into one clip — they are one unbroken stretch of one file, so they become a single clip with a single trim, and render as one file'
           : 'Merge the selected clips so they render as one file — they stay separate clips (different sources, a gap between them, or a different speed or direction on one of them) but draw and render as one, each part keeping its own retime')}
-      className="px-1.5 py-0.5 text-[8px] rounded bg-sky-600 text-white hover:bg-sky-500 disabled:bg-neutral-700 disabled:text-neutral-500"
+      className="px-1.5 py-0.5 text-[8px] rounded bg-sky-300/15 border border-sky-300/50 text-sky-200 hover:bg-sky-300/25 disabled:bg-transparent disabled:border-neutral-700 disabled:text-neutral-600"
     >
       Merge
     </button>
