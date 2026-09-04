@@ -1723,6 +1723,49 @@ def render_timeline():
                 }), 400
             crop = {"w": crop_w, "h": crop_h, "x": crop_x, "y": crop_y}
 
+            # Optional FIT: the box is scaled DOWN to fitW x fitH after being
+            # cut. Sent only when the clip's aspect ratio exactly matches the
+            # chosen preset's, in which case the frontend makes the box the
+            # whole frame — so a "fit" keeps all of the picture and lands on
+            # the preset's exact pixel dimensions instead of cutting a
+            # preset-sized region out of the middle (cropMath.cropForPreset).
+            # Re-validated here rather than trusted: these numbers become a
+            # scale filter and the render's output resolution.
+            fit_w = raw_crop.get("fitW")
+            fit_h = raw_crop.get("fitH")
+            if fit_w is not None and fit_h is not None:
+                try:
+                    fit_w = int(fit_w)
+                    fit_h = int(fit_h)
+                except (ValueError, TypeError):
+                    return jsonify({"error": f"clip {i}: crop fitW/fitH must be integers"}), 400
+                if fit_w <= 0 or fit_h <= 0:
+                    return jsonify({"error": f"clip {i}: crop fitW/fitH must be positive"}), 400
+                # Never upscale — the whole app's standing rule, and the reason
+                # fit only triggers on sources LARGER than the preset.
+                if fit_w > crop_w or fit_h > crop_h:
+                    return jsonify({
+                        "error": f"clip {i}: crop fit {fit_w}x{fit_h} is larger than the crop box "
+                                 f"{crop_w}x{crop_h} — a fit only ever scales down"
+                    }), 400
+                # Same aspect ratio as the box, cross-multiplied so there is no
+                # tolerance to argue about. Without this a fit could stretch the
+                # picture, which is exactly what the feature exists to avoid.
+                if fit_w * crop_h != fit_h * crop_w:
+                    return jsonify({
+                        "error": f"clip {i}: crop fit {fit_w}x{fit_h} is not the same aspect ratio as the "
+                                 f"crop box {crop_w}x{crop_h} — fitting to it would distort the picture"
+                    }), 400
+                # libx264 + yuv420p needs even dimensions, and a fit's numbers
+                # ARE the output frame size, so an odd one fails the encode
+                # rather than being quietly rounded somewhere downstream.
+                if fit_w % 2 or fit_h % 2:
+                    return jsonify({
+                        "error": f"clip {i}: crop fit {fit_w}x{fit_h} must have even dimensions"
+                    }), 400
+                crop["fit_w"] = fit_w
+                crop["fit_h"] = fit_h
+
         # Optional per-clip crop keyframes: only meaningful when a crop is
         # already set (they animate the crop box's position over time; the
         # box's own w/h stays fixed and comes from `crop`). t is seconds
@@ -1771,30 +1814,62 @@ def render_timeline():
             ov_h = ov_info["height"]
             if not ov_w or not ov_h:
                 return jsonify({"error": f"clip {i} overlay: could not determine overlay resolution"}), 400
-            # Exact-size match is required, never a resample: a mismatched
-            # overlay would have to be scaled to fit, baking a soft,
-            # misaligned region into an otherwise lossless render.
+            # The overlay either matches the box exactly, or is a LARGER file of
+            # the box's exact aspect ratio and gets scaled down into it (0.71.0).
+            # Anything else is refused rather than resampled: a different ratio
+            # would have to stretch, and a smaller file would have to be
+            # enlarged, either way baking a soft or misaligned region into an
+            # otherwise lossless render.
+            #
+            # `place_w/place_h` is what actually lands on the frame — the box
+            # when one was sent, the file's own size otherwise — and every bound
+            # below is checked against IT, not against ov_w/ov_h. Getting that
+            # backwards would bounds-check the unscaled file and reject
+            # placements that are perfectly in range once scaled.
             exp_w = raw_ov.get("w")
             exp_h = raw_ov.get("h")
+            place_w, place_h = ov_w, ov_h
+            ov_scale = None
             if exp_w is not None and exp_h is not None:
                 try:
                     exp_w = int(exp_w)
                     exp_h = int(exp_h)
                 except (ValueError, TypeError):
                     return jsonify({"error": f"clip {i} overlay: w/h must be integers"}), 400
+                if exp_w <= 0 or exp_h <= 0:
+                    return jsonify({"error": f"clip {i} overlay: w/h must be positive"}), 400
                 if exp_w != ov_w or exp_h != ov_h:
-                    return jsonify({
-                        "error": f"clip {i} overlay: file is {ov_w}x{ov_h} but the crop box it must fill "
-                                 f"is {exp_w}x{exp_h} — an overlay must match the box exactly"
-                    }), 400
+                    # Cross-multiplied integers, the same test cropMath and the
+                    # crop-fit validation use — one meaning of "same aspect
+                    # ratio" across the whole app, with no tolerance to tune.
+                    if ov_w * exp_h != ov_h * exp_w:
+                        return jsonify({
+                            "error": f"clip {i} overlay: file is {ov_w}x{ov_h} but the crop box it must fill "
+                                     f"is {exp_w}x{exp_h} — a different aspect ratio, so fitting it would "
+                                     f"stretch the picture"
+                        }), 400
+                    if ov_w < exp_w or ov_h < exp_h:
+                        return jsonify({
+                            "error": f"clip {i} overlay: file is {ov_w}x{ov_h}, smaller than the {exp_w}x{exp_h} "
+                                     f"crop box it must fill — an overlay is only ever scaled down, never up"
+                        }), 400
+                    # libx264/yuv420p cannot encode an odd dimension, and the
+                    # scale target is a client-supplied number.
+                    if exp_w % 2 or exp_h % 2:
+                        return jsonify({
+                            "error": f"clip {i} overlay: crop box {exp_w}x{exp_h} must have even dimensions "
+                                     f"to scale an overlay into it"
+                        }), 400
+                    ov_scale = (exp_w, exp_h)
+                place_w, place_h = exp_w, exp_h
             # unlike `crop` (which silently clamps an out-of-range offset),
             # `overlay` silently CLIPS the pasted picture — verified: x beyond
             # the right edge loses the overflow with exit 0 and no warning at
             # any loglevel. So the rect has to be bounds-checked here or part
             # of the processed region just vanishes with no diagnostic.
-            if ov_x < 0 or ov_y < 0 or ov_x + ov_w > info["width"] or ov_y + ov_h > info["height"]:
+            if ov_x < 0 or ov_y < 0 or ov_x + place_w > info["width"] or ov_y + place_h > info["height"]:
                 return jsonify({
-                    "error": f"clip {i} overlay: placement {ov_w}x{ov_h}+{ov_x}+{ov_y} "
+                    "error": f"clip {i} overlay: placement {place_w}x{place_h}+{ov_x}+{ov_y} "
                              f"lies outside source resolution {info['width']}x{info['height']}"
                 }), 400
 
@@ -1814,8 +1889,8 @@ def render_timeline():
                         return jsonify({"error": f"clip {i} overlay keyframe {j}: t/x/y must be numeric (t float, x/y int)"}), 400
                     if kt < -1e-6 or kt > ov_max_t + 1e-6:
                         return jsonify({"error": f"clip {i} overlay keyframe {j}: t={kt} lies outside the clip's main body [0, {ov_max_t:.3f}]"}), 400
-                    if kx < 0 or ky < 0 or kx + ov_w > info["width"] or ky + ov_h > info["height"]:
-                        return jsonify({"error": f"clip {i} overlay keyframe {j}: placement ({kx},{ky}) with size {ov_w}x{ov_h} lies outside source {info['width']}x{info['height']}"}), 400
+                    if kx < 0 or ky < 0 or kx + place_w > info["width"] or ky + place_h > info["height"]:
+                        return jsonify({"error": f"clip {i} overlay keyframe {j}: placement ({kx},{ky}) with size {place_w}x{place_h} lies outside source {info['width']}x{info['height']}"}), 400
                     parsed_ov.append({"t": max(0.0, min(ov_max_t, kt)), "x": kx, "y": ky})
                 ov_kfs = parsed_ov
 
@@ -1835,8 +1910,12 @@ def render_timeline():
                 # Assigned when the input was collected above — appended after
                 # every clip input, one per overlay (never deduplicated).
                 "input_index": entry["index"],
-                "w": ov_w,
-                "h": ov_h,
+                # The size as PLACED, plus the scale target when the file has to
+                # be reduced into it (absent when the file already matches).
+                "w": place_w,
+                "h": place_h,
+                "scale_w": ov_scale[0] if ov_scale else None,
+                "scale_h": ov_scale[1] if ov_scale else None,
                 "x": ov_x,
                 "y": ov_y,
                 "keyframes": ov_kfs,
@@ -1866,8 +1945,17 @@ def render_timeline():
     # existing frame, so it never changes that frame's size (and being
     # smaller than V1 is the whole premise of the feature).
     def effective_wh(info, spec):
-        if spec.get("crop"):
-            return spec["crop"]["w"], spec["crop"]["h"]
+        crop = spec.get("crop")
+        if crop:
+            # A FIT is cut-then-scaled, so its frame ends up at the fit size,
+            # not the box size (which is the whole source frame). Reporting the
+            # box here would make the common target the SOURCE resolution and
+            # the fit would be undone by the normalization pass upscaling it
+            # straight back — the output would be the source size with the
+            # preset never honored.
+            if crop.get("fit_w"):
+                return crop["fit_w"], crop["fit_h"]
+            return crop["w"], crop["h"]
         return info["width"], info["height"]
 
     # An audio-only file has width/height None, and max() over a None would

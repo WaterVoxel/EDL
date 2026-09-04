@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useMedia } from '../context/MediaContext'
-import { clampCropOrigin, resizeCropBox } from '../cropMath'
+import { clampCropOrigin, resizeCropBox, isFitCrop } from '../cropMath'
 import { sampleCropOrigin, addKeyframe, maxKeyframeOrigin } from '../cropAnimation'
 import { nextGesture } from '../hooks/useUndoableTracks'
 
@@ -104,7 +104,13 @@ export default function CropOverlay({ selectedClip, setClips, stageRef, animateE
   // directly. Hooks must run before the early returns below.
   const crop = selectedClip?.crop
   const kfs = selectedClip?.cropKeyframes || []
-  const animating = animateEnabled && kfs.length >= 1 && !!crop
+  // A fit box spans the whole frame (see cropMath.cropForPreset), so there is
+  // no region to move, scale or pan: clampCropOrigin would pin any drag to
+  // (0,0) anyway, and offering a cursor that visibly does nothing is worse
+  // than not offering one. Gated here rather than upstream so the outline
+  // still draws — the user should see the frame the fit covers.
+  const isFit = isFitCrop(crop)
+  const animating = animateEnabled && kfs.length >= 1 && !!crop && !isFit
   const stateT = Math.max(0, currentTime - (selectedClip?.inSec || 0))
   const stateSampled = animating ? sampleCropOrigin(kfs, stateT) : null
   const displayX = stateSampled ? stateSampled.x : (crop?.x || 0)
@@ -290,22 +296,35 @@ export default function CropOverlay({ selectedClip, setClips, stageRef, animateE
       />
       <div
         ref={boxElRef}
-        className={`absolute border-2 bg-emerald-400/10 cursor-move touch-none ${animating ? 'border-amber-400' : 'border-emerald-400'}`}
+        className={`absolute border-2 touch-none ${
+          isFit
+            ? 'border-emerald-400/70 border-dashed'
+            : `bg-emerald-400/10 cursor-move ${animating ? 'border-amber-400' : 'border-emerald-400'}`
+        }`}
         style={{
           left: videoLeft + displayX * scale,
           top: videoTop + displayY * scale,
           width: crop.w * scale,
           height: crop.h * scale,
+          // No fill and no pointer target on a fit: the box is the frame, so a
+          // tint would just dim the whole preview and a cursor would promise a
+          // drag that cannot move anything.
+          pointerEvents: isFit ? 'none' : undefined,
         }}
-        onPointerDown={handlePointerDown}
-        title={animating ? 'Keyframed position at playhead — drag to set the keyframe here' : 'Drag to reposition the crop area'}
+        onPointerDown={isFit ? undefined : handlePointerDown}
+        title={isFit
+          ? `Whole frame fitted to ${crop.fitW}×${crop.fitH} — nothing is cropped away, so there is nothing to reposition`
+          : animating ? 'Keyframed position at playhead — drag to set the keyframe here' : 'Drag to reposition the crop area'}
       >
         <span className={`absolute -top-4 left-0 text-[8px] font-mono whitespace-nowrap ${animating ? 'text-amber-300' : 'text-emerald-300'}`}>
-          {crop.w}×{crop.h}{animating ? ` · kf${kfs.length}` : ''}
+          {isFit
+            ? `${crop.w}×${crop.h} → ${crop.fitW}×${crop.fitH} fit`
+            : `${crop.w}×${crop.h}${animating ? ` · kf${kfs.length}` : ''}`}
         </span>
-        {/* Bottom-right resize handle — only in Free mode. Scales the box
-            while keeping the preset's aspect ratio (see resizeCropBox). */}
-        {freeEnabled && (
+        {/* Bottom-right resize handle — only in Free mode, and never on a fit
+            (the box is already the whole frame). Scales the box while keeping
+            the preset's aspect ratio (see resizeCropBox). */}
+        {freeEnabled && !isFit && (
           <div
             onPointerDown={handleResizeDown}
             title="Drag to scale the crop box (keeps the aspect ratio)"

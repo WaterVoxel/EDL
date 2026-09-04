@@ -54,6 +54,62 @@ export function cropBoxSize(preset, sourceW, sourceH) {
   return { w, h }
 }
 
+// Does the source frame have EXACTLY this preset's aspect ratio?
+//
+// Cross-multiplies integers instead of comparing w/h quotients: 1920/1080 and
+// 1280/720 are the same ratio but not reliably the same double, and any
+// epsilon-based test would need a tolerance that also swallows the 480p tier,
+// whose presets are deliberately approximate — 864×496 is 1.7419, a full 2.02%
+// off a true 16:9, and 1:1 is the only 480p entry that is exact (every 720p
+// entry is). Cross-multiplication has no tolerance to tune and no float error
+// to reason about, so "same aspect ratio" means the same thing here, in
+// app.py's validation, and in a user's head.
+export function isExactAspectMatch(preset, sourceW, sourceH) {
+  if (!preset || !sourceW || !sourceH) return false
+  return sourceW * preset.h === sourceH * preset.w
+}
+
+// FIT rather than CUT. When the source is the preset's exact aspect ratio AND
+// larger than it, picking that preset scales the WHOLE frame down into the
+// preset's box instead of cutting a preset-sized region out of the middle: a
+// 960×960 source against the 640×640 preset keeps all of the picture rather
+// than the 44% a centred cut leaves. Because the ratios are exactly equal the
+// scale is uniform on both axes, so nothing stretches and the result lands on
+// the preset's exact pixel dimensions.
+//
+// Requires source > preset because this app never upscales (see cropBoxSize):
+// a 320×320 source against the 640×640 preset ALREADY yields a whole-frame box
+// today, so there is nothing for fit to improve there, and magnifying it would
+// invent a behaviour nobody asked for. That bound is why fit only ever changes
+// clips that were losing picture, and never changes one that wasn't.
+export function fitsWholeFrame(preset, sourceW, sourceH) {
+  return isExactAspectMatch(preset, sourceW, sourceH) && sourceW > preset.w
+}
+
+// Is this crop a fit? A fit carries the scaled-down output size; a plain cut
+// has no fitW/fitH. Every other module asks through this rather than
+// re-deriving the rule from a preset and a source resolution, so there is one
+// place the answer can change.
+export function isFitCrop(crop) {
+  return !!(crop && crop.fitW && crop.fitH)
+}
+
+// The whole crop decision for one preset: the box in source pixels, where it
+// sits, and — for a fit — the size that box is scaled down to at render. This
+// is CropForm's single entry point so the fit rule cannot be applied in one
+// place and forgotten in another.
+export function cropForPreset(preset, sourceW, sourceH) {
+  if (!preset || !sourceW || !sourceH) return null
+  if (fitsWholeFrame(preset, sourceW, sourceH)) {
+    // Box = the entire frame at the origin. Nothing is cut away, so there is
+    // no region to position: the render scales this down to fitW × fitH.
+    return { w: sourceW, h: sourceH, x: 0, y: 0, fitW: preset.w, fitH: preset.h }
+  }
+  const box = cropBoxSize(preset, sourceW, sourceH)
+  const origin = centeredCropOrigin(box, sourceW, sourceH)
+  return { w: box.w, h: box.h, x: origin.x, y: origin.y, fitW: null, fitH: null }
+}
+
 // Center a box of size {w, h} inside a source frame — the default position
 // before the user drags it anywhere.
 export function centeredCropOrigin(box, sourceW, sourceH) {

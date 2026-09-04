@@ -472,10 +472,13 @@ export default function AboutDialog({ onClose }) {
               box and keyframes.
             </p>
             <p>
-              Sizes must match the box <strong>exactly</strong>; nothing is resampled to fit. A
-              513×512 file against a 512×512 box is a mistake upstream, and silently scaling it would
-              bake a soft, misaligned patch into an otherwise lossless render — so those cases warn
-              and are left alone. Same-resolution V2 is ordinary full-frame replacement, not a
+              The returned file either matches the box, or is <strong>larger with the box's exact
+              aspect ratio</strong> — a 1440×1440 file drops into a 640×640 box, since most models
+              return their own native resolution rather than the size you fed them. Anything else is
+              left alone with a warning rather than resampled: a 513×512 file against a 512×512 box
+              is a mistake upstream, a different shape would have to stretch, and a
+              <em> smaller</em> same-ratio file would have to be enlarged — each of which bakes a
+              soft or misaligned patch into an otherwise lossless render. Same-resolution V2 is ordinary full-frame replacement, not a
               composite, and produces no warning. A/B mode adds one case: a V2 clip matching V1's
               source size covers the whole frame at 0,0 — unless that V1 clip is cropped, where
               "cover the frame" has two possible meanings and neither is safe to guess, so it refuses

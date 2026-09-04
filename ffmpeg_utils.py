@@ -2779,8 +2779,19 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
     identically to the main segment — a crop is a spatial transform of the
     whole source, not something tied to the trim window.
 
-    spec["overlay"] (optional dict {input_index, w, h, x, y, keyframes,
-    in_sec, out_sec}) composites a SECOND video on top of this clip — the V2
+    It may also carry {fit_w, fit_h}: a FIT, where the box is the whole frame
+    and gets scaled DOWN to fit_w x fit_h afterwards. That is what makes a
+    preset whose aspect ratio the clip already has keep the entire picture
+    instead of cutting a preset-sized region out of the middle. app.py
+    guarantees fit_w/fit_h are even, no larger than the box, and the box's exact
+    aspect ratio, so the scale can never stretch or magnify anything.
+
+    spec["overlay"] (optional dict {input_index, w, h, scale_w, scale_h, x, y,
+    keyframes, in_sec, out_sec}) composites a SECOND video on top of this clip —
+    w/h are the rect as PLACED, and scale_w/scale_h (when set) reduce the
+    overlay input to that rect first, for a file returned larger than the box it
+    came from. app.py guarantees the reduction is exact-same-aspect and never a
+    magnification, so it cannot stretch or reframe the region. This is the V2
     animated-overlay feature: a region that was cropped out of this clip,
     processed externally, and is being placed back exactly where it came
     from, following the same animated path. Like crop, it is applied to the
@@ -2875,8 +2886,17 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
             ov_in = overlay.get("in_sec") or 0
             ov_out = overlay.get("out_sec")
             trim_step = f"trim=start={ov_in}:end={ov_out}" if ov_out else f"trim=start={ov_in}"
+            # An overlay file LARGER than the box it fills is reduced into it
+            # (app.py validates exact-same-aspect + never-upscale, so this is a
+            # uniform reduction that cannot stretch or reframe anything). Most
+            # AI models return their own native resolution rather than the size
+            # they were given, so this is the common case, not the exception.
+            ov_scale = (
+                f",scale={overlay['scale_w']}:{overlay['scale_h']}"
+                if overlay.get("scale_w") else ""
+            )
             chains.append(
-                f"[{ov_idx}:v]{trim_step},setpts=PTS-STARTPTS+{in_sec}/TB[ovin{i}]"
+                f"[{ov_idx}:v]{trim_step}{ov_scale},setpts=PTS-STARTPTS+{in_sec}/TB[ovin{i}]"
             )
             if len(ov_kfs) >= 1:
                 ox = f"'{keyframe_ladder(ov_kfs, 'x', in_sec)}'"
@@ -2894,6 +2914,20 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
             v_src = f"[vov{i}]"
 
         if crop:
+            # A FIT crop scales the cut result down to the preset's exact
+            # dimensions (app.py validates same-aspect + never-upscale, so this
+            # is a uniform reduction that cannot stretch anything). Emitted as
+            # part of the same chain so the label stays [vsrcN] either way —
+            # holds and the overlay both key off that label, and giving a fit
+            # its own label would land squarely in the filter-produced-label
+            # trap documented below.
+            #
+            # This is NOT redundant with the per-segment normalization further
+            # down, which scales to the timeline's COMMON target: doing it here
+            # is what makes the clip's own frame actually be the preset size,
+            # so effective_wh's answer matches the stream and a fit lands on
+            # the preset even when a larger clip elsewhere raises that target.
+            fit = f",scale={crop['fit_w']}:{crop['fit_h']}" if crop.get("fit_w") else ""
             keyframes = spec.get("crop_keyframes") or []
             if len(keyframes) >= 1:
                 # Animated pan: crop.w/crop.h stay static, crop.x/crop.y
@@ -2908,10 +2942,10 @@ def build_timeline_filter(clip_specs, target_w, target_h, target_fps,
                 x_expr = keyframe_ladder(keyframes, "x", in_sec)
                 y_expr = keyframe_ladder(keyframes, "y", in_sec)
                 chains.append(
-                    f"{v_src}crop={crop['w']}:{crop['h']}:x='{x_expr}':y='{y_expr}'[vsrc{i}]"
+                    f"{v_src}crop={crop['w']}:{crop['h']}:x='{x_expr}':y='{y_expr}'{fit}[vsrc{i}]"
                 )
             else:
-                chains.append(f"{v_src}crop={crop['w']}:{crop['h']}:{crop['x']}:{crop['y']}[vsrc{i}]")
+                chains.append(f"{v_src}crop={crop['w']}:{crop['h']}:{crop['x']}:{crop['y']}{fit}[vsrc{i}]")
             v_src = f"[vsrc{i}]"
 
         # Snap hold sampling to the frame grid, clamped to the last frame

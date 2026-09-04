@@ -15,6 +15,99 @@ the day the version file appeared. There are no tags for them and never will be 
 `v0.25.0` is the first real tag. Treat the older entries as a history, not a
 download list.
 
+## 0.71.0 — 2026-09-04
+
+**A processed region coming back on V2 no longer has to be the exact size of the crop box —
+it just has to be the same shape.** Crop a 640×640 region out of V1, send it through an AI
+model, and most models hand back their own native resolution: 1440×1440, not 640×640. Until
+now that was refused with "an overlay must match the box exactly", which meant the round
+trip the crop box exists for stopped working the moment the tool upscaled. Now a larger file
+of the same shape is scaled down into the box and composited exactly where the region came
+from, following the same animated path as before. 960×960 into a 640×640 box, 1728×992 into
+an 864×496 box — anything that reduces cleanly.
+
+Nothing is stretched or reframed, because the shapes are identical, so both sides shrink by
+the same amount. The preview shows it the same way the render bakes it, with no extra step
+on your part.
+
+**What still gets refused, and why the message now tells you which it was:**
+
+- **A different shape** — a 1440×1080 file against a 640×640 box would have to be squeezed,
+  so it's left alone rather than distorted.
+- **The same shape but smaller** — a 512×512 file against a 640×640 box would have to be
+  enlarged, which puts a visibly soft patch in the middle of an otherwise lossless frame.
+  If you want that enlarged anyway, say so and it can be allowed.
+- **An off-by-one** — 513×512 against a 512×512 box is still a mistake somewhere upstream,
+  and still says so.
+
+Also fixed: Analyze no longer counts a **FIT** crop as a shot that lost picture. A fit keeps
+the whole frame, so reporting it alongside genuinely cropped shots overstated what the
+round trip throws away.
+
+## 0.70.0 — 2026-09-04
+
+**Picking a crop preset that matches the clip's shape now fits the whole picture into it
+instead of cutting a piece out of the middle.** Choose 640×640 for a 960×960 clip and you
+get all of it, scaled down to 640×640 — where before you got a 640×640 window onto the
+centre and lost 56% of the frame. Same for 1920×1080 into 1280×720, 1080×1920 into
+720×1280, and so on. The output is still exactly the preset's size; nothing is stretched,
+because the shapes match so both sides shrink by the same amount.
+
+It happens on its own — there's no switch to find. When a preset fits, a small **FIT** tag
+appears next to the dropdown, the outline on the preview goes dashed and shows
+`960×960 → 640×640 fit`, and **Free** and **Animate** grey out. That's not them breaking:
+the box now covers the entire frame, so there is nowhere left to drag it, nothing to scale,
+and nothing to pan to. Pick a preset that *doesn't* match the clip's shape and everything
+comes straight back, including whichever of those two you had switched on.
+
+**The shapes have to match exactly.** 1920×1080 fits the 720p 16:9 preset, but *not* the
+480p one — 864×496 is 2% off a true 16:9, so it keeps cutting exactly as it always did. All
+six 720p presets are exact; in the 480p group only 1:1 is. The alternative was fitting
+near-misses too, which would mean either squashing the picture slightly or writing files
+that aren't the size the preset says. Neither seemed worth it, so a near-miss behaves as
+before.
+
+**A clip smaller than the preset is unaffected** — the app has never upscaled and still
+doesn't, so a 320×320 clip against 640×640 renders at 320×320 exactly as before.
+
+Two related things fixed along the way:
+
+- **Projects saved before this update render exactly as they always did.** A crop stored in
+  an older `.nara` is still a cut, frame for frame — the fit only applies when you pick a
+  preset from now on. Verified by hashing every frame.
+- **V2 now composites onto a fitted clip.** Bringing a full-frame V2 clip back over a V1
+  clip in A/B mode used to be refused as ambiguous whenever V1 was cropped. On a fitted
+  clip there was never anything ambiguous about it — nothing is cropped away — so the round
+  trip (export the frame, process it, drop it on V2) now works, and the result is scaled to
+  the preset with the processed picture in it rather than silently coming out at the source
+  size.
+
+_Numbered as a minor even though it changes what an existing action does, matching how
+0.67.0 (which repainted every clip) and 0.68.0 (which restyled every button) were handled:
+nothing already saved renders differently and the app has never taken a major. Bump this to
+1.0.0 instead if you'd rather read the rule at the top of this file strictly._
+
+## 0.69.2 — 2026-09-04
+
+**The left and right columns now open at 15% of the window instead of 18%**, giving the
+preview and timeline in the middle about 70% to start with instead of 64%. On a 1440px
+window that's 216px a side rather than 259px. Both sides still open the same width as each
+other, you can still drag either divider wherever you like, and the limits on how far
+(180–560 left, 180–720 right) haven't moved.
+
+As before, this is the width the app *opens* at — resizing a column sticks for the rest of
+the session, including across New Project and Import, and only returns to 15% on a page
+reload.
+
+## 0.69.1 — 2026-09-04
+
+**Hold and Trim no longer print a unit beside their number fields.** The little `s` that
+flipped to `fr` when you switched the transport readout from time to frames is gone from
+both. It was one more thing changing on screen for a switch you just made deliberately,
+and the transport bar already says which mode you're in. The fields themselves are
+unchanged — they still count frames in frames mode and seconds in time mode, and still
+step by 1 frame or by fractions of a second accordingly.
+
 ## 0.69.0 — 2026-09-04
 
 **Pick a colour theme for the timeline.** The ⋯ menu has a new **Theme** section with

@@ -16,13 +16,38 @@
 // flag, no opt-in, nothing to remember to switch on. Same resolution means
 // the old full-frame-replacement behavior, untouched.
 //
-// Sizes must match the crop box EXACTLY. Nothing is resampled to fit: a
-// 513×512 file next to a 512×512 box is a mistake somewhere upstream, and
-// silently scaling it would bake a soft, misaligned region into an otherwise
-// lossless render. Those cases warn and are left alone instead.
+// Sizes must match the crop box, or be an exact-aspect reduction INTO it
+// (0.71.0). A 513×512 file next to a 512×512 box is a mistake somewhere
+// upstream, and silently stretching it would bake a soft, misaligned region
+// into an otherwise lossless render — that still warns and is left alone. But
+// a 1440×1440 file over a 640×640 box is not a mistake: it's what an AI model
+// hands back, since most of them emit their own native resolution rather than
+// the size you fed them. The ratios being exactly equal means it drops into
+// the box with a uniform scale, nothing stretched and nothing repositioned,
+// so it is accepted and scaled rather than refused.
 //
 // Pairing across multiple clips is positional — 1st V2 clip onto 1st V1
 // clip, 2nd onto 2nd — each inheriting that V1 clip's own crop/keyframes.
+
+import { isExactAspectMatch, isFitCrop } from './cropMath'
+
+// Can this V2 file be scaled down into the crop box without distorting it?
+//
+// The box is a {w, h} pair, which is the same shape a crop preset is, so the
+// ratio test is literally the one `cropForPreset` uses — "same aspect ratio"
+// means the same thing for a returned overlay as it does for a preset: a
+// cross-multiplication of integers, no tolerance to tune (see cropMath).
+//
+// Downscale only, for the same reason the rest of the app never upscales: the
+// overlay is meant to be a HIGHER-fidelity version of that region, so a file
+// SMALLER than the box is the suspicious case, not the routine one, and
+// magnifying it would put a visibly soft patch in the middle of an otherwise
+// lossless frame. An equal-size file never reaches here — that's the exact
+// match, handled before this is asked.
+export function scalesIntoBox(box, srcW, srcH) {
+  if (!box || !srcW || !srcH) return false
+  return isExactAspectMatch(box, srcW, srcH) && srcW > box.w && srcH > box.h
+}
 
 // Reasons a V2 clip is NOT treated as an overlay. Returned rather than
 // thrown so the caller can surface all of them at once.
@@ -48,10 +73,14 @@ export const SKIP_AMBIGUOUS_FULL_FRAME = 'ambiguous-full-frame'
 // through to the crop-box rules below (which reject it with a warning).
 //
 // Returns { overlays, skipped, warnings }:
-//   • overlays[] — { index, v1Id, v2Id, v2Clip, v1Clip, x, y, w, h,
-//                    keyframes } — one per pair that IS a composite. x/y/w/h
+//   • overlays[] — { index, v1Id, v2Id, v2Clip, v1Clip, x, y, w, h, srcW,
+//                    srcH, scaled, keyframes } — one per pair that IS a
+//                    composite. x/y/w/h
 //                    are the placement rect in V1 SOURCE pixels (straight
-//                    from the V1 clip's crop box); keyframes are that clip's
+//                    from the V1 clip's crop box); srcW/srcH are the V2
+//                    file's own dimensions and `scaled` is true when they
+//                    differ, i.e. the file is a larger same-ratio version
+//                    that gets scaled down into the box; keyframes are that clip's
 //                    cropKeyframes verbatim, still indexed in source seconds
 //                    relative to inSec (the one unit the preview and the
 //                    render expression already share — see cropAnimation.js).
@@ -87,7 +116,14 @@ export function matchOverlays(v1Clips, v2Clips, opts = {}) {
 
     if (v2.sourceWidth === v1.sourceWidth && v2.sourceHeight === v1.sourceHeight) {
       if (fullFrameSameSize) {
-        if (v1.crop) {
+        // A FIT crop is the one cropped case that ISN'T ambiguous: its box is
+        // the whole source frame, so a full-source-size V2 covers it exactly
+        // and lands at 0,0 like any uncropped clip. The scale-down to the
+        // preset happens after the composite, so the overlay rides along.
+        // Refusing here would block the natural round trip — export the frame,
+        // process it, bring it back — on exactly the clips where nothing was
+        // cropped away in the first place.
+        if (v1.crop && !isFitCrop(v1.crop)) {
           // Ambiguous: V2 is V1's SOURCE size, but a cropped V1 renders at its
           // crop box, so "cover the frame" could mean either. Refuse and say
           // so — in A/B the user explicitly asked for a composite, so a silent
@@ -135,12 +171,23 @@ export function matchOverlays(v1Clips, v2Clips, opts = {}) {
       continue
     }
 
-    if (crop.w !== v2.sourceWidth || crop.h !== v2.sourceHeight) {
+    const exactSize = crop.w === v2.sourceWidth && crop.h === v2.sourceHeight
+    const scaled = !exactSize && scalesIntoBox(crop, v2.sourceWidth, v2.sourceHeight)
+    if (!exactSize && !scaled) {
       skipped.push({ index: i, reason: SKIP_SIZE_MISMATCH, v2Clip: v2 })
+      // Say which of the two rules it missed, because the fixes are different:
+      // a wrong ratio needs a different export or a different box, while a
+      // same-ratio file that's merely too small just needs a bigger render.
+      const sameRatio = isExactAspectMatch(crop, v2.sourceWidth, v2.sourceHeight)
       warnings.push(
         `V2 clip ${i + 1} ("${v2.displayName || v2.sourceName}") is ${v2.sourceWidth}×${v2.sourceHeight}, ` +
-        `but V1 clip ${i + 1}'s crop box is ${crop.w}×${crop.h} — an overlay must match the box exactly, ` +
-        `so it was left alone rather than resampled.`
+        `but V1 clip ${i + 1}'s crop box is ${crop.w}×${crop.h} — ` +
+        (sameRatio
+          ? `same aspect ratio, but smaller than the box, and it would have to be enlarged to fill it. ` +
+            `Left alone rather than upscaled into a soft patch.`
+          : `an overlay must either match the box exactly or be a larger file of the SAME aspect ratio ` +
+            `(which is scaled down into it). ${v2.sourceWidth}×${v2.sourceHeight} is a different shape than ` +
+            `${crop.w}×${crop.h}, so fitting it would stretch the picture. Left alone rather than resampled.`)
       )
       continue
     }
@@ -153,8 +200,15 @@ export function matchOverlays(v1Clips, v2Clips, opts = {}) {
       v2Clip: v2,
       x: crop.x,
       y: crop.y,
+      // The placement rect is ALWAYS the crop box, never the file's own size:
+      // that's what the region has to land back in. srcW/srcH record what the
+      // file actually is, so `scaled` cases can say so — the render scales the
+      // overlay input to w×h before compositing.
       w: crop.w,
       h: crop.h,
+      srcW: v2.sourceWidth,
+      srcH: v2.sourceHeight,
+      scaled,
       keyframes: v1.cropKeyframes || [],
     })
   }

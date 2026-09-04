@@ -23,6 +23,7 @@ Patterns actually used in this repo — match them when editing.
 - Pure math lives in `clipMath.js` / `analyzeMath.js` / `timecode.js` / `fileList.js` — testable via `node -e` without React. Keep it that way; new timeline math goes there, not inside components.
 - State: immutable `map`/`filter`/spread updates, always setting `dirty: true` on clip mutations. `setClips`-style updaters passed down as props — no Redux/reducer/store library.
 - Handlers named `handleX`; callback props named `onX`.
+- **When a mode makes a tool meaningless, gate the tool's prop by value — never write to the user's own toggle state.** A fit crop covers the whole frame, so Free and Animate have nothing to do; `App.jsx` derives `cropFreeOn`/`cropAnimateOn` from `freeEnabled && !cropIsFit` and passes *those* down, leaving `freeEnabled`/`animateEnabled` untouched so the setting comes back intact on the next ordinary clip. Turning the real state off would silently rewrite a preference the user set. Say why it's off in the disabled control's `title` rather than only greying it.
 - All HTTP in `src/api.js` as small named-export arrow functions over a shared `postJSON`; relative fetch paths (Vite proxy handles routing).
 - Linting: **oxlint** (`npm run lint`), not eslint; config in `frontend/.oxlintrc.json` (react/rules-of-hooks = error).
 

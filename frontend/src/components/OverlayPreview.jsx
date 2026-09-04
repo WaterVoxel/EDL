@@ -155,10 +155,13 @@ export default function OverlayPreview({ overlay, stageRef, visible = true }) {
         height: overlay.h * scale,
       }}
     >
-      {/* object-fill, not contain: the file's dimensions are required to
-          equal the crop box exactly (overlayMatch refuses anything else), so
-          the only stretch possible here is sub-pixel layout rounding —
-          letterboxing that would leak the V1 frame through instead. */}
+      {/* object-fill, not contain: the file either equals the crop box or is a
+          larger file of the box's EXACT aspect ratio (overlayMatch refuses
+          anything else), so filling this rect is a uniform reduction in both
+          cases — the same scale the render's `scale=w:h` performs, which is why
+          the preview needs no arithmetic of its own for it. `contain` would
+          letterbox on sub-pixel layout rounding and leak the V1 frame through
+          the seam instead. */}
       <video
         ref={ownVideoRef}
         src={src}

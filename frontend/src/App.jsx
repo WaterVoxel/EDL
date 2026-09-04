@@ -40,6 +40,7 @@ import { analyzeAgainstV1, batchCutAgainstV1, reconstructFromV1, sequencePieces 
 import { mergeExportPresets } from './exportPresets'
 import { workFingerprint } from './projectWork'
 import { matchOverlays } from './overlayMatch'
+import { isFitCrop } from './cropMath'
 import { shotOutputNames, nameStem } from './renderNames'
 
 // How far each side column can be dragged. The two minimums are deliberately
@@ -53,6 +54,17 @@ const MIN_RIGHT_PANEL = 180
 const MAX_RIGHT_PANEL = 720
 const MIN_LEFT_PANEL = 180
 const MAX_LEFT_PANEL = 560
+
+// Opening width of each side column, as a fraction of the window — so the centre
+// (preview + timeline) starts with the remaining ~70%. ONE constant for both sides
+// rather than the same literal twice, because the two columns are meant to open
+// symmetrically and two copies is how that quietly stops being true.
+//
+// Applied at mount only, and NOT clamped to the MIN/MAX above — those bound the
+// divider drag. So on a window narrower than MIN_LEFT_PANEL / this fraction
+// (=1200px) the columns open below their own minimum and the first drag snaps them
+// wider. Worth knowing before lowering this further.
+const DEFAULT_PANEL_FRACTION = 0.15
 
 // Below this, a V1 trim isn't a decision anyone made — an edge drag converts
 // screen pixels to seconds, so a single stray pointermove can shave a fraction
@@ -406,8 +418,8 @@ function AppInner() {
   // toggled off, they just aren't shown or used for the preview.
   const [animateEnabled, setAnimateEnabled] = useState(false)
   const [freeEnabled, setFreeEnabled] = useState(false)
-  const [rightPanelWidth, setRightPanelWidth] = useState(() => window.innerWidth * 0.18)
-  const [leftPanelWidth, setLeftPanelWidth] = useState(() => window.innerWidth * 0.18)
+  const [rightPanelWidth, setRightPanelWidth] = useState(() => window.innerWidth * DEFAULT_PANEL_FRACTION)
+  const [leftPanelWidth, setLeftPanelWidth] = useState(() => window.innerWidth * DEFAULT_PANEL_FRACTION)
   const resizingRef = useRef(null)
   // Which divider is being dragged, for its own styling only ('left'|'right'|null).
   const [resizingSide, setResizingSide] = useState(null)
@@ -489,6 +501,17 @@ function AppInner() {
   const setActiveClips = focusedTrack === 2 ? setTrack2Clips : setTimelineClips
   const activeSelectedClip = focusedTrack === 2 ? selectedClip2 : selectedClip
   const setActiveSelectedId = focusedTrack === 2 ? setSelectedId2 : setSelectedId
+
+  // Free and Animate are one app-wide toggle each, not per-clip state, so
+  // selecting a FIT-cropped clip while either was already on would leave a
+  // button lit and a handle drawn for a box that covers the whole frame and
+  // cannot move (see cropMath.cropForPreset). Gating the value here rather
+  // than resetting the state means the user's toggle comes back untouched the
+  // moment they select a normally-cropped clip again — turning it off for them
+  // would be a side effect they never asked for and can't see the cause of.
+  const cropIsFit = isFitCrop(activeSelectedClip?.crop)
+  const cropAnimateOn = animateEnabled && !cropIsFit
+  const cropFreeOn = freeEnabled && !cropIsFit
 
   // ---------- Merge selection ----------
   // Merge is the one tool that needs MORE than one clip, and the rest of the app
@@ -896,7 +919,14 @@ function AppInner() {
         roundHoldSec: c.roundHoldSec || 0,
         reversed: !!c.reversed,
         speed: c.speed && c.speed > 0 ? c.speed : 1,
-        crop: ov ? null : (c.crop || null),
+        // A composite drops the crop: the overlay IS the processed region going
+        // back onto the full frame, so cropping V1 too would cut the frame the
+        // region is being restored into. A FIT is the exception and must
+        // survive — its box is the whole frame (nothing is cut) and its real
+        // job is the scale-down to the preset, which the graph applies AFTER
+        // compositing. Dropping it here would silently render at the source
+        // resolution and quietly ignore the preset the user picked.
+        crop: ov && !isFitCrop(c.crop) ? null : (c.crop || null),
         cropKeyframes: ov ? [] : (c.cropKeyframes || []),
         overlay: ov ? {
           input: ov.v2Clip.sourceName,
@@ -2316,9 +2346,9 @@ function AppInner() {
               <CropForm
                 selectedClip={activeSelectedClip}
                 setClips={setActiveClips}
-                animateEnabled={animateEnabled}
+                animateEnabled={cropAnimateOn}
                 onToggleAnimate={() => setAnimateEnabled(v => !v)}
-                freeEnabled={freeEnabled}
+                freeEnabled={cropFreeOn}
                 onToggleFree={() => setFreeEnabled(v => !v)}
               />
               {/* The Render button used to sit here; it now lives in the
@@ -2347,7 +2377,7 @@ function AppInner() {
                 visible={v2Visible}
               />
             ))}
-            <CropOverlay selectedClip={activeSelectedClip} setClips={setActiveClips} stageRef={previewStageRef} animateEnabled={animateEnabled} freeEnabled={freeEnabled} />
+            <CropOverlay selectedClip={activeSelectedClip} setClips={setActiveClips} stageRef={previewStageRef} animateEnabled={cropAnimateOn} freeEnabled={cropFreeOn} />
           </div>
 
           {/* The dock's pane switch used to be a four-button tab bar in this
@@ -2435,7 +2465,7 @@ function AppInner() {
                   rendering={rendering}
                   timeDisplayMode={timeDisplayMode}
                   onToggleTimeDisplayMode={toggleTimeDisplayMode}
-                  animateEnabled={animateEnabled}
+                  animateEnabled={cropAnimateOn}
                   v1Visible={v1Visible}
                   onToggleV1={toggleV1Visible}
                   v2Visible={v2Visible}

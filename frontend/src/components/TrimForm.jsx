@@ -110,7 +110,6 @@ export default function TrimForm({ selectedClip, setClips, displayMode = 'timeco
         disabled={disabled}
         title="Or drag the clip's edges directly on the timeline"
       />
-      <span className="text-[8px] text-neutral-600">{displayMode === 'frames' ? 'fr' : 's'}</span>
       <button
         onClick={apply}
         disabled={disabled}

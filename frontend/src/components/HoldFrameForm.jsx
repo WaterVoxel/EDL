@@ -68,8 +68,6 @@ export default function HoldFrameForm({ clips, setClips, displayMode = 'timecode
         min={0}
         disabled={disabled}
       />
-      {/* Unit tell, same as Trim's — without it "12" reads as twelve seconds. */}
-      <span className="text-[8px] text-neutral-600">{displayMode === 'frames' ? 'fr' : 's'}</span>
       <button
         onClick={() => apply('head')}
         disabled={disabled}

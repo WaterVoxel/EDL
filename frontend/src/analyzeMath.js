@@ -1,4 +1,5 @@
 import { clipSpeed, sequenceTargetFps, clipRenderFrames } from './clipMath.js'
+import { isFitCrop } from './cropMath.js'
 
 // "Analyze" applies the V1 timeline's cut structure directly onto a
 // different file dropped on V2: each V2 segment uses the SAME inSec/outSec
@@ -92,9 +93,12 @@ import { clipSpeed, sequenceTargetFps, clipRenderFrames } from './clipMath.js'
 //     and accumulates it down the sequence — which is the one error a
 //     reconstruction cannot recover from, since a cut on the wrong frame splices
 //     a neighbouring shot's frames onto this one.
-//   crop — UNRECOVERABLE: the pixels outside V1's crop box don't exist in the
-//     round-tripped footage. Reset to null instead of faking a restore. (The
-//     route that CAN put a processed region back is V2-as-overlay, not this.)
+//   crop — UNRECOVERABLE when it's a CUT: the pixels outside V1's crop box
+//     don't exist in the round-tripped footage. Reset to null instead of faking
+//     a restore. (The route that CAN put a processed region back is
+//     V2-as-overlay, not this.) A FIT crop loses no picture, but it is still
+//     reset, for a different reason: the round-tripped file is already AT the
+//     fit size, so re-applying the fit would scale it a second time.
 //   trim — no separate inversion. The file contains exactly the windows V1
 //     used, so footage V1 never used is simply absent; the caller reports how
 //     many seconds of each source that came to.
@@ -413,7 +417,11 @@ export function reconstructFromV1(v1Clips, v2Clips) {
     }
     s.shots++
     if (clipSpeed(c) !== 1) s.speedShots++
-    if (c.crop) s.croppedShots++
+    // A FIT crop is not footage loss — the whole frame is there, just smaller —
+    // so it must not be counted here: croppedShots is what tells the user how
+    // many shots come back missing picture, and inflating it would report a loss
+    // that did not happen.
+    if (c.crop && !isFitCrop(c.crop)) s.croppedShots++
     s.windows.push([Math.min(c.inSec, c.outSec), Math.max(c.inSec, c.outSec)])
   }
   for (const s of sources) {

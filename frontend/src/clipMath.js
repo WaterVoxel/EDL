@@ -712,7 +712,13 @@ function sameCrop(a, b) {
   const x = a.crop, y = b.crop
   if (!x && !y) return true
   if (!x || !y) return false
+  // fitW/fitH are part of the identity, not a derived extra: the same preset
+  // key can mean a cut on one clip and a whole-frame fit on another (it depends
+  // on each clip's own resolution — see cropMath.cropForPreset), and those two
+  // render to different pictures at different sizes. Comparing only key/w/h/x/y
+  // would call them the same crop and weld the clips into one.
   return x.key === y.key && x.w === y.w && x.h === y.h && x.x === y.x && x.y === y.y
+    && (x.fitW || null) === (y.fitW || null) && (x.fitH || null) === (y.fitH || null)
 }
 
 // Do these two neighbours, in lane order, cover one unbroken stretch of source?
