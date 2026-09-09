@@ -204,7 +204,7 @@ no `.git/`, so a tag would not survive the trip.
    - `VERSION` and `CHANGELOG.md` are the recipient's answer to "what am I running and what changed";
      `bump_version.py` is how their own future edits stay numbered. All three are small and all three
      are easy to leave out of an exclude-driven copy without noticing.
-   - `Audio_NOISE.wav` is the room-tone asset (588 KB) — without it the A1 Room Tone toggle fails at
+   - `Audio_NOISE.wav` is the room-tone (noise) asset (588 KB) — without it the A1 Noise toggle fails at
      render time, not at startup, so nothing else catches it.
    - **Both** icon copies are required: Vite only serves `frontend/public/`, Flask only serves
      `static/`.

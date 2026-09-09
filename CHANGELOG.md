@@ -15,6 +15,142 @@ the day the version file appeared. There are no tags for them and never will be 
 `v0.25.0` is the first real tag. Treat the older entries as a history, not a
 download list.
 
+## 0.74.0 — 2026-09-09
+
+**V2 Compare now follows the playhead for the whole length of the timeline, whatever shape the
+two tracks are cut into.** It used to pair the tracks by position — 1st V2 clip over 1st V1 clip,
+2nd over 2nd — which is only the same question as "what is on V2 right now" when both lanes
+happen to be cut identically. The moment they aren't, and a reconstruction almost never is, most
+of the timeline had no layer at all: one V1 clip under a dozen reconstructed cuts got a layer
+over the first cut and nothing after it, and a dozen V1 cuts under one long V2 file got a layer
+over the first clip and nothing after that. Compare looked switched off for the rest of the
+playhead's travel, which is precisely where you were trying to look.
+
+What you see over any frame is now whatever V2 holds at that same point on the timeline. Both
+lanes are read as timelines and intersected, so a V1 clip picks up every V2 cut that overlaps it
+and hands over from one to the next as the playhead crosses their edges — the same way the
+preview hands over between V1's own clips. Different cut counts, uneven cuts, holds on either
+track and slow motion on either track all land correctly: a 50% shot compared against a
+full-rate one still lines up frame for frame, since the layer's rate is the ratio of the two.
+
+Stretches where V2 has nothing show V1 on its own, as they should, and the log line now says how
+much of V1 is actually covered — "V2 over V1 at 50% for 8.00s of V1's 12.00s; the other 4.00s has
+no V2 under the playhead and shows V1 alone" — because a gap under Compare otherwise looks
+exactly like Compare being off.
+
+Where the old pairing was already right (both lanes cut the same way) nothing changes: the same
+clips are laid over the same clips at the same times. Compare is still preview-only — no clip is
+marked dirty, no render output changes, and the toggle is still not saved into a project.
+
+Under the hood this is also lighter than the shape it replaces. A reconstruction with fifty cuts
+draws through one video element per V1 clip that switches between them, rather than fifty
+elements of the same file with forty-nine hidden, and exactly one of them is ever on screen —
+which is what keeps 50% meaning 50% instead of two layers stacking into 75%.
+
+## 0.73.3 — 2026-09-09
+
+**V2 Compare's 50% layer now holds up under two more things you do to it: crossing a clip
+boundary while playing, and trimming while it is on.** The half-opacity view was already
+steady through playback and scrubbing as of 0.72.0; these are the two remaining ways it
+could misbehave.
+
+Crossing from one clip into the next used to hitch the layer. Each boundary re-measures the
+preview rectangle, and the measurement was treated as new information even when the number
+was identical — which restarted the layer's frame loop and, with it, paused and resumed the
+overlay's own video for a beat while V1 underneath kept gliding. The measurement is now
+compared before it is stored, so same-size clips (the ordinary case) cross a boundary with
+nothing happening at all.
+
+Trimming while Compare is on used to leave the layer out of step. The loop reads each clip's
+in and out points once when it is built, and a trim changes those numbers without changing
+which clip is which — so V2 stayed on screen but kept syncing to where the clip started
+*before* the trim, showing a real offset between the two pictures that wasn't in the edit. A
+trim on either track now rebuilds the loop. This matters more here than anywhere else in the
+app: a compare view exists to be believed about alignment, so it must not invent drift.
+
+Both fixes are in the same layer machinery the ordinary composited-overlay preview uses, so
+that view gets them too. Nothing about any render changes.
+
+## 0.73.2 — 2026-09-08
+
+**The snap button is a magnet now instead of the word SNAP.** A horseshoe magnet is what
+every other editor uses for this, so it needs no reading — and it lets the button take the
+same small square shape as the loop toggle right next to it. Those two are the only
+latching switches in the transport, and the lettered pill made snap look like a different
+kind of control than it is. It still lights up indigo while it's on, and the tooltip still
+tells you which track's edges it's following and how many there are.
+
+Behaviour is unchanged in every respect: same click, same snapping, same track.
+
+## 0.73.1 — 2026-09-08
+
+**A1 Room Tone is now called A1 Noise.** Same button, same place on the clip-tool row, same
+amber, same behaviour — it still fills only the silent stretches of a render, still leaves
+every bit of existing sound untouched, and the dB stepper beside it is unchanged. Only the
+name is different, and it now matches what the app has always called this internally, so
+the log lines, tooltips, error messages, the A1 lane's own gap labels ("Noise" where it used
+to read "Room tone"), the About manual and the tour all say the same word as the button.
+
+Nothing about your projects changes: saved `.nara` files already stored this as `noise`, so
+old projects open with the toggle and level exactly as you left them, and a render made
+before this version is bit-identical to one made after it. The sound itself is still the
+same room-tone recording at the same level.
+
+The older entries below say "A1 Room Tone" on purpose — that was the name at the time.
+
+## 0.73.0 — 2026-09-08
+
+**New SNAP button in the play controls — the playhead lands on clip starts instead of near
+them.** Clicking the timeline or dragging the playhead used to put it wherever the pixel under
+the cursor happened to be, so parking exactly on a cut was a matter of squinting and nudging
+with the arrow keys afterwards. With SNAP on, a click or drag jumps to the nearest clip start
+— or to the end of the whole run — so "go to the top of clip 4" is one click.
+
+It snaps to the track you're working on, not always V1: whichever track is focused (the one
+whose V1/V2 gutter label is lit) supplies the edges, so click that label to switch which
+track's cuts the playhead honours. Fused clips count as the single clip they look like, so a
+fused run gives you one target at its head rather than one per piece.
+
+Snap changes clicking and dragging only. Frame stepping, typing a position into the timecode
+field and the ⏮/⏭ buttons all still go exactly where you tell them, so precision work never
+has to fight the toggle — and turning SNAP off is how you park between two cuts. The button
+sits between the loop toggle and the timecode, lights up indigo while it's on, and its
+tooltip says how many edges the focused track currently has.
+
+## 0.72.0 — 2026-09-08
+
+**New V2 Compare button — see V1 and V2 at the same time instead of one or the other.** Up
+to now the two picture tracks took turns in the preview: a visible V2 replaced V1, so
+checking whether a reconstruction still lined up with the original meant clicking V2's eye
+off and on and trying to remember what you just saw. V2 Compare, the new teal button after
+A1 Room Tone, lays the whole V2 track over V1 at 50% opacity so drift, a shifted frame or a
+mistimed cut is simply visible. V2 clips pair with V1 clips in track order — clip 1 over
+clip 1, clip 2 over clip 2 — and each layer follows the playhead and hides itself past its
+own end, so scrubbing and playing both work.
+
+When V2 is already a composited region (a processed crop coming back on top of V1), Compare
+halves *that region's* opacity instead of covering the whole frame, which means you look
+straight through the processed patch at the footage it was cut from — the fastest way to see
+whether it landed back where it came from.
+
+The V2 track itself drops to 50% opacity on the timeline while Compare is on, so the lane
+shows you the same thing the preview is doing. Unlike hiding V2 with its eye, the dimmed lane
+is still fully editable — you can trim, drag and select on it exactly as before.
+
+The half-opacity holds through playback and scrubbing, which took two fixes. The layer's
+opacity is now restated every animation frame rather than set once, alongside its position;
+and the layer no longer tears itself down every time the preview's video element swaps files.
+That swap happens at every clip boundary and on any scrub that lands on a different clip, and
+for the beat between the swap and the new file reporting its size the element measures as zero
+— which used to be read as "there is nothing to measure" and blinked the whole layer out
+several times a second while playing. The last known rectangle is held over that gap instead.
+This also steadies the ordinary composited-overlay preview, which had the same blink.
+
+It is a preview aid and nothing more. No clip is marked dirty, no render output changes, and
+the setting isn't saved into a project file — it's a way of looking, not part of the edit.
+The log line says which of the three quiet cases you're in if you turn it on and see
+nothing: V2's eye is off, V2 is empty, or no V2 clip has a V1 clip to sit over.
+
 ## 0.71.0 — 2026-09-04
 
 **A processed region coming back on V2 no longer has to be the exact size of the crop box —

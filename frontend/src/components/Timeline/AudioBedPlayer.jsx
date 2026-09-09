@@ -23,8 +23,8 @@ const BED_GAIN = 0.35
  * decides which. That is also why a HOLE left by a removed clip needs no code of
  * its own here — inside a hole no element's stretch is under the playhead, so
  * every one of them is paused and the preview goes silent, which is what the
- * render does with the toggle off. With A1 Room Tone ON the render fills the hole
- * and the preview still doesn't: room tone is applied at render time and has
+ * render does with the toggle off. With A1 Noise ON the render fills the hole
+ * and the preview still doesn't: noise is applied at render time and has
  * never been previewed.
  *
  * One element per clip rather than one element re-pointed at each source: a src

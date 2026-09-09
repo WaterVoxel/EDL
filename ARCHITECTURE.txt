@@ -429,7 +429,7 @@ round(hold_seconds * fps) - 1, because trim's own output already
 counts as the first occurrence of that frame, so only N additional
 repeats are needed to reach the target frame count. The hold's audio
 is a gap of the hold's exact duration -- always pure digital silence.
-Room tone, when on, is summed over that gap from a separate track
+Noise, when on, is summed over that gap from a separate track
 rather than substituted into it (see below).
 
 WHICH TIMESTAMP A HOLD FREEZES ON FLIPS UNDER REVERSAL
@@ -534,7 +534,7 @@ has to change:
   - with an A1 bed -- clips concat to [outv][aseq], the bed's own
     branch builds [abed], and the two are summed into [outa].
 
-no_audio combined with a bed (or with the room tone fill) is
+no_audio combined with a bed (or with the noise fill) is
 structurally impossible and raises ValueError -> 400; the frontend
 drops both whenever "Render without audio" is checked, so the two
 never reach the builder together.
@@ -606,13 +606,13 @@ AudioBedPlayer slaves a hidden <audio> to the transport clock minus
 that offset (parked paused at 0 while the offset is negative), and
 AudioBedBar measures its geometry against V1's actual per-clip pixels.
 
-ROOM TONE FILLS THE MEASURED SILENCE (the A1 Room Tone toggle)
+A1 NOISE FILLS THE MEASURED SILENCE (the A1 Noise toggle)
 
 Every gap the graph creates is anullsrc -- pure digital silence -- and
 that never changes. What the toggle adds is a separate track that
 fills the silence and nothing else: wherever the sequence already
 carries sound, that sound comes out untouched at its own level;
-wherever it carries silence, room tone plays from a fixed asset
+wherever it carries silence, noise plays from a fixed asset
 (frontend/assets/Audio_NOISE.wav; the path is server-side, the request
 sends only a boolean). It is summed as one more amix input at the very
 end of the graph, like the bed.
@@ -638,7 +638,7 @@ opposite directions:
     narrowing to the head hold alone as soon as anything sat on A1 --
     so a timeline with a bed and no head hold, which is the ordinary
     case, had no eligible gap and the toggle emitted nothing at all.
-    Reported twice as "Room Tone does nothing".
+    Reported twice as "A1 Noise does nothing".
   - One endless layer under EVERYTHING. That filled every hole, and
     was reported immediately as "it's playing over the entire audio
     track" -- a real project's bed covers the sequence end to end, so
@@ -838,7 +838,7 @@ shapes differ deliberately:
     server-owned media fact taken from the probe.
   - With fillNoise on, both render responses carry noise_fill_sec and
     sequence_sec -- how much silence the fill actually found, against
-    the sequence it measured. Room tone is render-only and inaudible
+    the sequence it measured. Noise is render-only and inaudible
     in the preview, so this is the only signal that distinguishes
     "nothing happened" from "nothing needed filling"; the frontend
     logs both cases.
@@ -914,7 +914,7 @@ starts, padded with silence if shorter than the sequence and cut if
 longer, so it cannot drift out of sync no matter how V1 is re-edited.
 Each A1 clip carries its own lane-relative startSec, so removing one
 with its x leaves every other clip exactly where it was and the HOLE
-that opens plays as silence -- or as room tone, if the toggle is on.
+that opens plays as silence -- or as noise, if the toggle is on.
 That position is lane-relative (0 = V1's picture start, EXCLUDING the
 head hold) precisely so a head-hold edit never has to rewrite it. It MIXES with V1's
 own audio rather than replacing it, attenuated by a fixed gain since
@@ -1163,7 +1163,7 @@ build_timeline_filter -- adelay -> aformat -> apad -> atrim -> asetpts
 -> volume, summed with the same amix settings -- then mixed against a
 silence skeleton built PER CLIP (not as one anullsrc of the total), so
 it quantizes exactly the way the V1 graph's own [aseq] does. The
-skeleton carries no sound; it is there for the LENGTH. Room tone, when
+skeleton carries no sound; it is there for the LENGTH. Noise, when
 on, comes from the same noise_fill_plan() run against the same clip
 list, so the stem places tone in exactly the stretches the V1 render
 fills -- which is why each clip's has_audio is load-bearing here even
@@ -1172,7 +1172,7 @@ silent (tone on, no A1 track, nothing to fill) is refused with that
 explanation rather than written.
 
 NO CLIP IS OPENED AS AN FFMPEG INPUT. The clips are probed for fps and
-video_duration and nothing else; only the bed and the room tone asset
+video_duration and nothing else; only the bed and the noise asset
 are opened. That is why an A1 render costs about a second on a
 timeline that takes minutes to render as video.
 
@@ -1184,7 +1184,7 @@ hold), and by subtraction: ((V1+A1+tone) - V1plain) - A1stem leaves
 silent source and a slow-motion clip, with all three passes at exactly
 286650 sample-frames -- well under one float32 LSB and therefore
 bit-identical once quantized. One measured imperfection, pre-existing
-and unrelated to room tone: where per-clip frame counts are odd the
+and unrelated to noise: where per-clip frame counts are odd the
 half-sample roundings accumulate and the stem can come out a sample or
 two SHORTER than the render's audio (536549 against 536551 on a
 12.1667s three-clip timeline, identically with the toggle off and on),
@@ -1323,7 +1323,7 @@ session, all of them plain JSON or plain files:
     projects/<name>.nara            saved timelines
     .export_settings.json           global export configuration
     .preview_cache/                 disposable transcoded proxies
-    frontend/assets/Audio_NOISE.wav the room tone asset (read-only;
+    frontend/assets/Audio_NOISE.wav the noise asset (read-only;
                                      pcm_s16le, 48 kHz stereo, 3.003s)
     localStorage                    per-bin favorites, sticky track tags
 
@@ -1331,12 +1331,12 @@ A .nara project is { version: 7, clips, track2Clips, audioBeds,
 selectedId, exportPresets, noiseEnabled, noiseGainDb }. Version 3
 added audioBed, 4 added exportPresets, 5 replaced the single audioBed
 with the ordered audioBeds array (each entry gaining a lane-relative
-startSec), 6 added the two room-tone settings, 7 an A1 clip's optional
+startSec), 6 added the two noise settings, 7 an A1 clip's optional
 inSec/outSec (the split -- absent means the whole file, so a version-6
 project opens and renders identically). Nothing READS the
 version field -- it is a marker for humans, and older files load
 unchanged because every addition degrades to a sensible empty value
-(no beds, no presets, tone off). The two room-tone fields are
+(no beds, no presets, tone off). The two noise fields are
 back-filled by KEY PRESENCE, not truthiness: 0 dB is a legal level, so
 `noiseGainDb || 12` would be the `speed`-`or`-`1.0` bug again. A bed
 saved before startSec existed gets one back-filled from the cumulative
@@ -1464,7 +1464,7 @@ Every client-supplied filename is resolved through a traversal guard
   - amix normalize=0 is an exact sum, so headroom is the caller's
     problem. Clip audio at full scale plus a 0.35 bed already reaches
     +2.61 dBFS with no tone at all, and AAC does not clamp it (a hot
-    test measured +3.44 dB surviving the encode). Room tone adds
+    test measured +3.44 dB surviving the encode). Noise adds
     nothing to that, since it plays only where nothing else does: the
     render peak is max(existing peak, the tone's peak at the chosen
     level -- -12.83 dBFS at the default +12, -0.83 at the +24 ceiling),

@@ -10,8 +10,8 @@ import { nextGesture } from '../../hooks/useUndoableTracks'
 // Split will cut would nudge the clip by a pixel or two on the way.
 const MOVE_THRESHOLD_PX = 3
 
-/* A stretch of the lane with nothing of A1's own in it: silence with A1 Room Tone
- * off, room tone with it on. One component for all three kinds — the head hold,
+/* A stretch of the lane with nothing of A1's own in it: silence with A1 Noise
+ * off, noise with it on. One component for all three kinds — the head hold,
  * a hole left by a removed clip, and the remainder past a short lane — because
  * the render treats them identically (it fills MEASURED silence, wherever it
  * falls), so drawing them differently would suggest a distinction that isn't
@@ -73,16 +73,16 @@ function GapBlock({ left, width, noiseEnabled, title, className = '' }) {
  * with a hole in it those differ, and a lane that ends flush with the sequence
  * would otherwise be called "short" and grow a remainder it doesn't have.
  *
- * `noiseEnabled` (the A1 Room Tone toggle) relabels every annotated gap — the
+ * `noiseEnabled` (the A1 Noise toggle) relabels every annotated gap — the
  * head hold, each interior hole, and the short-lane remainder — to amber "noise",
- * so the lane tracks the button. Each label is exactly true: room tone fills
+ * so the lane tracks the button. Each label is exactly true: noise fills
  * silence and only silence, and these annotations are precisely the stretches
  * where this lane has no sound. The remainder in particular is measured against
  * how far the lane's AUDIO reaches, which is what the render measures too, so a
- * bed whose file is padded with silence gets tone from where the sound stops.
+ * bed whose file is padded with silence gets noise from where the sound stops.
  *
  * What the lane cannot draw is the silence on V1's side — a clip whose source
- * has no audio stream, or a slow-motion body — which room tone also fills. This
+ * has no audio stream, or a slow-motion body — which noise also fills. This
  * bar annotates A1's own gaps; the render's fill is the union of both tracks'.
  *
  * A1 is LINKED to V1 twice over. Geometrically: every horizontal measurement
@@ -280,7 +280,7 @@ export default function AudioBedBar({
           </div>
           <button
             onClick={e => { e.stopPropagation(); onRemove?.(seg.index) }}
-            title="Remove this clip from A1 — every other clip stays where it is, and the gap this leaves plays as silence (or as room tone, with A1 Room Tone on)"
+            title="Remove this clip from A1 — every other clip stays where it is, and the gap this leaves plays as silence (or as noise, with A1 Noise on)"
             className="absolute top-0 right-0 w-3.5 h-3.5 flex items-center justify-center bg-black/50 hover:bg-red-600 text-white text-[9px] leading-none opacity-0 group-hover:opacity-100 z-20"
           >×</button>
         </div>
@@ -296,15 +296,15 @@ export default function AudioBedBar({
           noiseEnabled={noiseEnabled}
           className="border-y border-emerald-900/60"
           title={
-            (noiseEnabled ? 'Room tone' : 'Silence')
+            (noiseEnabled ? 'Noise' : 'Silence')
             + ` — a ${(hole.toSec - hole.fromSec).toFixed(2)}s gap where an A1 clip was removed; the clips around it kept their positions`
-            + (noiseEnabled ? ', and room tone fills it instead of digital silence' : '')
+            + (noiseEnabled ? ', and noise fills it instead of digital silence' : '')
           }
         />
       ))}
 
       {/* What the render pads on when the lane runs out early: silence with the
-          toggle off, room tone with it on. Nothing of A1's is playing here, so
+          toggle off, noise with it on. Nothing of A1's is playing here, so
           this is exactly the kind of stretch the fill is for and the label can
           say so without qualification. */}
       {state === 'short' && (
@@ -314,16 +314,16 @@ export default function AudioBedBar({
           noiseEnabled={noiseEnabled}
           className="rounded-r border border-l-0 border-emerald-900/60"
           title={
-            (noiseEnabled ? 'Room tone' : 'Silence')
+            (noiseEnabled ? 'Noise' : 'Silence')
             + ` — A1 is ${(availSec - laneEndSec).toFixed(2)}s shorter than the space it has to fill`
-            + (noiseEnabled ? ', so room tone fills it instead of digital silence' : '')
+            + (noiseEnabled ? ', so noise fills it instead of digital silence' : '')
           }
         />
       )}
 
       {/* The head hold, which A1 is delayed PAST — labelled, because an empty
           gap at the head of the lane otherwise reads as a bug rather than as
-          the audio waiting for the picture to start. With A1 Room Tone on it
+          the audio waiting for the picture to start. With A1 Noise on it
           reads "noise": A1 has not started and the held frame brings no sound of
           its own, so the fill reaches here. The block stays fuchsia (it is still
           structurally the head hold, matching V1's hold segments and the
@@ -334,7 +334,7 @@ export default function AudioBedBar({
           className="absolute top-0 bottom-0 left-0 rounded-l border border-r-0 border-fuchsia-300/40 bg-fuchsia-300/10 overflow-hidden flex items-center justify-center"
           style={{ width: startPx }}
           title={noiseEnabled
-            ? `Room tone — A1 waits out V1's ${startSec.toFixed(2)}s head hold and starts with the picture, so the hold has no sound of its own and room tone fills it`
+            ? `Noise — A1 waits out V1's ${startSec.toFixed(2)}s head hold and starts with the picture, so the hold has no sound of its own and noise fills it`
             : `A1 waits out V1's ${startSec.toFixed(2)}s head hold and starts with the picture`}
         >
           <span className={`text-[7px] font-mono uppercase tracking-wide truncate px-1 ${noiseEnabled ? 'text-amber-400/90' : 'text-fuchsia-400/90'}`}>

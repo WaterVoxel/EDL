@@ -497,9 +497,22 @@ export default function AboutDialog({ onClose }) {
               Each track has its own eye toggle, and they control the render target and the frame grab
               as well as the display. The playhead, ruler, and transport always follow V1's timing.
             </p>
+            <p>
+              <strong>V2 Compare</strong> is the onion skin. Normally you see one track or the other —
+              a visible V2 replaces V1 in the preview. Switch Compare on and V2 is drawn{' '}
+              <em>over</em> V1 at 50% opacity instead, so you can watch whether a reconstruction still
+              lines up with the original underneath it. What you see over any given frame is whatever
+              V2 holds at that same point on the timeline, however differently the two tracks happen to
+              be cut — one V1 clip under a dozen reconstructed cuts, or a dozen V1 cuts under one long
+              V2 file, both follow the playhead for the whole length of the timeline. A stretch where
+              V2 has nothing simply shows V1 alone, and the log line says how many seconds are covered.
+              When V2 is already a composited region, Compare halves that region's opacity rather than
+              covering the frame, so what you see through it is the footage the region came from. It's a
+              preview aid: nothing is marked dirty, and no render changes in any way while it's on.
+            </p>
           </Section>
 
-          <Section title="A1 — audio bed & room tone">
+          <Section title="A1 — audio bed & noise">
             <p>
               A1 is an audio-only track under the picture. Drop a file on it and it plays beneath the
               whole V1 sequence at <span className="font-mono text-neutral-400">volume=0.35</span>,
@@ -507,7 +520,7 @@ export default function AboutDialog({ onClose }) {
               <span className="font-mono text-neutral-400">
                 amix=inputs=N:duration=first:dropout_transition=0:normalize=0
               </span>{' '}
-              — two inputs for a bed, three once room tone is on.
+              — two inputs for a bed, three once A1 Noise is on.
             </p>
             <p>
               <span className="font-mono text-neutral-400">normalize=0</span> is the load-bearing part.
@@ -539,7 +552,7 @@ export default function AboutDialog({ onClose }) {
             <p>
               <strong>Several clips, and the gaps between them.</strong> A1 holds an ordered lane, not
               one file, and every clip on it keeps its own position. Remove one with its × and nothing
-              else moves: the gap it leaves plays as silence, or as room tone if the toggle is on.
+              else moves: the gap it leaves plays as silence, or as noise if the toggle is on.
               That is done by interleaving silence into the <em>single</em>{' '}
               <span className="font-mono text-neutral-400">concat</span> that joins the lane, rather
               than delaying each clip separately — which would make the mix one input wider per clip,
@@ -586,19 +599,19 @@ export default function AboutDialog({ onClose }) {
               butt together with no gap, nothing else on the lane moves, and the render is{' '}
               <em>bit-identical</em> to the uncut one — 356,474 samples, largest difference exactly
               zero, still zero after cutting one of the halves again. Remove a half with its × and
-              the space it held becomes an ordinary gap: silence, or room tone with that toggle on.
+              the space it held becomes an ordinary gap: silence, or noise with that toggle on.
               Nothing is re-encoded and nothing is written until Render, so a cut costs you the
               click and nothing else. Split is the only tool an audio selection reaches — the rest of
               the toolbar, and the Delete key, stay on the video clip they were pointed at.
             </p>
             <p>
-              <strong>Room tone.</strong> A hold has no audio of its own, and digital silence in the
+              <strong>A1 Noise.</strong> A hold has no audio of its own, and digital silence in the
               middle of a cut is audible as a hole. The toggle fills those holes and nothing else:
               wherever the sequence carries sound, it comes out untouched at its own level; wherever
               it carries silence — holds, round-ups, slow-motion bodies, a source with no audio
               stream, the tail past the end of a short A1 track, a gap left by a removed A1 clip —
-              room tone plays instead. The
-              material is a 3.003s, 48 kHz stereo asset looped by{' '}
+              noise plays instead. The
+              material is a 3.003s, 48 kHz stereo room-tone recording looped by{' '}
               <span className="font-mono text-neutral-400">aloop=loop=-1</span>, lifted by the{' '}
               <strong>dB</strong> arrows next to the toggle, conformed by{' '}
               <span className="font-mono text-neutral-400">aformat</span> to the graph's rate and
@@ -661,11 +674,11 @@ export default function AboutDialog({ onClose }) {
               sample count, the bed's whole 9.4167s reach differing by exactly 0.000e+00, and the only
               samples that changed being the 0.583s round-up at the end. Across a matrix of ten
               timeline shapes — no-audio sources, holds, slow-motion, reversed clips, unaligned trims,
-              beds shorter and longer than the picture — not one sample-frame of tone ever landed over
-              existing sound, and every silent 5ms window went to zero. Because tone plays only where
+              beds shorter and longer than the picture — not one sample-frame of noise ever landed over
+              existing sound, and every silent 5ms window went to zero. Because noise plays only where
               nothing else does, it costs no headroom: the render's peak is the greater of what was
-              already there and the tone's own peak at the chosen level (−12.9 dBFS at the default
-              +12, −0.8 at the +24 ceiling). One caveat: room tone is applied at <em>render</em> time
+              already there and the noise's own peak at the chosen level (−12.9 dBFS at the default
+              +12, −0.8 at the +24 ceiling). One caveat: A1 Noise is applied at <em>render</em> time
               only. The in-app preview does not emulate it, so the toggle changes nothing you can hear
               until you render. The render response reports how much was filled —{' '}
               <span className="font-mono text-neutral-400">noise_fill_sec</span> against{' '}
@@ -679,15 +692,15 @@ export default function AboutDialog({ onClose }) {
               <span className="font-mono text-neutral-400">-c:a pcm_s16le</span>, uncompressed, the
               same length as the V1 render, opening no clip as a video input at all. It rebuilds the
               bed chain node for node and runs the same fill plan against the same clip list, so it
-              places tone in exactly the stretches the V1 render does — which is why it reads each
+              places noise in exactly the stretches the V1 render does — which is why it reads each
               clip's <span className="font-mono text-neutral-400">has_audio</span> even though it
               renders no clip audio: that is what tells it where the picture's own sound would be, and
-              therefore where tone must stay out. Measured by subtraction against the V1 render's own
+              therefore where noise must stay out. Measured by subtraction against the V1 render's own
               audio — a timeline with clip audio, a head hold, a trailing hold, a silent source and a
               slow-motion clip, all three passes exactly 286,650 sample-frames long — the stem matched
               the render's A1 contribution to 3.73e-09, one thirty-second of a float32 LSB and
               therefore bit-identical once quantized. That's a usable stem, not an approximation of
-              one. Asking for a stem that would be silent — room tone on, no A1 track, and every
+              one. Asking for a stem that would be silent — A1 Noise on, no A1 track, and every
               stretch of the sequence already carrying sound — is refused with that explanation rather
               than writing an empty file.
             </p>
@@ -758,9 +771,12 @@ export default function AboutDialog({ onClose }) {
           <Section title="Also on board">
             <p>
               Frame-accurate transport (play/stop, frame stepping, first/last frame, loop, editable
-              timecode with a TC/frames toggle) · project Library with save/open · .nara project
+              timecode with a TC/frames toggle, and a <strong>magnet</strong> toggle for snapping — with it on, clicking the
+              timeline or dragging the playhead lands on the nearest clip start on the focused track,
+              or on the end of the run; fused clips count as the one clip they look like, and frame
+              stepping, the timecode field and ⏮/⏭ are never snapped) · project Library with save/open · .nara project
               export · EDL export · <strong>Render without audio</strong> on the V1, V2 and composite
-              renders (picture only; it also leaves out the A1 bed and room tone) · export-destination
+              renders (picture only; it also leaves out the A1 bed and A1 Noise) · export-destination
               picker · right-click <strong>Rename</strong>, <strong>Show destination</strong> and{' '}
               <strong>Delete</strong> in both media bins (renaming is blocked while a clip on the
               timeline — or the A1 bed — still points at that file) · favorites, sorting, and

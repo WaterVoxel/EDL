@@ -1619,7 +1619,7 @@ def render_timeline():
     if data.get("fillNoise"):
         if not os.path.isfile(fu.NOISE_ASSET):
             return jsonify({
-                "error": f"room tone: asset missing at {fu.NOISE_ASSET}"
+                "error": f"A1 Noise: asset missing at {fu.NOISE_ASSET}"
             }), 400
         noise_index = len(in_paths) + len(overlay_paths) + len(bed_paths)
         noise_paths.append(fu.NOISE_ASSET)
@@ -1986,7 +1986,7 @@ def render_timeline():
     if no_audio and bed_indexes:
         return jsonify({"error": "cannot mix an audio bed into a render with audio disabled"}), 400
     if no_audio and noise_index is not None:
-        return jsonify({"error": "cannot lay room tone under a render with audio disabled"}), 400
+        return jsonify({"error": "cannot lay A1 Noise under a render with audio disabled"}), 400
     # A1 counts as an audio source for the encoder's own settings: with a bed
     # under an entirely silent V1, it is the ONLY real audio in the render, and
     # leaving it out here would degenerate audio_sample_rate to 0.
@@ -2110,7 +2110,7 @@ def render_a1():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     if not raw_beds and not fill_noise_on:
-        return jsonify({"error": "nothing on A1 to render: load an audio track or turn on A1 Room Tone"}), 400
+        return jsonify({"error": "nothing on A1 to render: load an audio track or turn on A1 Noise"}), 400
 
     # Same typing as render_timeline's clip list, for the same reason and in the
     # same words: this route takes the payload that one takes (finding #11).
@@ -2252,7 +2252,7 @@ def render_a1():
     noise_index = None
     if fill_noise_on:
         if not os.path.isfile(fu.NOISE_ASSET):
-            return jsonify({"error": f"room tone: asset missing at {fu.NOISE_ASSET}"}), 400
+            return jsonify({"error": f"A1 Noise: asset missing at {fu.NOISE_ASSET}"}), 400
         noise_index = len(input_paths)
         input_paths.append(fu.NOISE_ASSET)
 

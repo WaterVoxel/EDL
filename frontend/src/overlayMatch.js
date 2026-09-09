@@ -30,6 +30,14 @@
 // clip, 2nd onto 2nd — each inheriting that V1 clip's own crop/keyframes.
 
 import { isExactAspectMatch, isFitCrop } from './cropMath'
+import { clipMainSec, clipSpeed, clipTotalSec } from './clipMath'
+
+// Shortest V1/V2 timeline intersection that earns a Compare layer, in seconds.
+// Consecutive clips share an edge exactly, and floating-point lane sums land a
+// hair either side of it, so this is the "they actually overlap" threshold and
+// not a tolerance to tune: half a frame at 60fps, i.e. below anything that could
+// present a picture.
+export const COMPARE_MIN_OVERLAP_SEC = 0.008
 
 // Can this V2 file be scaled down into the crop box without distorting it?
 //
@@ -214,6 +222,186 @@ export function matchOverlays(v1Clips, v2Clips, opts = {}) {
   }
 
   return { overlays, skipped, warnings }
+}
+
+// Full-frame V2-over-V1 pairs for the V2 Compare view (0.72.0) — the
+// onion-skin preview, where the whole V2 track is laid over the whole V1 track
+// at half opacity so you can see straight away whether a reconstruction still
+// lines up with the original underneath it.
+//
+// Deliberately carries NONE of matchOverlays' rules. Same resolution, a size
+// mismatch, no crop box — every one of those is a case somebody might want to
+// EYEBALL, and refusing to draw the layer would answer the question by hiding
+// it. Nothing here reaches a render either: this is a view aid, so being
+// permissive costs nothing more than a blend that looks wrong, which is
+// information rather than damage.
+//
+// The placement rect is always V1's WHOLE source frame. The preview's shared
+// <video> shows V1 uncropped (a crop is applied at render time, and is drawn
+// here only as CropOverlay's outline), so "the whole V2 track over the whole V1
+// track" is literally 0,0 → sourceWidth × sourceHeight. V2's own dimensions are
+// not consulted at all — the layer fills that rect either way, which also means
+// it appears immediately instead of waiting for a probe.
+//
+// **Pairing is by TIMELINE OVERLAP, not by clip index (0.74.0).** matchOverlays
+// pairs 1st-with-1st because a composite is a per-clip decision — that V2 file
+// was cut from that V1 clip's crop box. Compare is not: it is a question about
+// two TRACKS at the same instant, so the only pairing that answers it is "what
+// is on V2 at the moment V1 is showing this". Index pairing answers it only when
+// the two lanes happen to be cut the same way, and the case Compare exists for
+// is exactly the one where they aren't — a Reconstruct that turns one V1 clip
+// into five V2 entries, or five V1 cuts into one long V2 file. Index pairing then
+// drew a layer over the first clip and nothing anywhere else, so Compare went
+// blank across most of the timeline (the whole point being to watch the two
+// tracks stay in step for their whole length).
+//
+// So: walk both lanes as timelines and intersect them. One layer per V1 CLIP —
+// not per pair — carrying the ordered list of V2 SEGMENTS that overlap it. A V1
+// clip under five V2 cuts is one layer of five segments, and OverlayPreview
+// walks them the way the playback engine walks V1's own clips.
+//
+// One layer per pair was the obvious shape and it is the wrong one, for a reason
+// that only shows up on the intended input: a Reconstruct routinely puts dozens
+// of small cuts on V2, every one of them over the same V1 clip, so every one
+// would be simultaneously "the active layer" and mount its own <video> of the
+// same file. Dozens of decoders and dozens of rAF loops to show one picture, with
+// all but one hidden. Segments keep it at one element per V1 clip whatever V2 is
+// cut like, and they make the disjointness structural rather than emergent: the
+// layer shows the segment containing the playhead, so two 50% pictures cannot
+// paint at once and the opacities cannot compound.
+//
+// Cross-lane seconds are directly comparable, which is what makes this sound
+// rather than approximate: both lanes are laid out from the same origin at the
+// same pps with GAP_PX at 0, so `clipStartSec` on V2 is a position in V1's
+// domain. clipMath.snapTargets already leans on this (see its comment) and the
+// same caveat applies — reintroduce a gap between clips and both surfaces have
+// to convert through pixels instead.
+//
+// Each SEGMENT carries the mapping OverlayPreview needs to turn the shared
+// <video>'s clock into its own:
+//
+//   ownT = srcOffsetSec + bodyT * srcRate        (bodyT = mainTime − v1.inSec)
+//   shown while bodyFromSec ≤ bodyT ≤ bodyToSec
+//
+// which is one line in the loop and keeps every lane-arithmetic decision here,
+// in a pure module that can be tested without a DOM. When the two lanes ARE cut
+// alike each layer has exactly one segment and its numbers collapse to srcRate 1
+// / srcOffsetSec v2.inSec — i.e. exactly what the positional version did, so
+// nothing that worked before changes.
+//
+// Holds and speed: a head hold is timeline time in which the shared <video>'s
+// clock does NOT advance, so it is subtracted out of the mapping (V1's body
+// starts at s1 + head1) rather than treated as playable time. During a V1 hold
+// the layer therefore freezes with V1 — the shared element is the only clock
+// available here, and a frozen V1 frame with V2 still running would misrepresent
+// the alignment far worse than both sitting still. Speed is the ratio of the two
+// clips' rates: comparing a 0.5× V1 shot against a full-rate V2 one still lines
+// the pictures up frame for frame.
+export function compareOverlays(v1Clips, v2Clips) {
+  const layers = []
+  if (!v1Clips || !v2Clips) return layers
+
+  // Both lanes' spans up front: one pass each, so the pairing below is a plain
+  // interval intersection rather than a repeated cumulative sum.
+  const spans = (clips) => {
+    const out = []
+    let pos = 0
+    for (const c of clips) {
+      const total = clipTotalSec(c)
+      out.push({
+        clip: c,
+        start: pos,
+        end: pos + total,
+        // Where this clip's BODY sits on the lane — the only part of it the
+        // source clock moves through.
+        bodyStart: pos + (c.headHoldSec || 0),
+        bodyEnd: pos + (c.headHoldSec || 0) + clipMainSec(c),
+      })
+      pos += total
+    }
+    return out
+  }
+  const v1Spans = spans(v1Clips)
+  const v2Spans = spans(v2Clips)
+
+  let index = 0
+  for (const a of v1Spans) {
+    // V1's size IS the rect, so without it there's nothing to place.
+    if (!a.clip.sourceWidth || !a.clip.sourceHeight) continue
+    const rate1 = clipSpeed(a.clip)
+    const segments = []
+    for (const b of v2Spans) {
+      // Intersect the BODIES, not the whole spans. A hold contributes no
+      // moving picture on either side, and a pair that meets only inside one
+      // is a segment that could never show anything but a frozen frame.
+      const from = Math.max(a.bodyStart, b.bodyStart)
+      const to = Math.min(a.bodyEnd, b.bodyEnd)
+      // Touching at a single instant is not an overlap: consecutive clips share
+      // an edge, so `>=` would emit a zero-length segment at every boundary.
+      if (to - from <= COMPARE_MIN_OVERLAP_SEC) continue
+      const rate2 = clipSpeed(b.clip)
+      const v2In = b.clip.inSec || 0
+      segments.push({
+        v2Id: b.clip.id,
+        v2Clip: b.clip,
+        // bodyT is V1 SOURCE seconds since v1.inSec, so lane seconds convert
+        // through rate1 in and rate2 out.
+        srcRate: rate2 / rate1,
+        srcOffsetSec: v2In + (a.bodyStart - b.bodyStart) * rate2,
+        bodyFromSec: (from - a.bodyStart) * rate1,
+        bodyToSec: (to - a.bodyStart) * rate1,
+      })
+    }
+    // A V1 clip with nothing over it gets no layer at all rather than an empty
+    // one: `compareLayers.length` is what tells the log line whether Compare has
+    // anything to show, and an empty layer would mount a component that can only
+    // ever return null.
+    if (segments.length === 0) continue
+    layers.push({
+      index: index++,
+      v1Id: a.clip.id,
+      v1Clip: a.clip,
+      segments,
+      // The first segment's clip, promoted so the shared fields every consumer
+      // reads (`v2Id` for logs, `v2Clip` for the fallback src) are present on a
+      // Compare layer as well as a composite one. The loop uses `segments`.
+      v2Id: segments[0].v2Id,
+      v2Clip: segments[0].v2Clip,
+      x: 0,
+      y: 0,
+      w: a.clip.sourceWidth,
+      h: a.clip.sourceHeight,
+      // Nowhere for a full-frame layer to pan to, so no animation — the same
+      // reason A/B's full-frame covers carry an empty list.
+      keyframes: [],
+      fullFrame: true,
+    })
+  }
+  return layers
+}
+
+// How much of V1's timeline a set of Compare layers actually covers, in lane
+// seconds. Reported in the log line beside V1's own length, because "does this
+// hold for the WHOLE timeline" is the question the view is there to answer and
+// the layers themselves are the only thing that knows: a V2 track shorter than
+// V1, cut differently, or retimed all leave stretches with nothing over them,
+// and a blank stretch otherwise looks identical to Compare being off.
+//
+// Each segment's window is in V1 SOURCE seconds (that being what the shared
+// <video>'s clock is), so it divides back out by that clip's speed to land in
+// lane seconds. Windows are disjoint by construction — that is the same property
+// that keeps two 50% pictures from painting at once — so a plain sum is right and
+// no interval merging is needed.
+export function compareCoverageSec(layers) {
+  let sec = 0
+  for (const l of layers || []) {
+    const rate1 = clipSpeed(l.v1Clip || {})
+    for (const s of l.segments || []) {
+      if (s.bodyFromSec == null || s.bodyToSec == null) continue
+      sec += (s.bodyToSec - s.bodyFromSec) / rate1
+    }
+  }
+  return sec
 }
 
 // The overlay (if any) whose V1 clip is `v1Id`. The preview looks itself up

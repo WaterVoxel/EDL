@@ -18,10 +18,16 @@ OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output")
 # listable, or deletable through any route — assets are referenced by the code
 # that needs them, never by name from the client.
 ASSETS_DIR = os.path.join(PROJECT_ROOT, "frontend", "assets")
-# Room tone: a continuous noise floor laid under the ENTIRE rendered sequence,
+# A1 Noise: a continuous noise floor laid under the ENTIRE rendered sequence,
 # so nothing in the audio track is ever pure digital silence (see
 # build_timeline_filter's fill_noise). It is only ~3 s long, so every use aloops
 # it endlessly and lets amix cut it to length.
+#
+# The UI called this "A1 Room Tone" until 0.73.1 and now calls it "A1 Noise",
+# which is what this module and the .nara have always called it. The comments
+# below still say "room tone" where they describe the SOUND, because the asset
+# is literally a room-tone recording — but the control the user clicks, and
+# every string either server returns, is "A1 Noise".
 NOISE_ASSET = os.path.join(ASSETS_DIR, "Audio_NOISE.wav")
 # Where to cut the asset before looping it, in its OWN 48 kHz sample domain.
 #
@@ -2501,7 +2507,7 @@ def build_a1_filter(clip_specs, target_fps, sample_rate=44100, channel_layout="s
                                      noise_gain_db)
         elif not audio_beds:
             raise ValueError(
-                "room tone has nothing to fill on this timeline: every part of the "
+                "A1 Noise has nothing to fill on this timeline: every part of the "
                 "sequence already carries audio, so an A1 render would be silent"
             )
 

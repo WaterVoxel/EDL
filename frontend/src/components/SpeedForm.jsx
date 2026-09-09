@@ -62,6 +62,7 @@ export function allowedSpeeds(sourceFps) {
 export default function SpeedForm({
   selectedClip, setClips, noiseEnabled = false, onToggleNoise,
   noiseGainDb = String(NOISE_GAIN_DB_DEFAULT), onSetNoiseGainDb,
+  compareEnabled = false, onToggleCompare,
 }) {
   const presets = selectedClip ? allowedSpeeds(selectedClip.fps) : [1.0]
   const current = selectedClip?.speed && selectedClip.speed > 0 ? selectedClip.speed : 1
@@ -92,7 +93,7 @@ export default function SpeedForm({
         <select
           value={String(current)}
           onChange={e => apply(parseFloat(e.target.value))}
-          title={`Retime this clip by scaling frame timing — nothing is interpolated or generated in either direction. Under 100% slows down: existing frames are held longer, and the fps beside each option is the rate the source is read at, kept at or above ${MIN_EFFECTIVE_FPS} fps for this clip's ${(selectedClip.fps || 30).toFixed(0)} fps source. Over 100% speeds up by the exact reciprocals, reading the source faster and dropping frames instead of holding them — so 50% and 200% on the same shot cancel out exactly. The rendered file keeps its own frame rate whichever way you go, and a retimed clip renders silent (a slowed or sped-up soundtrack is out of scope), so use A1 Room Tone or the A1 track for sound over it.`}
+          title={`Retime this clip by scaling frame timing — nothing is interpolated or generated in either direction. Under 100% slows down: existing frames are held longer, and the fps beside each option is the rate the source is read at, kept at or above ${MIN_EFFECTIVE_FPS} fps for this clip's ${(selectedClip.fps || 30).toFixed(0)} fps source. Over 100% speeds up by the exact reciprocals, reading the source faster and dropping frames instead of holding them — so 50% and 200% on the same shot cancel out exactly. The rendered file keeps its own frame rate whichever way you go, and a retimed clip renders silent (a slowed or sped-up soundtrack is out of scope), so use A1 Noise or the A1 track for sound over it.`}
           className={`px-1 py-0.5 text-[8px] rounded bg-neutral-950 border text-neutral-300 ${current !== 1 ? 'border-orange-500' : 'border-neutral-700'}`}
         >
           {/* One fps formula for both halves: `source fps × speed` is the rate
@@ -111,14 +112,20 @@ export default function SpeedForm({
       {/* Same divider the parent toolbar puts between its groups; mx-1.5 tops
           up this row's tighter gap-1.5 so the spacing around it matches. */}
       <div className="w-px h-3.5 mx-1.5 bg-neutral-700" />
-      {/* Room tone. A render-wide setting, not a per-clip decision, so it needs
+      {/* A1 Noise. A render-wide setting, not a per-clip decision, so it needs
           no selected clip and is never marked dirty — at render time it fills
-          the sequence's SILENT stretches with room tone and leaves everything
+          the sequence's SILENT stretches with noise and leaves everything
           else exactly as it was, so it moves no clip audio, no A1 audio and no
           video frame (verified bit-identical). Amber matches the other
           render-affecting toggle (ANIM) rather than a clip-editing color. On
-          state is carried by color alone — the label stays "A1 Room Tone"
+          state is carried by color alone — the label stays "A1 Noise"
           either way so the button never changes size.
+
+          The label was "A1 Room Tone" until 0.73.1. The fill is still the same
+          recorded room-tone asset (NOISE_ASSET) at the same level; only the
+          name changed, and it changed TOWARD the code, which has always called
+          this noise (`noiseEnabled`, `noiseGainDb`, `noise_fill_plan`). Nothing
+          in the .nara or the render payload is affected.
 
           Styled with the flat tint + hairline recipe the rest of this toolbar row
           uses (see conventions.md), which it missed when the row was flattened in
@@ -129,21 +136,21 @@ export default function SpeedForm({
       <button
         onClick={onToggleNoise}
         title={noiseEnabled
-          ? 'Turn off room tone — every silent stretch renders as pure digital silence again. The dB setting is kept for next time'
-          : 'Fill the silent stretches with room tone: holds, round-ups, slow-downs, clips whose source has no audio, gaps left by a removed A1 clip, and the tail past the end of a short A1 track. Set how loud with the dB arrows beside this button. Never plays over sound that is already there — clip audio and the A1 track come out untouched, at the same level, and no video frame changes. Applies at render time; the preview will not play it'}
+          ? 'Turn off A1 Noise — every silent stretch renders as pure digital silence again. The dB setting is kept for next time'
+          : 'Fill the silent stretches with noise: holds, round-ups, slow-downs, clips whose source has no audio, gaps left by a removed A1 clip, and the tail past the end of a short A1 track. Set how loud with the dB arrows beside this button. Never plays over sound that is already there — clip audio and the A1 track come out untouched, at the same level, and no video frame changes. Applies at render time; the preview will not play it'}
         className={`px-1.5 py-0.5 text-[8px] rounded border transition-colors ${
           noiseEnabled
             ? 'bg-amber-300/15 border-amber-300/50 text-amber-200 hover:bg-amber-300/25'
             : 'bg-transparent border-neutral-700 text-neutral-400 hover:text-neutral-200'
         }`}
       >
-        A1 Room Tone
+        A1 Noise
       </button>
-      {/* How loud the tone above is — the same ▲/▼ stepper the trim fields use,
+      {/* How loud the noise above is — the same ▲/▼ stepper the trim fields use,
           sitting next to the toggle it belongs to rather than next to A1 Render,
           since it changes what a V1 render contains too, not just the stem.
           Greyed out with the toggle off: it still SHOWS the level, so turning
-          tone back on holds no surprise, but there is nothing to set until
+          noise back on holds no surprise, but there is nothing to set until
           something is being filled.
 
           No text label: the value's own "dB" suffix says what it is, and it sits
@@ -160,9 +167,37 @@ export default function SpeedForm({
         max={NOISE_GAIN_DB_MAX}
         disabled={!noiseEnabled}
         width="w-9"
-        title={`How loud the room tone is, in dB of gain on the tone asset. ${NOISE_GAIN_DB_MIN} to +${NOISE_GAIN_DB_MAX} dB, default +${NOISE_GAIN_DB_DEFAULT}. 0 leaves the asset at its recorded level (about −25 dBFS peak); +${NOISE_GAIN_DB_MAX} is as loud as it goes without the tone clipping on its own. Only scales the tone — clip audio and the A1 track are never touched, whatever this is set to`}
+        title={`How loud the noise is, in dB of gain on the noise asset. ${NOISE_GAIN_DB_MIN} to +${NOISE_GAIN_DB_MAX} dB, default +${NOISE_GAIN_DB_DEFAULT}. 0 leaves the asset at its recorded level (about −25 dBFS peak); +${NOISE_GAIN_DB_MAX} is as loud as it goes without the noise clipping on its own. Only scales the noise — clip audio and the A1 track are never touched, whatever this is set to`}
       />
       <span className={`text-[8px] ${noiseEnabled ? 'text-neutral-500' : 'text-neutral-700'}`}>dB</span>
+      <div className="w-px h-3.5 mx-1.5 bg-neutral-700" />
+      {/* V2 Compare — an onion skin, not an edit. The whole V2 track is drawn
+          over V1 at 50% opacity so the two can be checked against each other
+          (did the reconstruction drift? does the processed region still sit
+          where it came from?) instead of only ever being seen one at a time,
+          which is what V2's eye toggle gives you.
+
+          TEAL, not amber: amber on this row means "this changes what renders"
+          (ANIM, A1 Noise), and this changes nothing that renders — teal is
+          the V2/Analyze colour and this is a V2 view. Session-only state for the
+          same reason, so it is in neither the undo stack nor the .nara.
+
+          Sits after the A1 Noise GROUP (its toggle, dB stepper and unit) rather
+          than between the button and its own stepper — the divider is what keeps
+          those three reading as one control. */}
+      <button
+        onClick={onToggleCompare}
+        title={compareEnabled
+          ? 'Turn off V2 Compare — V2 goes back to replacing V1 in the preview (or to its composited region, if it is one)'
+          : 'Lay the whole V2 track over V1 at 50% opacity, so you can see both at once and check that they line up. V2 clips pair with V1 clips in track order. A preview aid only: it changes nothing about what any render contains, and nothing is marked dirty. Needs V2’s eye left on'}
+        className={`px-1.5 py-0.5 text-[8px] rounded border transition-colors ${
+          compareEnabled
+            ? 'bg-teal-300/15 border-teal-300/50 text-teal-200 hover:bg-teal-300/25'
+            : 'bg-transparent border-neutral-700 text-neutral-400 hover:text-neutral-200'
+        }`}
+      >
+        V2 Compare
+      </button>
     </div>
   )
 }

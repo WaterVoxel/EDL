@@ -164,7 +164,7 @@ mkdir -p input output projects
 | `projects/` | Saved `.nara` projects | Arrives with 16 tracked `.nara` files; `mkdir -p` is a no-op safeguard |
 | `.preview_cache/` | Transcoded preview cache | Created automatically at runtime — leave it alone |
 | `.export_settings.json` | Live export config, tracked in git | Present. **Do not overwrite it** |
-| `frontend/assets/Audio_NOISE.wav` | Room-tone bed for the A1 Room Tone toggle | Present (~588 KB) — verify, do not regenerate |
+| `frontend/assets/Audio_NOISE.wav` | Room-tone bed for the A1 Noise toggle | Present (~588 KB) — verify, do not regenerate |
 
 Verify the two that matter:
 

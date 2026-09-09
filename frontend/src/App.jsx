@@ -34,12 +34,12 @@ import FootageLossDialog from './components/FootageLossDialog'
 import FfmpegCustomSettings from './components/FfmpegCustomSettings'
 import ContextMenu from './components/ContextMenu'
 import Timeline from './components/Timeline/Timeline'
-import { sequenceTargetFps, sequenceRenderFrames, sequenceRaise, roundUpAmount, clampNoiseGainDb, normalizeBeds, bedLaneEndSec, bedInSec, fuseGroups, clipPalette, CLIP_THEME_NAMES, DEFAULT_CLIP_THEME } from './clipMath'
+import { sequenceTargetFps, sequenceRenderFrames, sequenceRaise, roundUpAmount, clampNoiseGainDb, normalizeBeds, bedLaneEndSec, bedInSec, fuseGroups, clipPalette, clipTotalSec, CLIP_THEME_NAMES, DEFAULT_CLIP_THEME } from './clipMath'
 import { loadTrackTags, tagTrack, renameTrackTag, isAudioFile, loadHideFootageLossWarning, saveHideFootageLossWarning, loadClipTheme, saveClipTheme } from './fileList'
 import { analyzeAgainstV1, batchCutAgainstV1, reconstructFromV1, sequencePieces } from './analyzeMath'
 import { mergeExportPresets } from './exportPresets'
 import { workFingerprint } from './projectWork'
-import { matchOverlays } from './overlayMatch'
+import { matchOverlays, compareOverlays, compareCoverageSec } from './overlayMatch'
 import { isFitCrop } from './cropMath'
 import { shotOutputNames, nameStem } from './renderNames'
 
@@ -278,6 +278,11 @@ function AppInner() {
   const [v2Visible, setV2Visible] = useState(true)
   const toggleV1Visible = useCallback(() => setV1Visible(v => !v), [])
   const toggleV2Visible = useCallback(() => setV2Visible(v => !v), [])
+  // V2 Compare (0.72.0): draw V2 OVER V1 at half opacity instead of in place of
+  // it. A view state like the two eyes above — session-only, outside undo and
+  // outside the .nara, because it changes nothing about the edit or the render.
+  const [compareEnabled, setCompareEnabled] = useState(false)
+  const toggleCompare = useCallback(() => setCompareEnabled(v => !v), [])
 
   // A1 — the "smart" audio track: an ordered lane of audio clips locked under
   // the whole V1 sequence (the `a1` slice above). Sequential like V1 (each clip
@@ -296,7 +301,7 @@ function AppInner() {
   // Shape: [{ name, dir, durationSec, startSec, inSec?, outSec? }].
   // `startSec` (version 6) is what makes the lane's positions EXPLICIT: removing
   // a clip leaves the survivors exactly where they were, and the hole renders as
-  // silence — or as room tone when that toggle is on. It is LANE seconds, 0 being
+  // silence — or as noise when that toggle is on. It is LANE seconds, 0 being
   // V1's picture start excluding V1's head hold, so it is immune to head-hold
   // edits. clipMath.normalizeBeds back-fills it for older projects.
   // `inSec`/`outSec` (version 7) are which part of its FILE a clip plays, absent
@@ -367,7 +372,7 @@ function AppInner() {
   }, [])
   const [rendering, setRendering] = useState(false)
   const [showRenderDialog, setShowRenderDialog] = useState(false)
-  // Room tone (the Speed row's "A1 Room Tone" toggle — `noiseEnabled` and the
+  // A1 Noise (the Speed row's "A1 Noise" toggle — `noiseEnabled` and the
   // `fillNoise`/`noise_*` wire names are the older spelling of the same thing):
   // when on, the server measures which stretches of the rendered sequence carry
   // no sound — a hold, a round-up, a slow-down, a source with no audio stream,
@@ -377,7 +382,7 @@ function AppInner() {
   // and no video frame changes either way (all three verified by subtraction).
   // A render-wide switch, not a per-clip decision — it never marks a clip dirty.
   // Render-time only: the preview does not emulate it. Both the switch and the
-  // level below are saved in the .nara (version 6), since a project's room tone
+  // level below are saved in the .nara (version 6), since a project's noise
   // is part of how it is meant to sound.
   const [noiseEnabled, setNoiseEnabled] = useState(false)
   const toggleNoise = useCallback(() => setNoiseEnabled(v => !v), [])
@@ -649,6 +654,16 @@ function AppInner() {
   const overlays = overlayMatch.overlays
   const hasOverlay = overlays.length > 0
 
+  // V2 Compare's layers. Only built when there is NO composite to reuse: when
+  // overlays already resolve, the V2 pictures are on screen in the right places
+  // already and compare's whole job is to make those half-opaque (the `opacity`
+  // prop below) — stacking a full-frame layer on top of them as well would hide
+  // the very region being compared. Derived, like `overlays`, and for the same
+  // reason: it depends on both clip lists, which change under the user's hands.
+  const compareLayers = (compareEnabled && !hasOverlay)
+    ? compareOverlays(timelineClips, track2Clips)
+    : []
+
   // "V2 Render" mode, toggled by the A / A/B switch beside that button:
   //   'A'  → render the V2 track on its own, to its own file (the original
   //          behavior, and the default).
@@ -704,6 +719,35 @@ function AppInner() {
         kind: 'info',
         text: `▣ ${overlays.length} V2 ${overlays.length === 1 ? 'clip is' : 'clips are'} composited over V1 `
           + `(${overlays.map(o => `${o.w}×${o.h}`).join(', ')}) — set the V2 toggle to A/B and click V2 Render to burn ${overlays.length === 1 ? 'it' : 'them'} in`,
+      })
+    }
+    // Compare is invisible in three situations that all look like a dead
+    // button — empty V2, V2's eye off, and no V1 clip to pair with — so the
+    // toggle says what it is doing rather than leaving the user to guess which
+    // one they are in. Every branch repeats "preview only": the button sits in a
+    // row of render-affecting toggles, so that is the thing worth over-saying.
+    if (compareEnabled) {
+      const pairs = compareLayers.length
+      // Coverage, not the layer count: since pairing went timeline-based (0.74.0)
+      // the number of layers is an implementation detail — one long V2 file over
+      // five V1 cuts is five layers and reads as "5 clips", which is wrong twice.
+      // What the user is actually asking is how much of the timeline is being
+      // compared, so say that, and say it as a SHORTFALL when there is one. A
+      // gap under Compare looks exactly like Compare being off.
+      const coveredSec = compareCoverageSec(compareLayers)
+      const v1Sec = timelineClips.reduce((s, c) => s + clipTotalSec(c), 0)
+      const shortSec = v1Sec - coveredSec
+      msgs.push({
+        kind: 'info',
+        text: !v2Visible
+          ? '◫ V2 Compare is on, but V2’s eye is off — turn it back on to see the layer'
+          : hasOverlay
+            ? `◫ V2 Compare — the ${overlays.length} composited V2 ${overlays.length === 1 ? 'region is' : 'regions are'} at 50% so V1 reads through. Preview only; renders are unchanged`
+            : pairs > 0
+              ? `◫ V2 Compare — V2 over V1 at 50% for ${coveredSec.toFixed(2)}s of V1’s ${v1Sec.toFixed(2)}s`
+                + (shortSec > 0.05 ? `; the other ${shortSec.toFixed(2)}s has no V2 under the playhead and shows V1 alone` : ' — the whole timeline')
+                + '. Preview only; renders are unchanged'
+              : '◫ V2 Compare is on, but there is no V2 clip overlapping V1 on the timeline to lay over it',
       })
     }
     if (hasDirty) {
@@ -951,7 +995,7 @@ function AppInner() {
   // sample-for-sample interchangeable.
   //
   // No duration goes out: the server measures each bed's reach from its own audio
-  // stream (see ffmpeg_utils.bed_spans), which is the only number room tone can
+  // stream (see ffmpeg_utils.bed_spans), which is the only number noise can
   // safely be kept off.
   //
   // inSec/outSec go out only when the clip actually plays part of its file, so an
@@ -1092,7 +1136,7 @@ function AppInner() {
     return true
   }
 
-  // Room tone is render-only and the preview can't play it, so the ONE thing
+  // A1 Noise is render-only and the preview can't play it, so the ONE thing
   // that tells the user it did anything is the server's own measurement of how
   // much silence it found. Reporting zero is the point: "nothing to fill" and
   // "the toggle is broken" sounded identical before this line existed, and the
@@ -1108,8 +1152,8 @@ function AppInner() {
     const at = gain == null ? '' : ` at ${gain > 0 ? '+' : ''}${gain} dB`
     setAnalyzeLog(prev => [
       fill > 0
-        ? { kind: 'info', text: `♪ ${label}: room tone filled ${fill.toFixed(2)}s of silence in a ${seq.toFixed(2)}s sequence${at}` }
-        : { kind: 'warn', text: `♪ ${label}: room tone found no silence to fill — all ${seq.toFixed(2)}s already carries audio, so the render is unchanged` },
+        ? { kind: 'info', text: `♪ ${label}: noise filled ${fill.toFixed(2)}s of silence in a ${seq.toFixed(2)}s sequence${at}` }
+        : { kind: 'warn', text: `♪ ${label}: noise found no silence to fill — all ${seq.toFixed(2)}s already carries audio, so the render is unchanged` },
       ...prev,
     ])
   }
@@ -1194,7 +1238,7 @@ function AppInner() {
 
   // A1 Render — the audio counterpart to V1 Render: writes the A1 track alone
   // to a .wav, timed to the V1 sequence (head-hold delay, padded/cut to the
-  // sequence length, bed gain, and — with A1 Room Tone on — tone in exactly the
+  // sequence length, bed gain, and — with A1 Noise on — noise in exactly the
   // stretches the V1 render fills, which is why V1's clips are sent even though
   // none of their audio is rendered: they are what says where the picture's own
   // sound would be, and so where tone must stay out), so it lines up with the V1
@@ -1429,7 +1473,7 @@ function AppInner() {
   //
   // Dropping the entry is the WHOLE edit: every surviving bed carries its own
   // startSec, so nothing moves and the render fills the hole it leaves with
-  // silence (or room tone). Before startSec existed, position was the running sum
+  // silence (or noise). Before startSec existed, position was the running sum
   // of the preceding durations, so this same line pulled the rest of the lane
   // earlier.
   function handleRemoveBed(index) {
@@ -1717,7 +1761,7 @@ function AppInner() {
 
   // Baseline for "is there unsaved work?": the fingerprint as of the last save
   // or open. Seeded with the state the app itself starts in — three empty lanes,
-  // room tone off at its default level — so opening a project on a fresh app
+  // noise off at its default level — so opening a project on a fresh app
   // asks nothing. A ref, not state: nothing renders from it.
   const savedWorkRef = useRef(workFingerprint({ noiseGainDb: NOISE_GAIN_DB_DEFAULT }))
 
@@ -1865,7 +1909,7 @@ function AppInner() {
     setSelectedBedIndex(null)
     setProjectName(name)
     setShowLibrary(false)
-    // Room tone (version 6). Both operators are load-bearing on a pre-version-6
+    // A1 Noise (version 6). Both operators are load-bearing on a pre-version-6
     // file, which has neither key: `=== true` so a missing switch is off rather
     // than truthy-undefined, and `== null` — NOT `||` — because 0 dB is a legal
     // level that `||` would silently promote to the default.
@@ -2112,6 +2156,8 @@ function AppInner() {
         onToggleNoise={toggleNoise}
         noiseGainDb={noiseGainDb}
         onSetNoiseGainDb={setNoiseGainDb}
+        compareEnabled={compareEnabled}
+        onToggleCompare={toggleCompare}
       />
     </div>
   )
@@ -2375,6 +2421,28 @@ function AppInner() {
                 overlay={ov}
                 stageRef={previewStageRef}
                 visible={v2Visible}
+                opacity={compareEnabled ? 0.5 : 1}
+              />
+            ))}
+            {/* V2 Compare's full-frame layers, and only when there is no
+                composite — a composite already puts V2 on screen, so compare
+                just halves its opacity above instead of covering it. Same
+                component either way: the clock sync, the drift nudging and the
+                out-of-range hiding are the hard parts and they are identical
+                whether the layer is a region or the whole frame. */}
+            {compareLayers.map(ov => (
+              <OverlayPreview
+                /* Keyed by v1Id, not v2Id (0.74.0): a Compare layer is now one
+                   per V1 CLIP carrying every V2 segment that overlaps it, and one
+                   V2 clip can legitimately appear under several V1 clips — so
+                   v2Id is not unique here and a duplicate key would silently drop
+                   layers, i.e. reintroduce the blank stretches this fixed. */
+                key={`cmp-${ov.v1Id}`}
+                overlay={ov}
+                stageRef={previewStageRef}
+                visible={v2Visible}
+                opacity={0.5}
+                fit="contain"
               />
             ))}
             <CropOverlay selectedClip={activeSelectedClip} setClips={setActiveClips} stageRef={previewStageRef} animateEnabled={cropAnimateOn} freeEnabled={cropFreeOn} />
@@ -2471,6 +2539,7 @@ function AppInner() {
                   v2Visible={v2Visible}
                   onToggleV2={toggleV2Visible}
                   hasOverlay={hasOverlay}
+                  compareEnabled={compareEnabled}
                   v2RenderMode={v2RenderMode}
                   onSetV2RenderMode={setV2RenderMode}
                   v2ShotMode={v2ShotMode}

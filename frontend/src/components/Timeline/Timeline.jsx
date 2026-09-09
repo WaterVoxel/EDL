@@ -11,7 +11,7 @@ import { useMedia } from '../../context/MediaContext'
 import { probe } from '../../api'
 import { BIN_DRAG_MIME, readBinDragPayload } from '../../fileList'
 import { useTimelinePlayback } from '../../hooks/useTimelinePlayback'
-import { clipTotalSec, clipTotalPx, clipHeadPx, clipMainPx, sanitizeHoldPlacement, timelinePosToPx, sequenceVideoStartSec, clipStartSec, moveClip, swapBeds, dropTargetIndex, fuseGroups, fuseGroupIds, assignClipColors, DEFAULT_CLIP_THEME, trimLossSec, deleteLossSec, sequenceTargetFps, sequenceRenderFrames } from '../../clipMath'
+import { clipTotalSec, clipTotalPx, clipHeadPx, clipMainPx, sanitizeHoldPlacement, timelinePosToPx, sequenceVideoStartSec, clipStartSec, moveClip, swapBeds, dropTargetIndex, fuseGroups, fuseGroupIds, assignClipColors, DEFAULT_CLIP_THEME, trimLossSec, deleteLossSec, sequenceTargetFps, sequenceRenderFrames, snapTargets, snapPos } from '../../clipMath'
 import { addKeyframe, removeNearestKeyframe, sampleCropOrigin, clipTFromTimelinePos, retimeKeyframesForTrim } from '../../cropAnimation'
 
 const PPS = 60
@@ -57,6 +57,9 @@ export default function Timeline({
   onRender, onRenderA1, rendering = false,
   timeDisplayMode, onToggleTimeDisplayMode, animateEnabled = false,
   v1Visible = true, onToggleV1, v2Visible = true, onToggleV2, hasOverlay = false,
+  // V2 Compare: V2 is drawn OVER V1 at half opacity instead of replacing it,
+  // so the shared <video> has to keep decoding V1 (see displayClips below).
+  compareEnabled = false,
   v2RenderMode = 'A', onSetV2RenderMode,
   v2ShotMode = '1', onSetV2ShotMode, v2ShotProgress = null,
   audioBeds = [], onAddToA1, onRemoveBed, onMoveBed, a1Visible = true, onToggleA1,
@@ -81,6 +84,12 @@ export default function Timeline({
   const [v1DragOver, setV1DragOver] = useState(false)
   const [v2DragOver, setV2DragOver] = useState(false)
   const [a1DragOver, setA1DragOver] = useState(false)
+  // Snap. Local, not lifted: nothing outside this component reads it — the
+  // button lives in TransportBar (a child) and the only code that acts on it is
+  // the two pointer seek paths below. It is deliberately NOT persisted with the
+  // project either; it's a property of how you are working right now, like the
+  // TC/FR display mode's sibling would be, not a property of the edit.
+  const [snapEnabled, setSnapEnabled] = useState(false)
   // Per-track visibility — independent of each other. Muting a track only
   // greys out its content (it stays on the timeline and stays editable);
   // it also determines what the shared video preview decodes below. Lifted
@@ -108,8 +117,14 @@ export default function Timeline({
   const edgeScrollRef = useRef(0)
   const playheadRef = useRef(null)
   // Cache probe() results per source so a looping timeline doesn't re-hit
-  // the network (and re-fire setActivePreview) every time playback crosses
-  // into a clip. Keyed by `${dir}/${name}`.
+  // the network every time playback crosses into a clip. Keyed by
+  // `${dir}/${name}` — the probe describes the FILE, so two cuts of one file
+  // share an entry.
+  //
+  // `lastActiveKeyRef` records which key the cache was last filled for, so the
+  // cached-info path can be taken without a second Map lookup's worth of
+  // ceremony. It is deliberately NOT used to skip setActivePreview any more:
+  // see handlePlaybackSelectClip.
   const probeCacheRef = useRef(new Map())
   const lastActiveKeyRef = useRef(null)
 
@@ -279,11 +294,14 @@ export default function Timeline({
   // V1, so whichever of the two is visible and topmost wins, exactly like
   // video track compositing in an NLE.
   //
-  // The exception is an OVERLAY (a V2 clip smaller than V1 — see
-  // overlayMatch.js). There V2 doesn't replace the frame, it's a region
-  // composited onto it, so the shared <video> must keep decoding V1 and the
-  // V2 picture is drawn over it by OverlayPreview in App.jsx.
-  const displayClips = (v2Visible && track2Clips.length > 0 && !hasOverlay)
+  // Two exceptions, and they need the same thing of this line. An OVERLAY (a
+  // V2 clip smaller than V1 — see overlayMatch.js): V2 doesn't replace the
+  // frame, it's a region composited onto it. And V2 COMPARE: V2 covers the
+  // frame but at half opacity, so V1 has to still be there to show through.
+  // Either way the shared <video> must keep decoding V1, and the V2 picture is
+  // drawn over it by OverlayPreview in App.jsx — one element decodes one file,
+  // so seeing both at once always means two elements.
+  const displayClips = (v2Visible && track2Clips.length > 0 && !hasOverlay && !compareEnabled)
     ? track2Clips
     : (v1Visible ? clips : [])
 
@@ -297,11 +315,26 @@ export default function Timeline({
     }
     const dir = clip.sourceDir || 'input'
     const key = `${dir}/${clip.sourceName}`
-    // Skip work entirely if this is already the active preview source.
-    if (lastActiveKeyRef.current === key) return
+    // `clipId` is the identity of the clip actually on screen, and it is why
+    // this no longer early-returns when the SOURCE is unchanged. It used to:
+    // crossing from one cut of a file into the next cut of the SAME file left
+    // activePreview untouched, because the only thing anyone read off it was
+    // the filename and the probe, both of which are per-file.
+    //
+    // OverlayPreview needs more than that. It has to know WHICH cut is playing,
+    // not just which file — a filename can belong to several V1 clips at once,
+    // and every overlay/compare layer paired with one of them then thinks it is
+    // the active one and draws. Layers are absolutely positioned in the same
+    // place, so two half-opacity layers stack into 75% and three into 87.5%,
+    // and the picture on top is whichever V2 clip React happened to mount last.
+    // That is the bug, and it needed an id here to fix.
+    //
+    // The probe is still cached per FILE, so this costs no extra network — only
+    // one setActivePreview per clip boundary, which is already the rate
+    // loadClipIfNeeded calls this at (it gates on clip.id upstream).
     const apply = (info) => {
       lastActiveKeyRef.current = key
-      setActivePreview({ name: clip.sourceName, dir, info })
+      setActivePreview({ name: clip.sourceName, dir, info, clipId: clip.id })
     }
     const cached = probeCacheRef.current.get(key)
     if (cached) { apply(cached); return }
@@ -784,9 +817,26 @@ export default function Timeline({
     return totalDur
   }
 
+  // Snap targets, in the playhead's own domain (seconds along V1). Recomputed
+  // every render rather than memoized because it is one O(clips) pass over an
+  // array this file already walks several times per render, and because a stale
+  // target list would put the playhead somewhere that no longer has a clip edge
+  // — the one failure this feature cannot afford.
+  //
+  // The FOCUSED track supplies the edges, so the toggle answers "snap to what I
+  // am working on" rather than "snap to V1 forever". Reading a V2 clip's
+  // cumulative seconds as a V1 timeline position is only sound because GAP is 0
+  // and both lanes draw from the same origin at the same PPS — see the note on
+  // GAP at the top of this file. `v1TotalSec` is the playhead's own limit, and
+  // it is what keeps a V2 run longer than V1's from offering targets the
+  // playhead can't reach.
+  const v1TotalSec = clips.reduce((sum, c) => sum + clipTotalSec(c), 0)
+  const snapTrackClips = focusedTrack === 2 ? track2Clips : clips
+  const snapList = snapEnabled ? snapTargets(snapTrackClips) : []
+
   function handleTimelineClick(e) {
     const pos = clientXToTimelinePos(e.clientX)
-    if (pos != null) transport.seekTimeline(pos)
+    if (pos != null) transport.seekTimeline(snapPos(pos, snapList, v1TotalSec))
   }
 
   // The clip's start offset on the timeline (sum of clipTotalSec of all
@@ -842,9 +892,14 @@ export default function Timeline({
     ))
   }
 
+  // Snapped for the same reason the click is, and it is the path where snap
+  // earns its keep: a drag reports a position on every pointermove, so without
+  // it landing on an edge means releasing on the exact pixel. Note this snaps
+  // DURING the drag, not on release — the playhead visibly steps from edge to
+  // edge as you move, which is the feedback that tells you snap is on.
   function handlePlayheadDrag(clientX) {
     const pos = clientXToTimelinePos(clientX)
-    if (pos != null) transport.seekTimeline(pos)
+    if (pos != null) transport.seekTimeline(snapPos(pos, snapList, v1TotalSec))
   }
 
   // This card's action bar: the transport clock, the two V2-derived edit
@@ -943,6 +998,12 @@ export default function Timeline({
           onSeekTimeline={transport.seekTimeline}
           displayMode={timeDisplayMode}
           onToggleDisplayMode={onToggleTimeDisplayMode}
+          snapEnabled={snapEnabled}
+          onToggleSnap={() => setSnapEnabled(v => !v)}
+          snapTrackLabel={focusedTrack === 2 ? 'V2' : 'V1'}
+          // Counted from the focused track unconditionally, not from `snapList`,
+          // so the OFF tooltip can promise what turning it on would actually do.
+          snapTargetCount={snapTargets(snapTrackClips).length}
         />
       </div>
       <div className="flex items-center gap-1.5 justify-self-end">
@@ -1046,9 +1107,9 @@ export default function Timeline({
         {/* Last in the row, past the V2 group: it's the only audio render, so
             it sits apart from the two picture renders rather than between
             them. Amber for the same reason — indigo is V1's and teal is V2's,
-            and amber is already the A1 Room Tone toggle's color, so the audio
+            and amber is already the A1 Noise toggle's color, so the audio
             actions read as one family. Shown only when there is something on
-            A1 to render — a loaded track, or A1 Room Tone on (the fill is A1
+            A1 to render — a loaded track, or A1 Noise on (the fill is A1
             content too, and on a sequence with any silence in it that alone
             makes a usable stem; when there is none, the server says so instead
             of writing an empty file) — the same "appears with its track" rule
@@ -1074,7 +1135,7 @@ export default function Timeline({
 
       {/* …and in its place, this card's first row is now the clip edit
           toolbar (Hold, Trim, Duplicate, Reverse, Split, Raise, Speed +
-          A1 Room Tone). It arrives as a ready-made node from App.jsx because
+          A1 Noise). It arrives as a ready-made node from App.jsx because
           every control in it acts on whichever TRACK is focused — clips,
           setters and selection that all live up there. */}
       {toolbar && (
@@ -1162,9 +1223,27 @@ export default function Timeline({
                       />
                     </label>
                   ) : (
+                    /* Three states, written as ONE mutually-exclusive chain rather
+                       than two independent conditions: hidden and compare both want
+                       an opacity class, and two of them on the same element is a
+                       coin toss (equal specificity, so whichever Tailwind emitted
+                       later wins — not whichever is written later here). Hidden
+                       takes priority; it's the stronger statement about the track.
+
+                       Compare gets opacity-50 and NOTHING else — no grayscale, no
+                       pointer-events-none. The lane is echoing how V2 is being
+                       drawn on the preview, and it stays fully editable while it
+                       does, which is exactly the difference between this and the
+                       eye being off. The gutter (V2 label + eye) is left alone for
+                       the same reason `!v2Visible` leaves it alone: dimming the
+                       control you need to click to get back is a trap. */
                     <div
                       onClick={handleTimelineClick}
-                      className={`flex items-stretch bg-neutral-950 px-2 py-1 h-12 cursor-pointer transition-all ${!v2Visible ? 'opacity-35 grayscale pointer-events-none' : ''}`}
+                      className={`flex items-stretch bg-neutral-950 px-2 py-1 h-12 cursor-pointer transition-all ${
+                        !v2Visible
+                          ? 'opacity-35 grayscale pointer-events-none'
+                          : compareEnabled ? 'opacity-50' : ''
+                      }`}
                     >
                       {/* Grouped, not a flat map: V2 Reconstruct emits one clip
                           per range it keeps, and a run of them is ONE clip to the

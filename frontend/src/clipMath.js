@@ -301,6 +301,78 @@ export function clipStartSec(clips, id) {
   return 0
 }
 
+// The timeline positions a snapping playhead is allowed to land on: the START of
+// every clip the user SEES on a lane, plus the end of the lane's run.
+//
+// **Groups, not entries.** A fused run — a Reconstruct result, or a Merge that
+// couldn't collapse — is ONE clip to the user: one box, one name, one ring. So it
+// gets ONE target, at its head. Emitting one per lane entry would drop the
+// playhead inside a box that has no visible edge there, which reads as the snap
+// missing rather than as the snap being precise. This is the same
+// count-groups-not-entries rule the V2 tools and the 1+ shot count follow.
+//
+// **The run's end is a target too**, and it is the one thing here that isn't
+// literally "a clip beginning". Without it the last clip's whole body snaps
+// backwards to its own head and the end of the sequence is simply unreachable
+// while snapping is on — a hole the feature would create rather than a rule it
+// implies. It is also the beginning of the only other thing on the lane (nothing),
+// which is the reading that makes the set consistent.
+//
+// **Lane seconds are directly usable as playhead positions**, with no conversion,
+// and that is a property of the layout rather than a coincidence: both lanes are
+// drawn from the same origin at the same pps and `GAP_PX` is 0, so
+// `px = origin + sec * pps` on either one. That is what lets a V2 clip's start be
+// handed to a playhead that lives in V1's domain and still line up on screen. If a
+// gap between clips is ever reintroduced, this stops being true and every
+// cross-lane target has to be converted through pixels instead.
+export function snapTargets(clips) {
+  const out = []
+  if (!clips || clips.length === 0) return out
+  const groups = fuseGroups(clips)
+  let cursor = 0
+  let gi = 0
+  for (let i = 0; i < clips.length; i++) {
+    // `groups` is in index order with strictly increasing `start`, so one
+    // forward-only pointer is enough — no lookup per clip.
+    if (gi < groups.length && groups[gi].start === i) {
+      out.push(cursor)
+      gi++
+    }
+    cursor += clipTotalSec(clips[i])
+  }
+  out.push(cursor)
+  return out
+}
+
+// The target nearest `pos`, or `pos` untouched when there is nothing to snap to.
+//
+// No threshold, deliberately: "snap is on" means the playhead sits on an edge,
+// full stop, and a radius would make it sit on an edge only sometimes — which is
+// the behavior that feels broken and the one number nobody can pick correctly.
+// Turning the toggle off is how you get a position between edges.
+//
+// `maxSec` exists because the playhead lives in V1's domain: a V2 lane longer than
+// V1 has starts past the end of the program, and the seek would be clamped back to
+// V1's end anyway, so offering them would snap "forward" to a place the playhead
+// can't go. Filtered rather than clamped, so two unreachable targets don't collapse
+// into one duplicate at the end.
+export function snapPos(pos, targets, maxSec = Infinity) {
+  let best = null
+  let bestDist = Infinity
+  for (const t of targets || []) {
+    if (t > maxSec + ROUND_EPSILON) continue
+    const dist = Math.abs(t - pos)
+    // Strictly less: on an exact tie the EARLIER target wins, since targets are
+    // emitted in ascending order. Arbitrary but fixed, so a click exactly between
+    // two clips can't land differently on two identical clicks.
+    if (dist < bestDist) {
+      bestDist = dist
+      best = t
+    }
+  }
+  return best == null ? pos : best
+}
+
 // V1/V2 have no per-clip position — the render concatenates clips end to end —
 // so MOVING a clip means changing its index and nothing else. This is that move,
 // and the single definition of it: the toolbar buttons, ⌥←/⌥→, a drag-and-drop

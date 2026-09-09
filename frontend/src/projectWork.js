@@ -4,7 +4,7 @@
 // App.jsx handleLibraryOpen, which also clears the undo history).
 //
 // What counts as work here, and what deliberately doesn't:
-//   • The three lanes, room tone's switch and its level ARE the work. They are
+//   • The three lanes, A1 Noise's switch and its level ARE the work. They are
 //     the edit decisions, and each one is written to a .nara — so anything that
 //     would come back from a save belongs in the fingerprint.
 //   • `dirty` is normalized away. It means "not yet rendered", so a Render

@@ -2,6 +2,28 @@ import { useState, useEffect } from 'react'
 import { formatTimecode, parseTimecode } from '../../timecode'
 import { roundFrames } from '../../clipMath'
 
+// An upright horseshoe magnet, drawn at the same 13px / 1.8 stroke as
+// Timeline.jsx's EyeIcon so it sits at the weight of the glyph buttons beside
+// it rather than looking like a pasted-in logo. An SVG, not a unicode glyph:
+// there is no magnet character that renders consistently across fonts, and the
+// eye toggles already established that a hand-drawn 13px icon is legible here.
+//
+// The two FILLED blocks are the pole faces, and they are what make this read as
+// a magnet rather than a hook. Checked by rendering, not by eye on the
+// coordinates: the first draft marked the poles with crossing bands instead, and
+// rasterized it read as two plus signs hanging off a U. Solid blocks at the leg
+// ends are unambiguous, and they survive 13px because a filled 3.4-unit square
+// still lands ~2 real pixels wide where a 1.8-unit hairline crossbar greys out.
+function MagnetIcon({ className }) {
+  return (
+    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" className={className}>
+      <path d="M5.5 16V11a6.5 6.5 0 0 1 13 0v5" />
+      <rect x="3.8" y="15.8" width="3.4" height="4" fill="currentColor" stroke="none" />
+      <rect x="16.8" y="15.8" width="3.4" height="4" fill="currentColor" stroke="none" />
+    </svg>
+  )
+}
+
 // This bar is the app's headline program length, so both halves of it are
 // measured on the RENDER's frame grid (Timeline.jsx hands down `fps` =
 // sequenceTargetFps and `totalFrames` = sequenceRenderFrames). `totalDuration`
@@ -11,6 +33,10 @@ export default function TransportBar({
   playing, looping, timelinePos, totalDuration, totalFrames, fps,
   onPlay, onStop, onGoToStart, onGoToEnd, onStepFrames, onToggleLoop, onSeekTimeline,
   displayMode, onToggleDisplayMode,
+  // Snap: constrain a click/drag of the playhead to clip edges on the FOCUSED
+  // track. `snapTrackLabel` is that track's name, for the tooltip only — this bar
+  // doesn't need to know which one it is, only what to call it.
+  snapEnabled = false, onToggleSnap, snapTrackLabel = 'V1', snapTargetCount = 0,
 }) {
   const [editing, setEditing] = useState(false)
   const [editValue, setEditValue] = useState('')
@@ -120,6 +146,35 @@ export default function TransportBar({
           looping ? 'text-indigo-400 bg-indigo-900/50' : 'text-neutral-500 hover:text-white hover:bg-neutral-700'
         } disabled:opacity-40`}
       >⟳</button>
+
+      {/* Snap. A magnet icon (0.73.2 — it was the word SNAP until then), in the
+          exact w-5 h-5 shell and indigo on-state as the loop toggle immediately
+          to its left: the two are the only latching toggles in this row, so they
+          should look like one kind of control, and the border-and-tint pill the
+          text version wore made this read as a different kind. The magnet is the
+          universal NLE sign for this, so it needs no legend the way a lettered
+          button did.
+
+          Indigo because it follows the PLAYHEAD, and red/indigo is the playhead's
+          own colour pair in this app; it is also the only render-neutral thing this
+          bar does, so amber would be a lie. Never disabled by the clip count on the
+          focused track — a lane you are about to fill shouldn't make the toggle
+          flicker in and out — but the tooltip counts the edges so an unexplained
+          no-op can't happen silently. */}
+      <button
+        onClick={onToggleSnap}
+        disabled={disabled}
+        aria-label="Snap playhead to clip edges"
+        aria-pressed={snapEnabled}
+        title={snapEnabled
+          ? `Snap is ON — clicking or dragging the playhead puts it exactly on a ${snapTrackLabel} clip edge (${snapTargetCount} on ${snapTrackLabel} right now). Frame stepping, the timecode field and ⏮/⏭ are unaffected. Turn it off to park between edges`
+          : `Snap the playhead to clip edges on the focused track (${snapTrackLabel}): a click or drag lands on the nearest clip start, or the end of the run. Follows whichever track is focused, so click the V1/V2 gutter label to change it. Affects only clicking and dragging — never frame stepping, the timecode field, or ⏮/⏭`}
+        className={`w-5 h-5 flex items-center justify-center rounded ${
+          snapEnabled ? 'text-indigo-400 bg-indigo-900/50' : 'text-neutral-500 hover:text-white hover:bg-neutral-700'
+        } disabled:opacity-40`}
+      >
+        <MagnetIcon />
+      </button>
 
       <div className="w-px h-3.5 bg-neutral-700 mx-0.5" />
 
