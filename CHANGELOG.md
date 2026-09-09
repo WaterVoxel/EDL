@@ -15,6 +15,37 @@ the day the version file appeared. There are no tags for them and never will be 
 `v0.25.0` is the first real tag. Treat the older entries as a history, not a
 download list.
 
+## 0.74.3 — 2026-09-09
+
+**The number fields in the clip toolbar now match the buttons around them.** Hold's
+duration, Trim's in/out and A1 Noise's dB level were drawn two pixels larger than
+everything else on that row; they are the same size as the buttons now, so the row reads
+as one strip instead of having three taller boxes in it. The ▲▼ arrows beside each field
+are unchanged, and so is the timecode clock down in the transport — that one is read
+while video is playing, so it stays as large as it was.
+
+## 0.74.2 — 2026-09-09
+
+**The word "Move" is gone from the toolbar** — the two teal ◀ ▶ buttons stand on their
+own. They do exactly what they did before, and hovering either one still says the whole
+thing ("Move the selected clip one slot earlier", or the A1 swap when an audio clip is
+selected).
+
+## 0.74.1 — 2026-09-09
+
+**Duplicate, Reverse, Split, Merge and Round Up are now one group in the toolbar.**
+The thin vertical lines that used to sit between them are gone, and the five buttons
+sit closer together than the tools on either side, so they read as one family: each of
+them takes a whole clip — or the whole sequence — and hands back a different
+arrangement of the same footage, with nothing to type in. The dividers still separate
+the *kinds* of tool: Undo, then Hold, then Trim, then the group, then Speed and the
+render-wide toggles at the end.
+
+Move ◀ ▶ moved to sit just after Trim instead of between Duplicate and Reverse — it was
+the one thing standing in the middle of the five, and Trim and Hold on its other side
+are the closest neighbours it has, all three reshaping one clip where it stands. Nothing
+about what any of these buttons does has changed.
+
 ## 0.74.0 — 2026-09-09
 
 **V2 Compare now follows the playhead for the whole length of the timeline, whatever shape the

@@ -1,6 +1,13 @@
 // Numeric input with the same compact ▲/▼ up-down steppers used by the
 // timeline transport's timecode field, replacing the browser-native
 // number-input spinners for a consistent look.
+//
+// The field is `text-[8px]`, matching every button and label in the clip-tool
+// row it lives in (it was 10px until 0.74.3, the one thing in that row drawn at
+// a different size). All three call sites — Hold's duration, Trim's in/out and
+// A1 Noise's dB — sit in that row, so the size belongs here rather than as a
+// per-caller prop. The transport's own timecode field is NOT this component and
+// stays 10px: it is on a different row, and it is read while playing.
 export default function NumericStepper({
   value, onChange, onStep, step = 0.1, min = 0, max = Infinity,
   disabled = false, width = 'w-11', title,
@@ -23,7 +30,7 @@ export default function NumericStepper({
         onChange={e => onChange(e.target.value)}
         disabled={disabled}
         title={title}
-        className={`${width} px-1.5 py-0.5 text-[10px] rounded bg-neutral-950 border border-neutral-700 text-neutral-300 disabled:opacity-50`}
+        className={`${width} px-1.5 py-0.5 text-[8px] rounded bg-neutral-950 border border-neutral-700 text-neutral-300 disabled:opacity-50`}
       />
       <div className="flex flex-col">
         <button

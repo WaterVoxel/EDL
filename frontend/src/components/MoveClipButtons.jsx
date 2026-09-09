@@ -62,7 +62,9 @@ export default function MoveClipButtons({
   return (
     <div className="flex items-center gap-1.5">
       {!selectedClip && bedIndex === -1 && <span className="text-[8px] text-neutral-600">select a clip</span>}
-      <span className="text-[8px] text-neutral-500">Move</span>
+      {/* No "Move" caption (dropped in 0.74.2): the arrows are the label. Both
+          tooltips still spell the whole action out, so nothing is only knowable
+          from a word that isn't drawn. */}
       <div className="flex items-center gap-0.5">
         <button
           onClick={() => apply(-1)}

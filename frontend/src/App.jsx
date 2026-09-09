@@ -2115,12 +2115,15 @@ function AppInner() {
       <TrimForm selectedClip={activeSelectedClip} setClips={setActiveClips} displayMode={timeDisplayMode}
         onFootageLoss={focusedTrack === 1 ? handleFootageLoss : null} />
       <div className="w-px h-3.5 bg-neutral-700" />
-      <DuplicateButton selectedClip={activeSelectedClip} clips={activeClips} setClips={setActiveClips} onSelectId={setActiveSelectedId} />
-      <div className="w-px h-3.5 bg-neutral-700" />
       {/* Reorder without dragging. V2 gets no seek: like clicking a V2 clip, it
           leaves the playhead alone — V1 is the timeline of record. With an audio
           clip selected these move THAT clip along A1, the second tool (with
-          Split) that an A1 selection redirects. */}
+          Split) that an A1 selection redirects.
+
+          It sits before Duplicate rather than after it (it was between Duplicate
+          and Reverse until 0.74.1) so the five whole-clip tools below can be
+          contiguous. Trim and Hold on its other side reshape one clip in place,
+          which is the closest thing to what these do to its position. */}
       <MoveClipButtons
         selectedClip={activeSelectedClip} clips={activeClips} setClips={setActiveClips}
         onSelectId={setActiveSelectedId}
@@ -2128,26 +2131,40 @@ function AppInner() {
         selectedBedIndex={selectedBedIndex} beds={audioBeds} onMoveBed={handleMoveBed}
       />
       <div className="w-px h-3.5 bg-neutral-700" />
-      <ReverseForm selectedClip={activeSelectedClip} setClips={setActiveClips} />
-      <div className="w-px h-3.5 bg-neutral-700" />
-      {/* The other tool an A1 selection redirects: with an audio clip selected,
-          Split cuts that clip instead of the video one. */}
-      <SpliceButton
-        selectedClip={activeSelectedClip} clips={activeClips} setClips={setActiveClips}
-        onSelectId={setActiveSelectedId}
-        selectedBed={selectedBed} selectedBedIndex={selectedBedIndex}
-        setBeds={setAudioBeds} laneClockRef={laneClockRef}
-      />
-      {/* Split's opposite, and next to it on purpose. The only tool that reads
-          more than one selection: activeMergeIds is the primary selection plus
-          whatever was Shift-clicked on the same lane. */}
-      <MergeButton
-        clips={activeClips} setClips={setActiveClips} ids={activeMergeIds}
-        onSelectId={setActiveSelectedId} onMerged={clearMergePicks}
-        selectedBed={selectedBed}
-      />
-      <div className="w-px h-3.5 bg-neutral-700" />
-      <RaiseButton clips={activeClips} setClips={setActiveClips} />
+      {/* ONE group, no dividers inside it: Duplicate, Reverse, Split, Merge and
+          Round Up all take a whole clip (or the whole sequence) and give back a
+          different arrangement of the same footage — nothing to fill in, nothing
+          to type. Dividers between them said "unrelated tool" five times over
+          where the truthful signal is that this is one family; the divider's job
+          in this row is to separate the KINDS of tool, and Split/Merge were
+          already undivided from each other for exactly that reason.
+
+          A wrapper with the tighter `gap-1.5` rather than five bare children,
+          because the row's own `gap-x-3` is the between-groups spacing — the same
+          in/out relationship SpeedForm's internal row has (see its divider
+          comment, which tops its `mx-1.5` up to match). `flex-none` keeps the
+          group from being squeezed when the row wraps. */}
+      <div className="flex items-center gap-1.5 flex-none">
+        <DuplicateButton selectedClip={activeSelectedClip} clips={activeClips} setClips={setActiveClips} onSelectId={setActiveSelectedId} />
+        <ReverseForm selectedClip={activeSelectedClip} setClips={setActiveClips} />
+        {/* The other tool an A1 selection redirects: with an audio clip selected,
+            Split cuts that clip instead of the video one. */}
+        <SpliceButton
+          selectedClip={activeSelectedClip} clips={activeClips} setClips={setActiveClips}
+          onSelectId={setActiveSelectedId}
+          selectedBed={selectedBed} selectedBedIndex={selectedBedIndex}
+          setBeds={setAudioBeds} laneClockRef={laneClockRef}
+        />
+        {/* Split's opposite, and next to it on purpose. The only tool that reads
+            more than one selection: activeMergeIds is the primary selection plus
+            whatever was Shift-clicked on the same lane. */}
+        <MergeButton
+          clips={activeClips} setClips={setActiveClips} ids={activeMergeIds}
+          onSelectId={setActiveSelectedId} onMerged={clearMergePicks}
+          selectedBed={selectedBed}
+        />
+        <RaiseButton clips={activeClips} setClips={setActiveClips} />
+      </div>
       <div className="w-px h-3.5 bg-neutral-700" />
       <SpeedForm
         selectedClip={activeSelectedClip}
